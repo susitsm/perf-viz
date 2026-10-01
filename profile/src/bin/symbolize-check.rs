@@ -23,20 +23,36 @@ struct Cli {
 
 fn main() {
     let cli = Cli::parse();
-    let (file, also, mode) = (cli.addrs, cli.also, if cli.no_dwarf { DwarfMode::Never } else { DwarfMode::Auto });
+    let (file, also, mode) = (
+        cli.addrs,
+        cli.also,
+        if cli.no_dwarf {
+            DwarfMode::Never
+        } else {
+            DwarfMode::Auto
+        },
+    );
     let mut by_module: BTreeMap<PathBuf, Vec<u64>> = BTreeMap::new();
     for l in fs::read_to_string(&file).unwrap().lines() {
         if let Some((p, a)) = l.split_once('\t') {
-            by_module.entry(p.into()).or_default().push(u64::from_str_radix(a, 16).unwrap());
+            by_module
+                .entry(p.into())
+                .or_default()
+                .push(u64::from_str_radix(a, 16).unwrap());
         }
     }
     for elf in also {
         let mut v = Vec::new();
         if let Ok(data) = fs::read(&elf) {
-            if let Some(text) = object::File::parse(&*data).ok().and_then(|o| o.section_by_name(".text").map(|s| (s.address(), s.size()))) {
+            if let Some(text) = object::File::parse(&*data)
+                .ok()
+                .and_then(|o| o.section_by_name(".text").map(|s| (s.address(), s.size())))
+            {
                 let mut x = 0x9E3779B97F4A7C15u64;
                 for _ in 0..2000 {
-                    x ^= x << 13; x ^= x >> 7; x ^= x << 17;
+                    x ^= x << 13;
+                    x ^= x >> 7;
+                    x ^= x << 17;
                     v.push(text.0 + x % text.1);
                 }
             }
@@ -49,9 +65,13 @@ fn main() {
 
     let mut mods: Vec<_> = by_module.into_iter().collect();
     mods.sort_by_key(|(_, v)| std::cmp::Reverse(v.len()));
-    let (mut n_full, mut n_sym, mut n_raw, mut addrs_total, mut unresolved_total) = (0, 0, 0, 0usize, 0usize);
+    let (mut n_full, mut n_sym, mut n_raw, mut addrs_total, mut unresolved_total) =
+        (0, 0, 0, 0usize, 0usize);
     let t_all = Instant::now();
-    println!("{:<44} {:>7}  {:<12} {:>10} {:>9}  notes", "module", "addrs", "level", "unresolved", "time");
+    println!(
+        "{:<44} {:>7}  {:<12} {:>10} {:>9}  notes",
+        "module", "addrs", "level", "unresolved", "time"
+    );
     for (path, mut addrs) in mods {
         addrs.sort_unstable();
         addrs.dedup();
@@ -66,18 +86,38 @@ fn main() {
         }
         addrs_total += addrs.len();
         unresolved_total += r.unresolved;
-        let with_line = r.frames.iter().filter(|f| f.iter().any(|x| x.line.is_some())).count();
+        let with_line = r
+            .frames
+            .iter()
+            .filter(|f| f.iter().any(|x| x.line.is_some()))
+            .count();
         let inl = r.frames.iter().map(|f| f.len() - 1).sum::<usize>();
         println!(
             "{:<44.44} {:>7}  {:<12} {:>10} {:>8.3}s  {}{}",
-            path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default(),
+            path.file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_default(),
             addrs.len(),
             format!("{:?}", r.level),
             r.unresolved,
             secs,
-            if r.level == Level::Full { format!("lines {with_line}, +{inl} inlined frames; ") } else { String::new() },
-            r.notes.first().cloned().unwrap_or_else(|| cap.map(|c| format!("dwarf: embedded={} separate={:?}", c.has_embedded_dwarf, c.separate_debug_file)).unwrap_or_default()),
+            if r.level == Level::Full {
+                format!("lines {with_line}, +{inl} inlined frames; ")
+            } else {
+                String::new()
+            },
+            r.notes.first().cloned().unwrap_or_else(|| cap
+                .map(|c| format!(
+                    "dwarf: embedded={} separate={:?}",
+                    c.has_embedded_dwarf, c.separate_debug_file
+                ))
+                .unwrap_or_default()),
         );
     }
-    println!("\n{} modules: {n_full} full (DWARF), {n_sym} symbols-only, {n_raw} raw | {addrs_total} addresses, {unresolved_total} unresolved ({:.2}%) | {:.2}s total", n_full + n_sym + n_raw, 100.0 * unresolved_total as f64 / addrs_total as f64, t_all.elapsed().as_secs_f64());
+    println!(
+        "\n{} modules: {n_full} full (DWARF), {n_sym} symbols-only, {n_raw} raw | {addrs_total} addresses, {unresolved_total} unresolved ({:.2}%) | {:.2}s total",
+        n_full + n_sym + n_raw,
+        100.0 * unresolved_total as f64 / addrs_total as f64,
+        t_all.elapsed().as_secs_f64()
+    );
 }

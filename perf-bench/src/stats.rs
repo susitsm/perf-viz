@@ -63,7 +63,9 @@ impl Stats {
                     self.stack_sum = self.stack_sum.wrapping_add(sum_words(d));
                 }
             }
-            self.user_reg0_sum = self.user_reg0_sum.wrapping_add(s.user_regs.as_ref().and_then(|r| r.get(0)).unwrap_or(0));
+            self.user_reg0_sum = self
+                .user_reg0_sum
+                .wrapping_add(s.user_regs.as_ref().and_then(|r| r.get(0)).unwrap_or(0));
         }
     }
 

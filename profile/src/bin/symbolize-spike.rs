@@ -12,7 +12,10 @@
 use clap::Parser;
 use std::{collections::BTreeMap, fs, path::PathBuf, time::Instant};
 
-use blazesym::symbolize::{Input, Symbolized, Symbolizer, source::{Elf, Source}};
+use blazesym::symbolize::{
+    Input, Symbolized, Symbolizer,
+    source::{Elf, Source},
+};
 
 #[derive(Default, Clone, Copy, Debug)]
 struct Out {
@@ -22,10 +25,19 @@ struct Out {
 }
 
 fn blaze(path: &PathBuf, addrs: &[u64]) -> Out {
-    let sym = Symbolizer::builder().enable_code_info(true).enable_inlined_fns(true).enable_demangling(true).build();
+    let sym = Symbolizer::builder()
+        .enable_code_info(true)
+        .enable_inlined_fns(true)
+        .enable_demangling(true)
+        .build();
     let mut o = Out::default();
-    let Ok(res) = sym.symbolize(&Source::Elf(Elf::new(path)), Input::VirtOffset(addrs)) else { return o };
-    let show = std::env::var("SHOW_UNRESOLVED").ok().and_then(|v| v.parse::<usize>().ok()).unwrap_or(0);
+    let Ok(res) = sym.symbolize(&Source::Elf(Elf::new(path)), Input::VirtOffset(addrs)) else {
+        return o;
+    };
+    let show = std::env::var("SHOW_UNRESOLVED")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(0);
     let mut shown = 0;
     for (a, r) in addrs.iter().zip(res) {
         if matches!(r, Symbolized::Unknown(_)) && shown < show {
@@ -43,7 +55,9 @@ fn blaze(path: &PathBuf, addrs: &[u64]) -> Out {
 
 fn a2l(path: &PathBuf, addrs: &[u64]) -> Out {
     let mut o = Out::default();
-    let Ok(loader) = addr2line::Loader::new(path) else { return o };
+    let Ok(loader) = addr2line::Loader::new(path) else {
+        return o;
+    };
     for &a in addrs {
         let mut any = false;
         let mut line = false;
@@ -68,7 +82,11 @@ fn a2l(path: &PathBuf, addrs: &[u64]) -> Out {
 fn rss_hwm_mb() -> f64 {
     fs::read_to_string("/proc/self/status")
         .ok()
-        .and_then(|s| s.lines().find(|l| l.starts_with("VmHWM")).and_then(|l| l.split_whitespace().nth(1)?.parse::<f64>().ok()))
+        .and_then(|s| {
+            s.lines()
+                .find(|l| l.starts_with("VmHWM"))
+                .and_then(|l| l.split_whitespace().nth(1)?.parse::<f64>().ok())
+        })
         .unwrap_or(0.0)
         / 1024.0
 }
@@ -101,7 +119,10 @@ struct Cli {
 fn main() {
     let cli = Cli::parse();
     let synthetic: Option<(PathBuf, usize)> = cli.synthetic.zip(cli.count);
-    let file = cli.addrs.map(|p| p.display().to_string()).unwrap_or_default();
+    let file = cli
+        .addrs
+        .map(|p| p.display().to_string())
+        .unwrap_or_default();
     let (engine, threads, only, limit) = (cli.engine, cli.threads, cli.only, cli.limit);
     let mut by_module: BTreeMap<PathBuf, Vec<u64>> = BTreeMap::new();
     if let Some((elf, count)) = &synthetic {
@@ -113,16 +134,27 @@ fn main() {
         let mut x = 0x9E3779B97F4A7C15u64;
         let v = by_module.entry(elf.clone()).or_default();
         for _ in 0..*count {
-            x ^= x << 13; x ^= x >> 7; x ^= x << 17;
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
             v.push(base + x % len);
         }
     }
     for l in fs::read_to_string(&file).unwrap_or_default().lines() {
         if let Some((p, a)) = l.split_once('\t') {
-            by_module.entry(p.into()).or_default().push(u64::from_str_radix(a, 16).unwrap());
+            by_module
+                .entry(p.into())
+                .or_default()
+                .push(u64::from_str_radix(a, 16).unwrap());
         }
     }
-    let mut mods: Vec<_> = by_module.into_iter().filter(|(p, _)| only.as_ref().is_none_or(|o| p.to_string_lossy().contains(o.as_str()))).collect();
+    let mut mods: Vec<_> = by_module
+        .into_iter()
+        .filter(|(p, _)| {
+            only.as_ref()
+                .is_none_or(|o| p.to_string_lossy().contains(o.as_str()))
+        })
+        .collect();
     mods.sort_by_key(|(_, v)| std::cmp::Reverse(v.len()));
     let total: usize = mods.iter().map(|(_, v)| v.len().min(limit)).sum();
     println!("engine {engine}, {} modules, {total} addresses", mods.len());
@@ -147,7 +179,11 @@ fn main() {
                         let path = path;
                         s.spawn(move || {
                             let t = Instant::now();
-                            let o = if engine == "addr2line" { a2l(path, c) } else { blaze(path, c) };
+                            let o = if engine == "addr2line" {
+                                a2l(path, c)
+                            } else {
+                                blaze(path, c)
+                            };
                             (o, t.elapsed().as_secs_f64())
                         })
                     })
@@ -155,15 +191,31 @@ fn main() {
                 hs.into_iter().map(|h| h.join().unwrap()).collect()
             });
             let secs = t.elapsed().as_secs_f64();
-            let o = outs.iter().fold(Out::default(), |a, (b, _)| Out { resolved: a.resolved + b.resolved, with_line: a.with_line + b.with_line, inline_frames: a.inline_frames + b.inline_frames });
+            let o = outs.iter().fold(Out::default(), |a, (b, _)| Out {
+                resolved: a.resolved + b.resolved,
+                with_line: a.with_line + b.with_line,
+                inline_frames: a.inline_frames + b.inline_frames,
+            });
             let slowest = outs.iter().map(|x| x.1).fold(0.0, f64::max);
             println!(
                 "{name:<40.40} {:>6} addrs  {secs:7.2}s (slowest thread {slowest:.2}s) {:>7.0} addr/s | resolved {:>5.1}%, with line {:>5.1}%, +{:.2} inline frames/addr | peak RSS so far {:.0} MB",
-                addrs.len(), addrs.len() as f64 / secs, 100.0 * o.resolved as f64 / addrs.len() as f64, 100.0 * o.with_line as f64 / addrs.len() as f64, o.inline_frames as f64 / addrs.len() as f64, rss_hwm_mb()
+                addrs.len(),
+                addrs.len() as f64 / secs,
+                100.0 * o.resolved as f64 / addrs.len() as f64,
+                100.0 * o.with_line as f64 / addrs.len() as f64,
+                o.inline_frames as f64 / addrs.len() as f64,
+                rss_hwm_mb()
             );
-            sum = Out { resolved: sum.resolved + o.resolved, with_line: sum.with_line + o.with_line, inline_frames: sum.inline_frames + o.inline_frames };
+            sum = Out {
+                resolved: sum.resolved + o.resolved,
+                with_line: sum.with_line + o.with_line,
+                inline_frames: sum.inline_frames + o.inline_frames,
+            };
         }
-        println!("total for top 6 modules: {:.2}s", t_all.elapsed().as_secs_f64());
+        println!(
+            "total for top 6 modules: {:.2}s",
+            t_all.elapsed().as_secs_f64()
+        );
         let _ = sum;
     }
 }

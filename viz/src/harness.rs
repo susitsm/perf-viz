@@ -8,10 +8,10 @@
 //! `--load-screenshot`) inject pointer input in window coordinates (points: screenshot pixels
 //! divided by the scale factor) and save a screenshot afterwards.
 
-#[cfg(any(test, feature = "scripted"))]
-pub use scripted::Harness;
 #[cfg(not(any(test, feature = "scripted")))]
 pub use disabled::Harness;
+#[cfg(any(test, feature = "scripted"))]
+pub use scripted::Harness;
 
 #[cfg(not(any(test, feature = "scripted")))]
 mod disabled {
@@ -29,7 +29,13 @@ mod disabled {
             Harness
         }
         pub fn configure(&self, _ctx: &egui::Context) {}
-        pub fn raw_input_hook(&mut self, _raw: &mut egui::RawInput, _screen_ready: bool, _frames: u32) {}
+        pub fn raw_input_hook(
+            &mut self,
+            _raw: &mut egui::RawInput,
+            _screen_ready: bool,
+            _frames: u32,
+        ) {
+        }
         pub fn take_open(&mut self) -> Option<PathBuf> {
             None
         }
@@ -108,13 +114,16 @@ mod scripted {
     impl Harness {
         pub fn from_cli(cli: &Cli) -> Self {
             let mut files = Vec::new();
-            let steps: VecDeque<Step> = cli.script
+            let steps: VecDeque<Step> = cli
+                .script
                 .steps()
                 .iter()
                 .map(|s| match s {
                     ScriptStep::Click(p) => Step::Click(pos2(p.x, p.y)),
                     ScriptStep::Hover(p) => Step::Hover(pos2(p.x, p.y)),
-                    ScriptStep::Drag(d) => Step::Drag(pos2(d.from.x, d.from.y), pos2(d.to.x, d.to.y)),
+                    ScriptStep::Drag(d) => {
+                        Step::Drag(pos2(d.from.x, d.from.y), pos2(d.to.x, d.to.y))
+                    }
                     ScriptStep::Pause(secs) => Step::Pause((secs * 1000.0) as u64),
                     ScriptStep::TuneWindow => Step::TuneWindow,
                     ScriptStep::Open(p) => {
@@ -126,7 +135,13 @@ mod scripted {
             Harness {
                 screenshot: cli.script.screenshot.clone(),
                 load_screenshot: cli.script.load_screenshot(),
-                script: (!steps.is_empty()).then(|| Script { files, steps, current: None, wait_until: Instant::now(), finished: None }),
+                script: (!steps.is_empty()).then(|| Script {
+                    files,
+                    steps,
+                    current: None,
+                    wait_until: Instant::now(),
+                    finished: None,
+                }),
                 injected_open: None,
                 tune_window: false,
                 requested: false,
@@ -143,7 +158,12 @@ mod scripted {
         }
 
         /// Inject the next scripted pointer event, once the screen has been drawn a few times.
-        pub fn raw_input_hook(&mut self, raw: &mut egui::RawInput, screen_ready: bool, frames: u32) {
+        pub fn raw_input_hook(
+            &mut self,
+            raw: &mut egui::RawInput,
+            screen_ready: bool,
+            frames: u32,
+        ) {
             if !screen_ready || frames < 5 {
                 return;
             }
@@ -166,27 +186,60 @@ mod scripted {
                         sc.wait_until = pause(300);
                     }
                     Some(step) => {
-                        let (Step::Click(pos) | Step::Hover(pos) | Step::Drag(pos, _)) = step else { unreachable!() };
+                        let (Step::Click(pos) | Step::Hover(pos) | Step::Drag(pos, _)) = step
+                        else {
+                            unreachable!()
+                        };
                         raw.events.push(egui::Event::PointerMoved(pos));
                         // Let the hover register before pressing; a hover step just pauses.
-                        sc.current = (!matches!(step, Step::Hover(_))).then_some(Doing { step, stage: 0 });
+                        sc.current =
+                            (!matches!(step, Step::Hover(_))).then_some(Doing { step, stage: 0 });
                         sc.wait_until = pause(if sc.current.is_some() { 150 } else { 350 });
                     }
                 },
-                Some(Doing { step: step @ Step::Click(pos), stage: n }) => {
-                    raw.events.push(egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed: n == 0, modifiers: mods });
-                    sc.current = if n == 0 { Some(Doing { step, stage: 1 }) } else { None };
+                Some(Doing {
+                    step: step @ Step::Click(pos),
+                    stage: n,
+                }) => {
+                    raw.events.push(egui::Event::PointerButton {
+                        pos,
+                        button: egui::PointerButton::Primary,
+                        pressed: n == 0,
+                        modifiers: mods,
+                    });
+                    sc.current = if n == 0 {
+                        Some(Doing { step, stage: 1 })
+                    } else {
+                        None
+                    };
                     sc.wait_until = pause(if n == 0 { 80 } else { 350 });
                 }
-                Some(Doing { step: step @ Step::Drag(from, to), stage: n }) => {
+                Some(Doing {
+                    step: step @ Step::Drag(from, to),
+                    stage: n,
+                }) => {
                     let mid = pos2((from.x + to.x) / 2.0, (from.y + to.y) / 2.0);
                     raw.events.push(match n {
-                        0 => egui::Event::PointerButton { pos: from, button: egui::PointerButton::Primary, pressed: true, modifiers: mods },
+                        0 => egui::Event::PointerButton {
+                            pos: from,
+                            button: egui::PointerButton::Primary,
+                            pressed: true,
+                            modifiers: mods,
+                        },
                         1 => egui::Event::PointerMoved(mid),
                         2 => egui::Event::PointerMoved(to),
-                        _ => egui::Event::PointerButton { pos: to, button: egui::PointerButton::Primary, pressed: false, modifiers: mods },
+                        _ => egui::Event::PointerButton {
+                            pos: to,
+                            button: egui::PointerButton::Primary,
+                            pressed: false,
+                            modifiers: mods,
+                        },
                     });
-                    sc.current = if n >= 3 { None } else { Some(Doing { step, stage: n + 1 }) };
+                    sc.current = if n >= 3 {
+                        None
+                    } else {
+                        Some(Doing { step, stage: n + 1 })
+                    };
                     sc.wait_until = pause(if n >= 3 { 350 } else { 80 });
                 }
                 Some(_) => sc.current = None,
@@ -210,23 +263,32 @@ mod scripted {
 
         /// What carries over when another file is opened: the pending screenshot, not the script.
         pub fn after_open(&mut self) -> Harness {
-            Harness { screenshot: self.screenshot.take(), ..Harness::default() }
+            Harness {
+                screenshot: self.screenshot.take(),
+                ..Harness::default()
+            }
         }
 
         /// On a settled screen (loaded, welcome, or the tuning question): once the script has run (and
         /// the tooltip delay passed), or after a few frames without a script, save the screenshot and quit.
         pub fn poll_screen(&mut self, ctx: &egui::Context, frames: u32) {
-            let Some(path) = self.screenshot.clone() else { return };
+            let Some(path) = self.screenshot.clone() else {
+                return;
+            };
             let ready = match &self.script {
                 None => frames == 8,
-                Some(sc) => sc.finished.is_some_and(|t| t.elapsed() > Duration::from_millis(900)),
+                Some(sc) => sc
+                    .finished
+                    .is_some_and(|t| t.elapsed() > Duration::from_millis(900)),
             };
             self.poll(ctx, &path, ready);
         }
 
         /// On the loading screen: save `--load-screenshot` once that many seconds have passed.
         pub fn poll_loading(&mut self, ctx: &egui::Context, elapsed_secs: f32) {
-            let Some(shot) = self.load_screenshot.clone() else { return };
+            let Some(shot) = self.load_screenshot.clone() else {
+                return;
+            };
             self.poll(ctx, &shot.path, elapsed_secs > shot.after_secs);
         }
 
@@ -236,7 +298,15 @@ mod scripted {
                 self.requested = true;
                 ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(egui::UserData::default()));
             }
-            let shot = ctx.input(|i| i.events.iter().find_map(|e| if let egui::Event::Screenshot { image, .. } = e { Some(image.clone()) } else { None }));
+            let shot = ctx.input(|i| {
+                i.events.iter().find_map(|e| {
+                    if let egui::Event::Screenshot { image, .. } = e {
+                        Some(image.clone())
+                    } else {
+                        None
+                    }
+                })
+            });
             if let Some(img) = shot {
                 let [w, h] = img.size;
                 let mut buf = Vec::with_capacity(w * h * 4);

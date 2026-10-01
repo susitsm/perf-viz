@@ -18,11 +18,29 @@ use crate::Result;
 
 #[derive(Clone, Debug)]
 pub enum EventKind {
-    Fork { pid: i32, ppid: i32 },
+    Fork {
+        pid: i32,
+        ppid: i32,
+    },
     /// `exec: true` means the process replaced its address space.
-    Comm { pid: i32, tid: i32, name: Box<str>, exec: bool },
-    Mmap { pid: i32, addr: u64, len: u64, pgoff: u64, prot: u32, path: Box<str> },
-    Exit { pid: i32, tid: i32 },
+    Comm {
+        pid: i32,
+        tid: i32,
+        name: Box<str>,
+        exec: bool,
+    },
+    Mmap {
+        pid: i32,
+        addr: u64,
+        len: u64,
+        pgoff: u64,
+        prot: u32,
+        path: Box<str>,
+    },
+    Exit {
+        pid: i32,
+        tid: i32,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -37,8 +55,19 @@ impl Event {
     pub fn sort_key(&self) -> (u64, u8, i32, u64, u64, &str) {
         match &self.kind {
             EventKind::Fork { pid, ppid } => (self.time, 0, *pid, *ppid as u64, 0, ""),
-            EventKind::Comm { pid, tid, name, exec } => (self.time, 1, *pid, *tid as u64, *exec as u64, name),
-            EventKind::Mmap { pid, addr, len, path, .. } => (self.time, 2, *pid, *addr, *len, path),
+            EventKind::Comm {
+                pid,
+                tid,
+                name,
+                exec,
+            } => (self.time, 1, *pid, *tid as u64, *exec as u64, name),
+            EventKind::Mmap {
+                pid,
+                addr,
+                len,
+                path,
+                ..
+            } => (self.time, 2, *pid, *addr, *len, path),
             EventKind::Exit { pid, tid } => (self.time, 3, *pid, *tid as u64, 0, ""),
         }
     }
@@ -52,14 +81,44 @@ pub fn event_of(ev: &EventRecord<'_>, time: u64) -> Option<Event> {
         EventRecord::Mmap2(m) if m.protection & PROT_EXEC != 0 => {
             let p = m.path.as_slice();
             let p = String::from_utf8_lossy(&p);
-            Event { time, kind: EventKind::Mmap { pid: m.pid, addr: m.address, len: m.length, pgoff: m.page_offset, prot: m.protection, path: p.trim_end_matches('\0').into() } }
+            Event {
+                time,
+                kind: EventKind::Mmap {
+                    pid: m.pid,
+                    addr: m.address,
+                    len: m.length,
+                    pgoff: m.page_offset,
+                    prot: m.protection,
+                    path: p.trim_end_matches('\0').into(),
+                },
+            }
         }
-        EventRecord::Fork(f) => Event { time: f.timestamp, kind: EventKind::Fork { pid: f.pid, ppid: f.ppid } },
-        EventRecord::Exit(f) => Event { time: f.timestamp, kind: EventKind::Exit { pid: f.pid, tid: f.tid } },
+        EventRecord::Fork(f) => Event {
+            time: f.timestamp,
+            kind: EventKind::Fork {
+                pid: f.pid,
+                ppid: f.ppid,
+            },
+        },
+        EventRecord::Exit(f) => Event {
+            time: f.timestamp,
+            kind: EventKind::Exit {
+                pid: f.pid,
+                tid: f.tid,
+            },
+        },
         EventRecord::Comm(c) => {
             let n = c.name.as_slice();
             let name = String::from_utf8_lossy(&n);
-            Event { time, kind: EventKind::Comm { pid: c.pid, tid: c.tid, name: name.trim_end_matches('\0').into(), exec: c.is_execve } }
+            Event {
+                time,
+                kind: EventKind::Comm {
+                    pid: c.pid,
+                    tid: c.tid,
+                    name: name.trim_end_matches('\0').into(),
+                    exec: c.is_execve,
+                },
+            }
         }
         _ => return None,
     })
@@ -121,7 +180,13 @@ fn collect<T: byteorder::ByteOrder>(meta: &mut Meta, ctx: &Ctx, buf: &[u8]) -> R
         match ev {
             EventRecord::Sample(s) => {
                 let has_stack = s.user_regs.is_some() && s.user_stack.is_some();
-                meta.samples.push(SampleRow { time: s.timestamp.unwrap_or(time), pid: s.pid.unwrap_or(-1), tid: s.tid.unwrap_or(-1), ip: s.ip.unwrap_or(0), has_stack });
+                meta.samples.push(SampleRow {
+                    time: s.timestamp.unwrap_or(time),
+                    pid: s.pid.unwrap_or(-1),
+                    tid: s.tid.unwrap_or(-1),
+                    ip: s.ip.unwrap_or(0),
+                    has_stack,
+                });
             }
             EventRecord::Lost(l) => {
                 meta.lost_records += 1;
@@ -134,10 +199,20 @@ fn collect<T: byteorder::ByteOrder>(meta: &mut Meta, ctx: &Ctx, buf: &[u8]) -> R
 }
 
 /// Run pass 1 over `path`.
-pub fn read_meta(src: &Source, path: &Path, cfg: Config, opts: stream::Options) -> Result<(Meta, Report)> {
-    let (states, report) = stream::stream_open::<Meta, _>(&src.file, &src.sec, path, cfg, opts, |m, buf| {
-        if src.sec.big_endian { collect::<BigEndian>(m, &src.ctx, buf) } else { collect::<LittleEndian>(m, &src.ctx, buf) }
-    })?;
+pub fn read_meta(
+    src: &Source,
+    path: &Path,
+    cfg: Config,
+    opts: stream::Options,
+) -> Result<(Meta, Report)> {
+    let (states, report) =
+        stream::stream_open::<Meta, _>(&src.file, &src.sec, path, cfg, opts, |m, buf| {
+            if src.sec.big_endian {
+                collect::<BigEndian>(m, &src.ctx, buf)
+            } else {
+                collect::<LittleEndian>(m, &src.ctx, buf)
+            }
+        })?;
     let mut total = Meta::default();
     for s in states {
         total.merge(s);
@@ -158,14 +233,32 @@ impl Source {
     pub fn open(path: &Path) -> Result<Source> {
         let (file, sec) = perf_bench::split::open(path)?;
         let reader = PerfFileReader::parse_file(&file)?;
-        let ctx = Ctx::new(reader.perf_file.event_attributes(), reader.perf_file.endian())?;
+        let ctx = Ctx::new(
+            reader.perf_file.event_attributes(),
+            reader.perf_file.endian(),
+        )?;
         use linux_perf_event_reader::{HardwareEventId, PerfEventType, SoftwareCounterType};
-        let period_unit = match reader.perf_file.event_attributes().first().map(|a| &a.attr.type_) {
-            Some(PerfEventType::Hardware(HardwareEventId::CpuCycles | HardwareEventId::RefCpuCycles, _)) => "cycles",
-            Some(PerfEventType::Software(SoftwareCounterType::CpuClock | SoftwareCounterType::TaskClock)) => "ns",
+        let period_unit = match reader
+            .perf_file
+            .event_attributes()
+            .first()
+            .map(|a| &a.attr.type_)
+        {
+            Some(PerfEventType::Hardware(
+                HardwareEventId::CpuCycles | HardwareEventId::RefCpuCycles,
+                _,
+            )) => "cycles",
+            Some(PerfEventType::Software(
+                SoftwareCounterType::CpuClock | SoftwareCounterType::TaskClock,
+            )) => "ns",
             _ => "events",
         };
         drop(reader);
-        Ok(Source { file, sec, ctx, period_unit })
+        Ok(Source {
+            file,
+            sec,
+            ctx,
+            period_unit,
+        })
     }
 }

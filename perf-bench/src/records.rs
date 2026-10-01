@@ -20,7 +20,10 @@ pub struct Record<'a> {
 /// Call `f` for every record in `chunk` (which must be made of whole records).
 /// `PERF_RECORD_FINISHED_ROUND` markers are skipped, as the stock reader does, and the payload
 /// that follows an `AUXTRACE` record is stepped over.
-pub fn for_each_record<T: ByteOrder>(chunk: &[u8], mut f: impl FnMut(Record<'_>) -> Result<()>) -> Result<()> {
+pub fn for_each_record<T: ByteOrder>(
+    chunk: &[u8],
+    mut f: impl FnMut(Record<'_>) -> Result<()>,
+) -> Result<()> {
     let mut off = 0;
     while off < chunk.len() {
         let ty = T::read_u32(&chunk[off..]);
@@ -34,7 +37,12 @@ pub fn for_each_record<T: ByteOrder>(chunk: &[u8], mut f: impl FnMut(Record<'_>)
         if ty == PERF_RECORD_FINISHED_ROUND {
             continue;
         }
-        f(Record { ty, misc, size, body })?;
+        f(Record {
+            ty,
+            misc,
+            size,
+            body,
+        })?;
     }
     Ok(())
 }

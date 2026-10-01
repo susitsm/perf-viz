@@ -94,8 +94,11 @@ fn parse_reference(reader: impl BufRead) -> HashMap<(i32, u64), Vec<Vec<u64>>> {
             continue;
         }
         if let Some((ids, rest)) = t.split_once(char::is_whitespace) {
-            if let (Some((_pid, tid)), Some(time)) = (ids.split_once('/'), rest.trim().strip_suffix(':')) {
-                if let (Ok(tid), Some((s, us))) = (tid.parse::<i32>(), time.trim().split_once('.')) {
+            if let (Some((_pid, tid)), Some(time)) =
+                (ids.split_once('/'), rest.trim().strip_suffix(':'))
+            {
+                if let (Ok(tid), Some((s, us))) = (tid.parse::<i32>(), time.trim().split_once('.'))
+                {
                     flush(&mut key, &mut frames);
                     if let (Ok(s), Ok(us)) = (s.parse::<u64>(), us.parse::<u64>()) {
                         key = Some((tid, s * 1_000_000 + us));
@@ -146,7 +149,15 @@ struct Cli {
 }
 
 fn main() -> perf_profile::Result<()> {
-    let Cli { path, reference: reference_path, examples, dump_addrs, mut dump_bad0, windows, window_ms } = Cli::parse();
+    let Cli {
+        path,
+        reference: reference_path,
+        examples,
+        dump_addrs,
+        mut dump_bad0,
+        windows,
+        window_ms,
+    } = Cli::parse();
     let mut uniq: std::collections::HashSet<(PathBuf, u64)> = Default::default();
 
     // Reference: perf script output, from a file or generated now.
@@ -155,19 +166,40 @@ fn main() -> perf_profile::Result<()> {
         Some(p) => parse_reference(BufReader::new(File::open(p)?)),
         None => {
             // Time span of the recording, from the header.
-            let hdr = Command::new("perf").args(["report", "--stdio", "--header-only", "-i"]).arg(&path).output()?;
+            let hdr = Command::new("perf")
+                .args(["report", "--stdio", "--header-only", "-i"])
+                .arg(&path)
+                .output()?;
             let hdr = String::from_utf8_lossy(&hdr.stdout);
-            let get = |k: &str| hdr.lines().find(|l| l.contains(k)).and_then(|l| l.split(':').nth(1)?.trim().parse::<f64>().ok());
-            let (t0, t1) = (get("time of first sample").ok_or("no first-sample time")?, get("time of last sample").ok_or("no last-sample time")?);
+            let get = |k: &str| {
+                hdr.lines()
+                    .find(|l| l.contains(k))
+                    .and_then(|l| l.split(':').nth(1)?.trim().parse::<f64>().ok())
+            };
+            let (t0, t1) = (
+                get("time of first sample").ok_or("no first-sample time")?,
+                get("time of last sample").ok_or("no last-sample time")?,
+            );
             let step = (t1 - t0) / windows as f64;
             let parts: Vec<_> = std::thread::scope(|sc| {
                 let hs: Vec<_> = (0..windows)
                     .map(|i| {
-                        let (a, b) = (t0 + step * i as f64, t0 + step * i as f64 + window_ms as f64 / 1000.0);
+                        let (a, b) = (
+                            t0 + step * i as f64,
+                            t0 + step * i as f64 + window_ms as f64 / 1000.0,
+                        );
                         let path = &path;
                         sc.spawn(move || {
                             let mut child = Command::new("perf")
-                                .args(["script", "--no-inline", "-F", "pid,tid,time,ip", "--time", &format!("{a:.6},{b:.6}"), "-i"])
+                                .args([
+                                    "script",
+                                    "--no-inline",
+                                    "-F",
+                                    "pid,tid,time,ip",
+                                    "--time",
+                                    &format!("{a:.6},{b:.6}"),
+                                    "-i",
+                                ])
                                 .arg(path)
                                 .stdout(Stdio::piped())
                                 .stderr(Stdio::null())
@@ -190,8 +222,20 @@ fn main() -> perf_profile::Result<()> {
             all
         }
     };
-    let (ref_frames, ref_empty) = reference.values().flatten().fold((0usize, 0usize), |(f, e), v| (f + v.len(), e + v.is_empty() as usize));
-    println!("reference: {} (tid,time) keys, {} stacks, {} frames ({} empty stacks) from perf script in {:.1}s", reference.len(), reference.values().map(Vec::len).sum::<usize>(), ref_frames, ref_empty, t.elapsed().as_secs_f64());
+    let (ref_frames, ref_empty) = reference
+        .values()
+        .flatten()
+        .fold((0usize, 0usize), |(f, e), v| {
+            (f + v.len(), e + v.is_empty() as usize)
+        });
+    println!(
+        "reference: {} (tid,time) keys, {} stacks, {} frames ({} empty stacks) from perf script in {:.1}s",
+        reference.len(),
+        reference.values().map(Vec::len).sum::<usize>(),
+        ref_frames,
+        ref_empty,
+        t.elapsed().as_secs_f64()
+    );
 
     let cache = BinaryCache::default();
     let mut procs: HashMap<i32, Proc> = HashMap::new();
@@ -206,13 +250,20 @@ fn main() -> perf_profile::Result<()> {
     let mut unwind_time = std::time::Duration::ZERO;
 
     let t_all = Instant::now();
-    let PerfFileReader { mut perf_file, mut record_iter } = PerfFileReader::parse_file(BufReader::new(File::open(&path)?))?;
+    let PerfFileReader {
+        mut perf_file,
+        mut record_iter,
+    } = PerfFileReader::parse_file(BufReader::new(File::open(&path)?))?;
     while let Some(rec) = record_iter.next_record(&mut perf_file)? {
-        let PerfFileRecord::EventRecord { record, .. } = rec else { continue };
+        let PerfFileRecord::EventRecord { record, .. } = rec else {
+            continue;
+        };
         match record.parse()? {
             EventRecord::Mmap2(m) if m.protection & PROT_EXEC != 0 => {
                 let p = m.path.as_slice();
-                let Ok(p) = std::str::from_utf8(&p) else { continue };
+                let Ok(p) = std::str::from_utf8(&p) else {
+                    continue;
+                };
                 let p = p.trim_end_matches('\0');
                 if !p.starts_with('/') {
                     continue; // [vdso], //anon, [stack]...
@@ -226,8 +277,15 @@ fn main() -> perf_profile::Result<()> {
                         inode_mismatch += 1;
                     }
                 }
-                let Some(bias) = bin.bias_for_mapping(m.address, m.page_offset, m.length) else { continue };
-                let module = framehop::Module::new(p.to_string(), m.address..m.address + m.length, bias, bin.section_info());
+                let Some(bias) = bin.bias_for_mapping(m.address, m.page_offset, m.length) else {
+                    continue;
+                };
+                let module = framehop::Module::new(
+                    p.to_string(),
+                    m.address..m.address + m.length,
+                    bias,
+                    bin.section_info(),
+                );
                 let proc = procs.entry(m.pid).or_default();
                 // Later mappings win: drop modules this one overlaps.
                 let (s, e) = (m.address, m.address + m.length);
@@ -256,7 +314,11 @@ fn main() -> perf_profile::Result<()> {
                     counts.no_regs_or_stack += 1;
                     continue;
                 };
-                let (Some(ip), Some(sp), Some(bp)) = (regs.get(PERF_REG_X86_IP), regs.get(PERF_REG_X86_SP), regs.get(PERF_REG_X86_BP)) else {
+                let (Some(ip), Some(sp), Some(bp)) = (
+                    regs.get(PERF_REG_X86_IP),
+                    regs.get(PERF_REG_X86_SP),
+                    regs.get(PERF_REG_X86_BP),
+                ) else {
                     counts.no_regs_or_stack += 1;
                     continue;
                 };
@@ -265,7 +327,12 @@ fn main() -> perf_profile::Result<()> {
                 let max_off = std::cell::Cell::new(0usize);
                 let mut read_stack = |addr: u64| -> Result<u64, ()> {
                     let off = addr.checked_sub(sp).ok_or(())? as usize;
-                    stack.get(off..off + 8).map(|b| u64::from_le_bytes(b.try_into().unwrap())).filter(|_| off + 8 <= valid).inspect(|_| max_off.set(max_off.get().max(off + 8))).ok_or(())
+                    stack
+                        .get(off..off + 8)
+                        .map(|b| u64::from_le_bytes(b.try_into().unwrap()))
+                        .filter(|_| off + 8 <= valid)
+                        .inspect(|_| max_off.set(max_off.get().max(off + 8)))
+                        .ok_or(())
                 };
 
                 let t0 = Instant::now();
@@ -273,7 +340,12 @@ fn main() -> perf_profile::Result<()> {
                 let proc = s.pid.and_then(|p| procs.get(&p)).unwrap_or(&empty);
                 let mut ours = vec![ip];
                 let mut ras: Vec<u64> = Vec::new();
-                let mut iter = proc.unwinder.iter_frames(ip, UnwindRegsX86_64::new(ip, sp, bp), &mut unwind_cache, &mut read_stack);
+                let mut iter = proc.unwinder.iter_frames(
+                    ip,
+                    UnwindRegsX86_64::new(ip, sp, bp),
+                    &mut unwind_cache,
+                    &mut read_stack,
+                );
                 let stop = loop {
                     match iter.next() {
                         Ok(Some(FrameAddress::InstructionPointer(_))) => {} // the initial ip, already in `ours`
@@ -290,7 +362,9 @@ fn main() -> perf_profile::Result<()> {
                 if dump_addrs.is_some() {
                     for (i, &a) in ours.iter().enumerate() {
                         let _ = i;
-                        if let Some((_, _, bias, bin)) = proc.mods.iter().find(|&&(ms, me, _, _)| a >= ms && a < me) {
+                        if let Some((_, _, bias, bin)) =
+                            proc.mods.iter().find(|&&(ms, me, _, _)| a >= ms && a < me)
+                        {
                             uniq.insert((bin.path.clone(), a.wrapping_sub(*bias)));
                         }
                     }
@@ -298,32 +372,85 @@ fn main() -> perf_profile::Result<()> {
                 // Self-check 1: every return address must follow a call instruction.
                 let mut bad_ra = false;
                 let name_at = |a: u64| {
-                    proc.mods.iter().find(|&&(ms, me, _, _)| a >= ms && a < me).map(|(_, _, bias, bin)| format!("{}:{}", bin.path.file_name().unwrap().to_string_lossy(), bin.func_at(a.wrapping_sub(*bias)).unwrap_or("?").chars().take(60).collect::<String>())).unwrap_or("<no module>".into())
+                    proc.mods
+                        .iter()
+                        .find(|&&(ms, me, _, _)| a >= ms && a < me)
+                        .map(|(_, _, bias, bin)| {
+                            format!(
+                                "{}:{}",
+                                bin.path.file_name().unwrap().to_string_lossy(),
+                                bin.func_at(a.wrapping_sub(*bias))
+                                    .unwrap_or("?")
+                                    .chars()
+                                    .take(60)
+                                    .collect::<String>()
+                            )
+                        })
+                        .unwrap_or("<no module>".into())
                 };
                 for (k, &ra) in ras.iter().enumerate() {
                     counts.ra_total += 1;
-                    let ok = proc.mods.iter().find(|&&(ms, me, _, _)| ra >= ms && ra < me).is_some_and(|(_, _, bias, bin)| {
-                        let svma = ra.wrapping_sub(*bias);
-                        bin.bytes_at_svma(svma.wrapping_sub(8), 8).is_some_and(follows_call)
-                    });
+                    let ok = proc
+                        .mods
+                        .iter()
+                        .find(|&&(ms, me, _, _)| ra >= ms && ra < me)
+                        .is_some_and(|(_, _, bias, bin)| {
+                            let svma = ra.wrapping_sub(*bias);
+                            bin.bytes_at_svma(svma.wrapping_sub(8), 8)
+                                .is_some_and(follows_call)
+                        });
                     if ok {
                         counts.ra_after_call += 1;
                     } else {
                         if !bad_ra && k == 0 && dump_bad0 > 0 && false {
                             dump_bad0 -= 1;
-                            let (mstart, bias, bin) = proc.mods.iter().find(|&&(ms, me, _, _)| ip >= ms && ip < me).map(|(ms, _, b, bin)| (*ms, *b, bin.clone())).unwrap();
-                            println!("\nBAD k=0: tid {:?} ip={ip:#x} (svma {:#x} in {} @ {mstart:#x}, bias {bias:#x}) sp={sp:#x} bp={bp:#x}", s.tid, ip.wrapping_sub(bias), bin.path.file_name().unwrap().to_string_lossy());
-                            println!("   our first return address {ra:#x}, valid stack bytes {valid}, stop: {stop}");
-                            let words: Vec<String> = (0..12).filter_map(|i| stack.get(i * 8..i * 8 + 8).map(|b| format!("{:x}", u64::from_le_bytes(b.try_into().unwrap())))).collect();
+                            let (mstart, bias, bin) = proc
+                                .mods
+                                .iter()
+                                .find(|&&(ms, me, _, _)| ip >= ms && ip < me)
+                                .map(|(ms, _, b, bin)| (*ms, *b, bin.clone()))
+                                .unwrap();
+                            println!(
+                                "\nBAD k=0: tid {:?} ip={ip:#x} (svma {:#x} in {} @ {mstart:#x}, bias {bias:#x}) sp={sp:#x} bp={bp:#x}",
+                                s.tid,
+                                ip.wrapping_sub(bias),
+                                bin.path.file_name().unwrap().to_string_lossy()
+                            );
+                            println!(
+                                "   our first return address {ra:#x}, valid stack bytes {valid}, stop: {stop}"
+                            );
+                            let words: Vec<String> = (0..12)
+                                .filter_map(|i| {
+                                    stack.get(i * 8..i * 8 + 8).map(|b| {
+                                        format!("{:x}", u64::from_le_bytes(b.try_into().unwrap()))
+                                    })
+                                })
+                                .collect();
                             println!("   stack[sp..]: {}", words.join(" "));
                         }
-                        if !bad_ra && k >= 1 && dump_bad0 > 0 && name_at(ras[k - 1] - 1).contains("interface12run_c") {
+                        if !bad_ra
+                            && k >= 1
+                            && dump_bad0 > 0
+                            && name_at(ras[k - 1] - 1).contains("interface12run_c")
+                        {
                             dump_bad0 -= 1;
-                            println!("\nBAD k={k}: tid {:?}, {} frames total, stop: {stop}", s.tid, ours.len());
+                            println!(
+                                "\nBAD k={k}: tid {:?}, {} frames total, stop: {stop}",
+                                s.tid,
+                                ours.len()
+                            );
                             for i in 0..(k + 2).min(ours.len()) {
                                 let a = if i == 0 { ip } else { ras[i - 1] - 1 };
                                 let ok = if i >= 1 && i - 1 < ras.len() { "" } else { "" };
-                                println!("   [{i}] {a:#x} {}{ok}{}", name_at(a).chars().take(110).collect::<String>(), if i == k { "   <== this frame's unwind gave a bad return address" } else { "" });
+                                println!(
+                                    "   [{i}] {a:#x} {}{ok}{}",
+                                    name_at(a).chars().take(110).collect::<String>(),
+                                    if i == k {
+                                        "   <== this frame's unwind gave a bad return address"
+                                    } else {
+                                        ""
+                                    }
+                                );
                             }
                         }
                         if !bad_ra {
@@ -342,21 +469,54 @@ fn main() -> perf_profile::Result<()> {
                     .mods
                     .iter()
                     .find(|&&(ms, me, _, _)| last >= ms && last < me)
-                    .map(|(_, _, bias, bin)| (bin.path.file_name().unwrap().to_string_lossy().to_string(), bin.func_at(last.wrapping_sub(*bias)).unwrap_or("?").to_string()))
+                    .map(|(_, _, bias, bin)| {
+                        (
+                            bin.path.file_name().unwrap().to_string_lossy().to_string(),
+                            bin.func_at(last.wrapping_sub(*bias))
+                                .unwrap_or("?")
+                                .to_string(),
+                        )
+                    })
                     .unwrap_or(("<no module>".into(), "?".into()));
-                let is_root = matches!(root_fn.as_str(), "_start" | "start_thread" | "__clone3" | "clone" | "__libc_start_main" | "__libc_start_call_main" | "thread_start");
+                let is_root = matches!(
+                    root_fn.as_str(),
+                    "_start"
+                        | "start_thread"
+                        | "__clone3"
+                        | "clone"
+                        | "__libc_start_main"
+                        | "__libc_start_call_main"
+                        | "thread_start"
+                );
                 counts.stack_roots += is_root as u64;
-                *root_hist.entry((stop.clone(), if is_root { "thread/process root".to_string() } else { format!("{root_module}:{root_fn}") })).or_default() += 1;
+                *root_hist
+                    .entry((
+                        stop.clone(),
+                        if is_root {
+                            "thread/process root".to_string()
+                        } else {
+                            format!("{root_module}:{root_fn}")
+                        },
+                    ))
+                    .or_default() += 1;
                 *counts.stop_reasons.entry(stop).or_default() += 1;
                 counts.frames_total += ours.len() as u64;
-                counts.frames_outside_modules += ours.iter().filter(|&&a| !proc.mods.iter().any(|&(ms, me, _, _)| a >= ms && a < me)).count() as u64;
+                counts.frames_outside_modules += ours
+                    .iter()
+                    .filter(|&&a| !proc.mods.iter().any(|&(ms, me, _, _)| a >= ms && a < me))
+                    .count() as u64;
 
                 // Compare with perf script by (tid, time in µs).
                 let (tid, ns) = (s.tid.unwrap_or(0), s.timestamp.unwrap_or(0));
-                let refs = [ns / 1000, (ns + 500) / 1000].iter().find_map(|us| reference.get(&(tid, *us)));
+                let refs = [ns / 1000, (ns + 500) / 1000]
+                    .iter()
+                    .find_map(|us| reference.get(&(tid, *us)));
                 let Some(refs) = refs else { continue };
                 // Several samples can share (tid, µs); accept if any candidate matches best.
-                let best = refs.iter().max_by_key(|r| r.iter().zip(&ours).take_while(|(a, b)| a == b).count()).unwrap();
+                let best = refs
+                    .iter()
+                    .max_by_key(|r| r.iter().zip(&ours).take_while(|(a, b)| a == b).count())
+                    .unwrap();
                 counts.with_reference += 1;
                 counts.depth_ours += ours.len() as u64;
                 counts.depth_ref += best.len() as u64;
@@ -365,11 +525,23 @@ fn main() -> perf_profile::Result<()> {
                     counts.exact += 1;
                 } else {
                     let last_module = |a: u64| {
-                        procs.get(&s.pid.unwrap_or(0)).and_then(|p| p.mods.iter().find(|&&(ms, me, _, _)| a >= ms && a < me).map(|&(ms, ..)| ms))
+                        procs.get(&s.pid.unwrap_or(0)).and_then(|p| {
+                            p.mods
+                                .iter()
+                                .find(|&&(ms, me, _, _)| a >= ms && a < me)
+                                .map(|&(ms, ..)| ms)
+                        })
                     };
                     if common == ours.len() {
                         counts.ours_prefix_of_ref += 1;
-                        let key = ours.last().map(|&a| last_module(a).map_or("<no module>".to_string(), |ms| format!("module@{ms:#x}"))).unwrap_or_default();
+                        let key = ours
+                            .last()
+                            .map(|&a| {
+                                last_module(a).map_or("<no module>".to_string(), |ms| {
+                                    format!("module@{ms:#x}")
+                                })
+                            })
+                            .unwrap_or_default();
                         *early_stop_modules.entry(key).or_default() += 1;
                     } else if common == best.len() {
                         counts.ref_prefix_of_ours += 1;
@@ -379,9 +551,19 @@ fn main() -> perf_profile::Result<()> {
                     }
                     if shown < examples {
                         shown += 1;
-                        println!("\nMISMATCH tid {tid} t={ns}: ours {} frames, perf {} frames, equal for first {common}", ours.len(), best.len());
-                        for i in common.saturating_sub(1)..(common + 3).min(ours.len().max(best.len())) {
-                            println!("   [{i}] ours {:>14x?}   perf {:>14x?}", ours.get(i), best.get(i));
+                        println!(
+                            "\nMISMATCH tid {tid} t={ns}: ours {} frames, perf {} frames, equal for first {common}",
+                            ours.len(),
+                            best.len()
+                        );
+                        for i in
+                            common.saturating_sub(1)..(common + 3).min(ours.len().max(best.len()))
+                        {
+                            println!(
+                                "   [{i}] ours {:>14x?}   perf {:>14x?}",
+                                ours.get(i),
+                                best.get(i)
+                            );
                         }
                     }
                 }
@@ -395,43 +577,114 @@ fn main() -> perf_profile::Result<()> {
         for (path, svma) in &uniq {
             writeln!(f, "{}\t{svma:x}", path.display())?;
         }
-        println!("wrote {} unique (module, svma) addresses to {}", uniq.len(), p.display());
+        println!(
+            "wrote {} unique (module, svma) addresses to {}",
+            uniq.len(),
+            p.display()
+        );
     }
     let wall = t_all.elapsed();
 
-    let pct = |a: u64, b: u64| if b == 0 { 0.0 } else { 100.0 * a as f64 / b as f64 };
+    let pct = |a: u64, b: u64| {
+        if b == 0 {
+            0.0
+        } else {
+            100.0 * a as f64 / b as f64
+        }
+    };
     {
         let mut t: Vec<u32> = touched.iter().map(|x| x.0).collect();
         t.sort_unstable();
         let pct = |q: f64| t[((t.len() - 1) as f64 * q) as usize];
         let sum: u64 = t.iter().map(|&x| x as u64).sum();
         let dump: u64 = touched.iter().map(|x| x.1 as u64).sum();
-        println!("stack bytes read by the unwinder, per sample: p50 {} p90 {} p99 {} max {} | total {:.1} MB of {:.1} MB dumped ({:.1}%)", pct(0.5), pct(0.9), pct(0.99), t[t.len() - 1], sum as f64 / 1e6, dump as f64 / 1e6, 100.0 * sum as f64 / dump.max(1) as f64);
-        let full = touched.iter().filter(|x| x.0 >= x.1.saturating_sub(64)).count();
-        println!("samples whose unwinding reached the end of the dump (stack possibly truncated): {full} ({:.1}%)", 100.0 * full as f64 / touched.len() as f64);
+        println!(
+            "stack bytes read by the unwinder, per sample: p50 {} p90 {} p99 {} max {} | total {:.1} MB of {:.1} MB dumped ({:.1}%)",
+            pct(0.5),
+            pct(0.9),
+            pct(0.99),
+            t[t.len() - 1],
+            sum as f64 / 1e6,
+            dump as f64 / 1e6,
+            100.0 * sum as f64 / dump.max(1) as f64
+        );
+        let full = touched
+            .iter()
+            .filter(|x| x.0 >= x.1.saturating_sub(64))
+            .count();
+        println!(
+            "samples whose unwinding reached the end of the dump (stack possibly truncated): {full} ({:.1}%)",
+            100.0 * full as f64 / touched.len() as f64
+        );
     }
-    println!("\n=== results ({} samples, replay {:.1}s, pure unwind time {:.2}s = {:.1} µs/sample) ===", counts.samples, wall.as_secs_f64(), unwind_time.as_secs_f64(), unwind_time.as_secs_f64() * 1e6 / counts.samples.max(1) as f64);
-    println!("modules added {modules_added}, missing/unreadable {modules_missing}, inode differs from recording {inode_mismatch}");
+    println!(
+        "\n=== results ({} samples, replay {:.1}s, pure unwind time {:.2}s = {:.1} µs/sample) ===",
+        counts.samples,
+        wall.as_secs_f64(),
+        unwind_time.as_secs_f64(),
+        unwind_time.as_secs_f64() * 1e6 / counts.samples.max(1) as f64
+    );
+    println!(
+        "modules added {modules_added}, missing/unreadable {modules_missing}, inode differs from recording {inode_mismatch}"
+    );
     println!("samples without regs/stack: {}", counts.no_regs_or_stack);
     let w = counts.with_reference;
-    println!("compared with perf script: {w} samples ({:.1}% of all)", pct(w, counts.samples));
-    println!("  identical stacks               : {:>7} ({:.2}%)", counts.exact, pct(counts.exact, w));
-    println!("  ours shorter (prefix of perf)  : {:>7} ({:.2}%)", counts.ours_prefix_of_ref, pct(counts.ours_prefix_of_ref, w));
-    println!("  perf shorter (prefix of ours)  : {:>7} ({:.2}%)", counts.ref_prefix_of_ours, pct(counts.ref_prefix_of_ours, w));
-    println!("  differ                         : {:>7} ({:.2}%)", counts.differ, pct(counts.differ, w));
-    println!("  mean depth ours {:.1} vs perf {:.1}", counts.depth_ours as f64 / w.max(1) as f64, counts.depth_ref as f64 / w.max(1) as f64);
+    println!(
+        "compared with perf script: {w} samples ({:.1}% of all)",
+        pct(w, counts.samples)
+    );
+    println!(
+        "  identical stacks               : {:>7} ({:.2}%)",
+        counts.exact,
+        pct(counts.exact, w)
+    );
+    println!(
+        "  ours shorter (prefix of perf)  : {:>7} ({:.2}%)",
+        counts.ours_prefix_of_ref,
+        pct(counts.ours_prefix_of_ref, w)
+    );
+    println!(
+        "  perf shorter (prefix of ours)  : {:>7} ({:.2}%)",
+        counts.ref_prefix_of_ours,
+        pct(counts.ref_prefix_of_ours, w)
+    );
+    println!(
+        "  differ                         : {:>7} ({:.2}%)",
+        counts.differ,
+        pct(counts.differ, w)
+    );
+    println!(
+        "  mean depth ours {:.1} vs perf {:.1}",
+        counts.depth_ours as f64 / w.max(1) as f64,
+        counts.depth_ref as f64 / w.max(1) as f64
+    );
     let mut d: Vec<_> = counts.diff_first_index.iter().collect();
     d.sort();
     println!("  first differing frame index (differ only, 20 = 20+): {d:?}");
-    println!("frames outside any known module: {:.2}% of {} frames", pct(counts.frames_outside_modules, counts.frames_total), counts.frames_total);
+    println!(
+        "frames outside any known module: {:.2}% of {} frames",
+        pct(counts.frames_outside_modules, counts.frames_total),
+        counts.frames_total
+    );
     let mut r: Vec<_> = counts.stop_reasons.iter().collect();
     r.sort_by_key(|x| std::cmp::Reverse(*x.1));
     println!("why our unwinding stopped: {r:?}");
     let mut e: Vec<_> = early_stop_modules.iter().collect();
     e.sort_by_key(|x| std::cmp::Reverse(*x.1));
-    println!("where we stopped early (last frame's module): {:?}", &e[..e.len().min(6)]);
-    println!("self-check: {:.2}% of {} return addresses follow a call instruction; {:.2}% of stacks have every return address valid", pct(counts.ra_after_call, counts.ra_total), counts.ra_total, 100.0 - pct(counts.stacks_with_bad_ra, counts.samples));
-    println!("self-check: {:.1}% of stacks end at a thread/process root function", pct(counts.stack_roots, counts.samples));
+    println!(
+        "where we stopped early (last frame's module): {:?}",
+        &e[..e.len().min(6)]
+    );
+    println!(
+        "self-check: {:.2}% of {} return addresses follow a call instruction; {:.2}% of stacks have every return address valid",
+        pct(counts.ra_after_call, counts.ra_total),
+        counts.ra_total,
+        100.0 - pct(counts.stacks_with_bad_ra, counts.samples)
+    );
+    println!(
+        "self-check: {:.1}% of stacks end at a thread/process root function",
+        pct(counts.stack_roots, counts.samples)
+    );
     let mut rh: Vec<_> = root_hist.iter().collect();
     rh.sort_by_key(|x| std::cmp::Reverse(*x.1));
     println!("where stacks end, by stop reason (top 14):");

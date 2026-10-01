@@ -49,8 +49,24 @@ struct Cli {
 }
 
 fn main() -> perf_bench::Result<()> {
-    let Cli { path, mode, threads, iters, touch, cold, populate, block_mb, buffers, readers, corrupt_bound: corrupt } = Cli::parse();
-    let modes: Vec<&str> = if mode == "both" { vec!["baseline", "pipe"] } else { mode.split(',').collect() };
+    let Cli {
+        path,
+        mode,
+        threads,
+        iters,
+        touch,
+        cold,
+        populate,
+        block_mb,
+        buffers,
+        readers,
+        corrupt_bound: corrupt,
+    } = Cli::parse();
+    let modes: Vec<&str> = if mode == "both" {
+        vec!["baseline", "pipe"]
+    } else {
+        mode.split(',').collect()
+    };
     let size = std::fs::metadata(&path)?.len() as f64;
     let gbps = |secs: f64| size / secs / 1e9;
     let ms = |d: std::time::Duration| d.as_secs_f64() * 1e3;
@@ -80,24 +96,54 @@ fn main() -> perf_bench::Result<()> {
                 "baseline" => (baseline::read_all(&path, touch)?, String::new()),
                 "fast" => {
                     let (s, tm) = fast::read_all(&path, threads, populate, touch)?;
-                    (s, format!("(setup {:.1}ms, scan {:.1}ms, parse {:.1}ms, teardown {:.1}ms)", ms(tm.setup), ms(tm.scan), ms(tm.parse), ms(tm.teardown)))
+                    (
+                        s,
+                        format!(
+                            "(setup {:.1}ms, scan {:.1}ms, parse {:.1}ms, teardown {:.1}ms)",
+                            ms(tm.setup),
+                            ms(tm.scan),
+                            ms(tm.parse),
+                            ms(tm.teardown)
+                        ),
+                    )
                 }
                 "pipe" => {
                     let cfg = Config {
                         block: block_mb << 20,
                         workers: threads,
-                        buffers: if buffers == 0 { threads * 2 + 2 + readers * 2 } else { buffers },
+                        buffers: if buffers == 0 {
+                            threads * 2 + 2 + readers * 2
+                        } else {
+                            buffers
+                        },
                         evict: Evict::Off,
                         readers,
                     };
-                    let opts = piped::Options { touch, corrupt_bound: corrupt, ..Default::default() };
+                    let opts = piped::Options {
+                        touch,
+                        corrupt_bound: corrupt,
+                        ..Default::default()
+                    };
                     let (s, rp) = piped::read_all(&path, cfg, opts)?;
                     let mt = rp.metrics;
-                    (s, format!(
-                        "(block {block_mb}MiB, {} bufs, {readers} reader(s), {} regions, plan {:.0}ms{}; readers(sum): read {:.0}ms, wait-for-buffer {:.0}ms | workers(sum): busy {:.0}ms, wait-for-data {:.0}ms)",
-                        cfg.buffers, rp.regions, ms(rp.plan_time), if rp.fell_back { ", FELL BACK to 1 reader" } else { "" },
-                        ms(mt.reader_read), ms(mt.reader_wait), ms(mt.worker_busy), ms(mt.worker_wait)
-                    ))
+                    (
+                        s,
+                        format!(
+                            "(block {block_mb}MiB, {} bufs, {readers} reader(s), {} regions, plan {:.0}ms{}; readers(sum): read {:.0}ms, wait-for-buffer {:.0}ms | workers(sum): busy {:.0}ms, wait-for-data {:.0}ms)",
+                            cfg.buffers,
+                            rp.regions,
+                            ms(rp.plan_time),
+                            if rp.fell_back {
+                                ", FELL BACK to 1 reader"
+                            } else {
+                                ""
+                            },
+                            ms(mt.reader_read),
+                            ms(mt.reader_wait),
+                            ms(mt.worker_busy),
+                            ms(mt.worker_wait)
+                        ),
+                    )
                 }
                 other => {
                     eprintln!("unknown mode `{other}` (baseline, fast, pipe, both)");
@@ -105,13 +151,24 @@ fn main() -> perf_bench::Result<()> {
                 }
             };
             let secs = t.elapsed().as_secs_f64();
-            println!("{m:<8} x{threads:<3} #{i}: {secs:8.3}s {:6.2} GB/s  {detail}", gbps(secs));
+            println!(
+                "{m:<8} x{threads:<3} #{i}: {secs:8.3}s {:6.2} GB/s  {detail}",
+                gbps(secs)
+            );
             check(m, stats);
         }
     }
     if let Some((_, r)) = reference {
-        let types: Vec<_> = r.per_type.iter().enumerate().filter(|(_, c)| **c > 0).collect();
-        println!("records={} bytes={} samples={} stack_bytes={} stack_sum={} types={types:?}", r.records, r.bytes, r.samples, r.user_stack_bytes, r.stack_sum);
+        let types: Vec<_> = r
+            .per_type
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| **c > 0)
+            .collect();
+        println!(
+            "records={} bytes={} samples={} stack_bytes={} stack_sum={} types={types:?}",
+            r.records, r.bytes, r.samples, r.user_stack_bytes, r.stack_sum
+        );
         println!("all modes produced identical stats");
     }
     Ok(())

@@ -59,17 +59,40 @@ struct Cli {
 }
 
 fn main() {
-    let Cli { path, mode, readers, block_mb, region_mb, gb, skip_gb, span_gb } = Cli::parse();
-    let file_len = std::fs::metadata(&path).unwrap().len().saturating_sub(skip_gb << 30);
+    let Cli {
+        path,
+        mode,
+        readers,
+        block_mb,
+        region_mb,
+        gb,
+        skip_gb,
+        span_gb,
+    } = Cli::parse();
+    let file_len = std::fs::metadata(&path)
+        .unwrap()
+        .len()
+        .saturating_sub(skip_gb << 30);
     // Asking for more than the file holds wraps around it (use `direct` or `reuse-drop` so repeats are not served from cache).
     let total = gb << 30;
-    let file_len = if span_gb > 0 { file_len.min(span_gb << 30) } else { file_len };
+    let file_len = if span_gb > 0 {
+        file_len.min(span_gb << 30)
+    } else {
+        file_len
+    };
     let file_regions = (file_len / ((region_mb) << 20)).max(1);
     let (block, region) = ((block_mb as u64) << 20, region_mb << 20);
     let regions = total / region;
     {
         let f = File::open(&path).unwrap();
-        unsafe { libc::posix_fadvise(std::os::fd::AsRawFd::as_raw_fd(&f), 0, 0, libc::POSIX_FADV_DONTNEED) };
+        unsafe {
+            libc::posix_fadvise(
+                std::os::fd::AsRawFd::as_raw_fd(&f),
+                0,
+                0,
+                libc::POSIX_FADV_DONTNEED,
+            )
+        };
     }
     let next = AtomicU64::new(0);
     let sum = AtomicU64::new(0);
@@ -84,79 +107,112 @@ fn main() {
                 std::thread::sleep(std::time::Duration::from_millis(1000));
                 let now = bytes.load(Ordering::Relaxed);
                 if std::env::var_os("LAB_TRACE").is_some() {
-                    println!("  t={:4.1}s {:5.2} GB/s (total {:.1} GB)", t.elapsed().as_secs_f32(), (now - last) as f64 / 1e9, now as f64 / 1e9);
+                    println!(
+                        "  t={:4.1}s {:5.2} GB/s (total {:.1} GB)",
+                        t.elapsed().as_secs_f32(),
+                        (now - last) as f64 / 1e9,
+                        now as f64 / 1e9
+                    );
                 }
                 last = now;
             }
         });
-        let handles: Vec<_> = (0..readers).map(|_| {
-            s.spawn(|| {
-                let f = if mode == "direct" { OpenOptions::new().read(true).custom_flags(libc::O_DIRECT).open(&path).unwrap() } else { File::open(&path).unwrap() };
-                let mut small = Aligned::new(block as usize);
-                let mut big = Aligned::new(region as usize);
-                let mut local = 0u64;
-                loop {
-                    let r = next.fetch_add(1, Ordering::Relaxed);
-                    if r >= regions {
-                        break;
+        let handles: Vec<_> = (0..readers)
+            .map(|_| {
+                s.spawn(|| {
+                    let f = if mode == "direct" {
+                        OpenOptions::new()
+                            .read(true)
+                            .custom_flags(libc::O_DIRECT)
+                            .open(&path)
+                            .unwrap()
+                    } else {
+                        File::open(&path).unwrap()
+                    };
+                    let mut small = Aligned::new(block as usize);
+                    let mut big = Aligned::new(region as usize);
+                    let mut local = 0u64;
+                    loop {
+                        let r = next.fetch_add(1, Ordering::Relaxed);
+                        if r >= regions {
+                            break;
+                        }
+                        let base = (skip_gb << 30) + (r % file_regions) * region;
+                        match mode.as_str() {
+                            "reuse" | "direct" | "reuse-drop" => {
+                                let mut pos = 0;
+                                while pos < region {
+                                    f.read_exact_at(small.slice(), base + pos).unwrap();
+                                    bytes.fetch_add(block, Ordering::Relaxed);
+                                    local ^= small.slice()[0] as u64;
+                                    pos += block;
+                                }
+                                if mode == "reuse-drop" {
+                                    // Buffered reads, but evict what was read so a repeat pass is cold too.
+                                    unsafe {
+                                        libc::posix_fadvise(
+                                            std::os::fd::AsRawFd::as_raw_fd(&f),
+                                            base as i64,
+                                            region as i64,
+                                            libc::POSIX_FADV_DONTNEED,
+                                        )
+                                    };
+                                }
+                            }
+                            "trim" => {
+                                // Like the pipeline: each read starts where the last unit's whole records
+                                // ended, so offsets are unaligned and successive reads overlap a little.
+                                let mut pos = 0u64;
+                                let mut x = 0x9E3779B97F4A7C15u64 ^ r;
+                                while pos < region {
+                                    x ^= x << 13;
+                                    x ^= x >> 7;
+                                    x ^= x << 17;
+                                    let n = block.min(region - pos) as usize;
+                                    f.read_exact_at(&mut small.slice()[..n], base + pos)
+                                        .unwrap();
+                                    local ^= small.slice()[0] as u64;
+                                    pos += (block - (x % (block / 4))) & !7; // keep 8-byte alignment, like records
+                                }
+                            }
+                            "region" | "touch" => {
+                                let buf = big.slice();
+                                let mut pos = 0;
+                                while pos < region {
+                                    f.read_exact_at(
+                                        &mut buf[pos as usize..(pos + block) as usize],
+                                        base + pos,
+                                    )
+                                    .unwrap();
+                                    pos += block;
+                                }
+                                if mode == "touch" {
+                                    local = local.wrapping_add(
+                                        buf.chunks(64).map(|c| c[0] as u64).sum::<u64>(),
+                                    );
+                                }
+                            }
+                            "fresh" => {
+                                let mut fresh = Aligned::new(region as usize);
+                                let buf = fresh.slice();
+                                let mut pos = 0;
+                                while pos < region {
+                                    f.read_exact_at(
+                                        &mut buf[pos as usize..(pos + block) as usize],
+                                        base + pos,
+                                    )
+                                    .unwrap();
+                                    pos += block;
+                                }
+                                local ^= buf[0] as u64;
+                            }
+                            _ => panic!("mode"),
+                        }
                     }
-                    let base = (skip_gb << 30) + (r % file_regions) * region;
-                    match mode.as_str() {
-                        "reuse" | "direct" | "reuse-drop" => {
-                            let mut pos = 0;
-                            while pos < region {
-                                f.read_exact_at(small.slice(), base + pos).unwrap();
-                                bytes.fetch_add(block, Ordering::Relaxed);
-                                local ^= small.slice()[0] as u64;
-                                pos += block;
-                            }
-                            if mode == "reuse-drop" {
-                                // Buffered reads, but evict what was read so a repeat pass is cold too.
-                                unsafe { libc::posix_fadvise(std::os::fd::AsRawFd::as_raw_fd(&f), base as i64, region as i64, libc::POSIX_FADV_DONTNEED) };
-                            }
-                        }
-                        "trim" => {
-                            // Like the pipeline: each read starts where the last unit's whole records
-                            // ended, so offsets are unaligned and successive reads overlap a little.
-                            let mut pos = 0u64;
-                            let mut x = 0x9E3779B97F4A7C15u64 ^ r;
-                            while pos < region {
-                                x ^= x << 13;
-                                x ^= x >> 7;
-                                x ^= x << 17;
-                                let n = block.min(region - pos) as usize;
-                                f.read_exact_at(&mut small.slice()[..n], base + pos).unwrap();
-                                local ^= small.slice()[0] as u64;
-                                pos += (block - (x % (block / 4))) & !7; // keep 8-byte alignment, like records
-                            }
-                        }
-                        "region" | "touch" => {
-                            let buf = big.slice();
-                            let mut pos = 0;
-                            while pos < region {
-                                f.read_exact_at(&mut buf[pos as usize..(pos + block) as usize], base + pos).unwrap();
-                                pos += block;
-                            }
-                            if mode == "touch" {
-                                local = local.wrapping_add(buf.chunks(64).map(|c| c[0] as u64).sum::<u64>());
-                            }
-                        }
-                        "fresh" => {
-                            let mut fresh = Aligned::new(region as usize);
-                            let buf = fresh.slice();
-                            let mut pos = 0;
-                            while pos < region {
-                                f.read_exact_at(&mut buf[pos as usize..(pos + block) as usize], base + pos).unwrap();
-                                pos += block;
-                            }
-                            local ^= buf[0] as u64;
-                        }
-                        _ => panic!("mode"),
-                    }
-                }
-                sum.fetch_add(local, Ordering::Relaxed);
+                    sum.fetch_add(local, Ordering::Relaxed);
+                })
             })
-        }).collect();
+            .collect();
         for h in handles {
             h.join().unwrap();
         }
@@ -164,5 +220,11 @@ fn main() {
         finished.store(true, Ordering::Relaxed);
     });
     let secs = f64::from_bits(read_secs.load(Ordering::Relaxed));
-    println!("{mode:<7} readers={readers} block={block_mb}MiB region={region_mb}MiB: {:.2} GB/s ({:.1}s for {:.1} GB)  [{}]", (regions * region) as f64 / secs / 1e9, secs, (regions * region) as f64 / 1e9, sum.load(Ordering::Relaxed) & 1);
+    println!(
+        "{mode:<7} readers={readers} block={block_mb}MiB region={region_mb}MiB: {:.2} GB/s ({:.1}s for {:.1} GB)  [{}]",
+        (regions * region) as f64 / secs / 1e9,
+        secs,
+        (regions * region) as f64 / 1e9,
+        sum.load(Ordering::Relaxed) & 1
+    );
 }

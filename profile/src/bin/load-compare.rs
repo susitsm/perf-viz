@@ -3,7 +3,12 @@
 
 use clap::Parser;
 use perf_profile::cli::LoadArgs;
-use std::{collections::HashMap, hash::{Hash, Hasher}, path::PathBuf, time::Instant};
+use std::{
+    collections::HashMap,
+    hash::{Hash, Hasher},
+    path::PathBuf,
+    time::Instant,
+};
 
 use perf_profile::{
     load, load_replay,
@@ -30,7 +35,13 @@ fn canon(p: &Profile, t: &Trie) -> HashMap<u64, (u32, u32, u32)> {
 fn path_of(p: &Profile, t: &Trie, mut n: u32) -> String {
     let mut names = Vec::new();
     while n != ROOT {
-        names.push(p.frames[t.nodes[n as usize].frame as usize].name.chars().take(40).collect::<String>());
+        names.push(
+            p.frames[t.nodes[n as usize].frame as usize]
+                .name
+                .chars()
+                .take(40)
+                .collect::<String>(),
+        );
         n = t.nodes[n as usize].parent;
     }
     names.reverse();
@@ -45,7 +56,14 @@ fn children_of(p: &Profile, t: &Trie, node: u32) -> Vec<String> {
         .map(|&c| {
             let n = t.nodes[c as usize];
             let f = &p.frames[n.frame as usize];
-            format!("{} [{}]{} total {} self {}", f.name.chars().take(48).collect::<String>(), p.module_name(f.module), if f.suspect { " SUSPECT" } else { "" }, n.total, n.self_count)
+            format!(
+                "{} [{}]{} total {} self {}",
+                f.name.chars().take(48).collect::<String>(),
+                p.module_name(f.module),
+                if f.suspect { " SUSPECT" } else { "" },
+                n.total,
+                n.self_count
+            )
         })
         .collect()
 }
@@ -72,24 +90,60 @@ fn main() {
     let t_old = t.elapsed().as_secs_f64();
 
     let (a, b) = (&new.stats, &old.stats);
-    println!("single-pass loader {t_new:.2}s (stream {:.2}, plan {:.2}, merge {:.2}, symbolize {:.2}, build {:.2}; {} regions, <= {} MiB held){} | replay loader {t_old:.2}s", a.secs_stream, a.secs_plan, a.secs_merge, a.secs_symbolize, a.secs_build, a.stream_regions, a.stream_max_held_units, if a.fell_back { " FELL BACK" } else { "" });
+    println!(
+        "single-pass loader {t_new:.2}s (stream {:.2}, plan {:.2}, merge {:.2}, symbolize {:.2}, build {:.2}; {} regions, <= {} MiB held){} | replay loader {t_old:.2}s",
+        a.secs_stream,
+        a.secs_plan,
+        a.secs_merge,
+        a.secs_symbolize,
+        a.secs_build,
+        a.stream_regions,
+        a.stream_max_held_units,
+        if a.fell_back { " FELL BACK" } else { "" }
+    );
     let mut ok = true;
     let mut check = |name: &str, x: u64, y: u64| {
         let same = x == y;
         ok &= same;
-        println!("  {name:<24} streaming {x:>9}  replay {y:>9}  {}", if same { "ok" } else { "DIFFERENT" });
+        println!(
+            "  {name:<24} streaming {x:>9}  replay {y:>9}  {}",
+            if same { "ok" } else { "DIFFERENT" }
+        );
     };
     check("samples", a.samples, b.samples);
-    check("samples without stack", a.samples_without_stack, b.samples_without_stack);
+    check(
+        "samples without stack",
+        a.samples_without_stack,
+        b.samples_without_stack,
+    );
     check("physical frames", a.physical_frames, b.physical_frames);
     check("suspect samples", a.suspect_samples, b.suspect_samples);
     check("suspect frames", a.suspect_frames, b.suspect_frames);
-    check("unique addresses", a.unique_addresses as u64, b.unique_addresses as u64);
-    check("full trie nodes", new.full.nodes.len() as u64, old.full.nodes.len() as u64);
-    check("truncated trie nodes", new.truncated.nodes.len() as u64, old.truncated.nodes.len() as u64);
-    check("sample refs", new.samples.len() as u64, a.samples - a.samples_without_stack);
+    check(
+        "unique addresses",
+        a.unique_addresses as u64,
+        b.unique_addresses as u64,
+    );
+    check(
+        "full trie nodes",
+        new.full.nodes.len() as u64,
+        old.full.nodes.len() as u64,
+    );
+    check(
+        "truncated trie nodes",
+        new.truncated.nodes.len() as u64,
+        old.truncated.nodes.len() as u64,
+    );
+    check(
+        "sample refs",
+        new.samples.len() as u64,
+        a.samples - a.samples_without_stack,
+    );
 
-    for (name, tn, to) in [("full", &new.full, &old.full), ("truncated", &new.truncated, &old.truncated)] {
+    for (name, tn, to) in [
+        ("full", &new.full, &old.full),
+        ("truncated", &new.truncated, &old.truncated),
+    ] {
         let (cn, co) = (canon(&new, tn), canon(&old, to));
         let mut same = 0usize;
         let mut shown = 0;
@@ -99,7 +153,10 @@ fn main() {
                 other => {
                     if shown < 5 {
                         shown += 1;
-                        println!("  {name}: node differs: streaming (total {tot}, self {slf}) vs replay {other:?}\n     {}", path_of(&new, tn, node));
+                        println!(
+                            "  {name}: node differs: streaming (total {tot}, self {slf}) vs replay {other:?}\n     {}",
+                            path_of(&new, tn, node)
+                        );
                         // Show the parent's children on both sides, to see which frames diverge.
                         let parent = tn.nodes[node as usize].parent;
                         let mut ph = 0u64;
@@ -115,9 +172,15 @@ fn main() {
                             (ph, &f.name, new.module_path(f.module), f.suspect).hash(&mut hasher);
                             ph = hasher.finish();
                         }
-                        println!("       streaming children of parent: {:?}", children_of(&new, tn, parent));
+                        println!(
+                            "       streaming children of parent: {:?}",
+                            children_of(&new, tn, parent)
+                        );
                         if let Some(&(_, _, on)) = co.get(&ph) {
-                            println!("       replay    children of parent: {:?}", children_of(&old, to, on));
+                            println!(
+                                "       replay    children of parent: {:?}",
+                                children_of(&old, to, on)
+                            );
                         }
                     }
                 }
@@ -126,13 +189,32 @@ fn main() {
         let only_old = co.keys().filter(|h| !cn.contains_key(h)).count();
         let all = same == cn.len() && only_old == 0;
         ok &= all;
-        println!("  {name} trie: {same} of {} paths identical, {} only in replay -> {}", cn.len(), only_old, if all { "IDENTICAL" } else { "DIFFERENT" });
+        println!(
+            "  {name} trie: {same} of {} paths identical, {} only in replay -> {}",
+            cn.len(),
+            only_old,
+            if all { "IDENTICAL" } else { "DIFFERENT" }
+        );
     }
     // Sample refs must point at nodes whose totals include them, and be time-sorted.
-    assert!(new.samples.windows(2).all(|w| w[0].time <= w[1].time), "sample refs are time-sorted");
-    let leaf_sum: u64 = new.samples.iter().map(|s| new.full.nodes[s.full as usize].self_count as u64).count() as u64;
+    assert!(
+        new.samples.windows(2).all(|w| w[0].time <= w[1].time),
+        "sample refs are time-sorted"
+    );
+    let leaf_sum: u64 = new
+        .samples
+        .iter()
+        .map(|s| new.full.nodes[s.full as usize].self_count as u64)
+        .count() as u64;
     let _ = leaf_sum;
-    println!("{}", if ok { "\nRESULT: streaming loader matches the replay loader" } else { "\nRESULT: MISMATCH" });
+    println!(
+        "{}",
+        if ok {
+            "\nRESULT: streaming loader matches the replay loader"
+        } else {
+            "\nRESULT: MISMATCH"
+        }
+    );
     if !ok {
         std::process::exit(1);
     }

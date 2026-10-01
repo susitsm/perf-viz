@@ -72,9 +72,33 @@ mod tests {
     fn unset_flags_keep_the_defaults_and_set_ones_override() {
         let d = Options::default();
         let o = T::try_parse_from(["t"]).unwrap().load.options();
-        assert_eq!((o.workers, o.readers, o.region_mb, o.cold), (d.workers, d.readers, d.region_mb, false));
-        let o = T::try_parse_from(["t", "--readers", "5", "--threads", "2", "--region-mb", "64", "--in-flight", "9", "--lookahead", "0", "--cold", "--sequential", "--corrupt-bound"]).unwrap().load.options();
-        assert_eq!((o.readers, o.workers, o.region_mb, o.in_flight, o.lookahead), (5, 2, 64, 9, 0));
+        assert_eq!(
+            (o.workers, o.readers, o.region_mb, o.cold),
+            (d.workers, d.readers, d.region_mb, false)
+        );
+        let o = T::try_parse_from([
+            "t",
+            "--readers",
+            "5",
+            "--threads",
+            "2",
+            "--region-mb",
+            "64",
+            "--in-flight",
+            "9",
+            "--lookahead",
+            "0",
+            "--cold",
+            "--sequential",
+            "--corrupt-bound",
+        ])
+        .unwrap()
+        .load
+        .options();
+        assert_eq!(
+            (o.readers, o.workers, o.region_mb, o.in_flight, o.lookahead),
+            (5, 2, 64, 9, 0)
+        );
         assert!(o.cold && o.force_sequential && o.corrupt_bound);
     }
 

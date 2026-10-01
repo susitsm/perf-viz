@@ -43,7 +43,13 @@ pub struct Anchor {
 
 /// Search `[nominal, nominal + window)` of the data section. Returns the first
 /// candidate, preferring `FinishedRound` anchors; `None` if the window has none.
-pub fn find(file: &File, sec: &DataSection, nominal: u64, window: usize, generic_only: bool) -> Result<Option<Anchor>> {
+pub fn find(
+    file: &File,
+    sec: &DataSection,
+    nominal: u64,
+    window: usize,
+    generic_only: bool,
+) -> Result<Option<Anchor>> {
     if sec.big_endian {
         find_impl::<BigEndian>(file, sec, nominal, window, generic_only)
     } else {
@@ -51,7 +57,13 @@ pub fn find(file: &File, sec: &DataSection, nominal: u64, window: usize, generic
     }
 }
 
-fn find_impl<T: ByteOrder>(file: &File, sec: &DataSection, nominal: u64, window: usize, generic_only: bool) -> Result<Option<Anchor>> {
+fn find_impl<T: ByteOrder>(
+    file: &File,
+    sec: &DataSection,
+    nominal: u64,
+    window: usize,
+    generic_only: bool,
+) -> Result<Option<Anchor>> {
     let base = nominal.next_multiple_of(8);
     if base >= sec.len {
         return Ok(None);
@@ -71,7 +83,10 @@ fn find_impl<T: ByteOrder>(file: &File, sec: &DataSection, nominal: u64, window:
         if !generic_only && ty == PERF_RECORD_FINISHED_ROUND && size == HEADER_LEN {
             if let Some(at) = chain_ok::<T>(&buf, i + HEADER_LEN, window_is_tail) {
                 // An anchor at the very end of the data can't split anything.
-                return Ok((base + (at as u64) < sec.len).then_some(Anchor { offset: base + at as u64, kind: Kind::FinishedRound }));
+                return Ok((base + (at as u64) < sec.len).then_some(Anchor {
+                    offset: base + at as u64,
+                    kind: Kind::FinishedRound,
+                }));
             }
         } else if first_chain.is_none() && (generic_only || i > 0) && valid_header(ty, size) {
             // Generic candidates are only worth their cost as a fallback; remember the first.
@@ -84,7 +99,10 @@ fn find_impl<T: ByteOrder>(file: &File, sec: &DataSection, nominal: u64, window:
         }
         i += 8;
     }
-    Ok(first_chain.filter(|&o| o < sec.len).map(|offset| Anchor { offset, kind: Kind::Chain }))
+    Ok(first_chain.filter(|&o| o < sec.len).map(|offset| Anchor {
+        offset,
+        kind: Kind::Chain,
+    }))
 }
 
 /// Plausible headers only: kernel record types (1..=24) or perf's synthesized user
@@ -135,7 +153,10 @@ const ROUND_WINDOW: usize = 16 << 20;
 /// Bounds that couldn't be found or collapse into a neighbour are dropped, so fewer regions
 /// may come back. Searches run in parallel; each reads one small window.
 pub fn plan_regions(file: &File, sec: &DataSection, regions: usize) -> Result<Vec<u64>> {
-    use std::sync::{Mutex, atomic::{AtomicUsize, Ordering}};
+    use std::sync::{
+        Mutex,
+        atomic::{AtomicUsize, Ordering},
+    };
     // A bounded pool: there can be thousands of boundaries, and each search is one small read.
     let n = regions.max(1) - 1;
     let slots: Vec<Mutex<Option<Result<Option<u64>>>>> = (0..n).map(|_| Mutex::new(None)).collect();

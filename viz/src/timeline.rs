@@ -8,9 +8,9 @@ use eframe::egui::{self, Align2, Color32, FontId, Rect, Sense, Stroke, pos2, vec
 use perf_profile::model::Profile;
 
 use crate::{
-    theme::Pal,
     filter::{Filter, weight},
     fmt::{self, Cost},
+    theme::Pal,
 };
 
 /// A stretch of time `[start, end)`, in absolute sample timestamps (nanoseconds).
@@ -85,14 +85,20 @@ impl Timeline {
 }
 
 fn bin_of(t0: u64, span: u64, n_bins: usize, time: u64) -> usize {
-    (((time.saturating_sub(t0)) as u128 * n_bins as u128 / span as u128) as usize).min(n_bins.saturating_sub(1))
+    (((time.saturating_sub(t0)) as u128 * n_bins as u128 / span as u128) as usize)
+        .min(n_bins.saturating_sub(1))
 }
 
 /// Bin the samples the filter keeps into `n_bins` time bins, and into per-thread lanes for the
 /// `max_lanes` busiest threads. Scans the samples twice (choose lanes, then bin).
 pub fn build(p: &Profile, filter: Filter, n_bins: usize, max_lanes: usize, cost: Cost) -> Timeline {
     let n_bins = n_bins.max(1);
-    let (Some(first), Some(last)) = (p.samples.first(), p.samples.last()) else { return Timeline { bins: vec![0; n_bins], ..Default::default() } };
+    let (Some(first), Some(last)) = (p.samples.first(), p.samples.last()) else {
+        return Timeline {
+            bins: vec![0; n_bins],
+            ..Default::default()
+        };
+    };
     let (t0, t1) = (first.time, last.time + 1);
     let span = (t1 - t0).max(1);
     let keeps = |pid: i32, tid: i32| match filter {
@@ -104,13 +110,31 @@ pub fn build(p: &Profile, filter: Filter, n_bins: usize, max_lanes: usize, cost:
     // Which threads are busiest?
     let mut per_thread: HashMap<i32, ThreadCost> = HashMap::new();
     for s in p.samples.iter().filter(|s| keeps(s.pid, s.tid)) {
-        per_thread.entry(s.tid).or_insert(ThreadCost { pid: s.pid, cost: 0 }).cost += weight(s, cost);
+        per_thread
+            .entry(s.tid)
+            .or_insert(ThreadCost {
+                pid: s.pid,
+                cost: 0,
+            })
+            .cost += weight(s, cost);
     }
     let mut ranked: Vec<(i32, ThreadCost)> = per_thread.into_iter().collect();
     ranked.sort_by_key(|(tid, t)| (std::cmp::Reverse(t.cost), *tid));
     ranked.truncate(max_lanes);
-    let mut lanes: Vec<Lane> = ranked.iter().map(|(tid, t)| Lane { pid: t.pid, tid: *tid, samples: t.cost, bins: vec![0; n_bins] }).collect();
-    let lane_of: HashMap<i32, usize> = ranked.iter().enumerate().map(|(i, (tid, _))| (*tid, i)).collect();
+    let mut lanes: Vec<Lane> = ranked
+        .iter()
+        .map(|(tid, t)| Lane {
+            pid: t.pid,
+            tid: *tid,
+            samples: t.cost,
+            bins: vec![0; n_bins],
+        })
+        .collect();
+    let lane_of: HashMap<i32, usize> = ranked
+        .iter()
+        .enumerate()
+        .map(|(i, (tid, _))| (*tid, i))
+        .collect();
 
     let mut bins = vec![0u64; n_bins];
     let mut total = 0u64;
@@ -123,7 +147,13 @@ pub fn build(p: &Profile, filter: Filter, n_bins: usize, max_lanes: usize, cost:
             lanes[l].bins[b] += w;
         }
     }
-    Timeline { t0, t1, bins, lanes, total }
+    Timeline {
+        t0,
+        t1,
+        bins,
+        lanes,
+        total,
+    }
 }
 
 /// Indices into `p.samples` (sorted by time) of the samples inside `[start, end)`.
@@ -144,7 +174,11 @@ pub fn nice_step(raw: f64) -> f64 {
         return 1.0;
     }
     let mag = 10f64.powf(raw.log10().floor());
-    [1.0, 2.0, 5.0, 10.0].iter().map(|m| m * mag).find(|&s| s >= raw).unwrap_or(10.0 * mag)
+    [1.0, 2.0, 5.0, 10.0]
+        .iter()
+        .map(|m| m * mag)
+        .find(|&s| s >= raw)
+        .unwrap_or(10.0 * mag)
 }
 
 /// A duration in a readable unit, three significant digits: `812 ns`, `12.3 ms`, `4.99 s`.
@@ -169,7 +203,14 @@ pub fn ticks(span_ns: u64, width_px: f32, min_gap_px: f32) -> Vec<Tick> {
     }
     let step = nice_step(span_ns as f64 * min_gap_px as f64 / width_px as f64) as u64;
     let step = step.max(1);
-    (0..).map(|i| i * step).take_while(|&t| t <= span_ns).map(|t| Tick { fraction: t as f32 / span_ns as f32, label: duration(t) }).collect()
+    (0..)
+        .map(|i| i * step)
+        .take_while(|&t| t <= span_ns)
+        .map(|t| Tick {
+            fraction: t as f32 / span_ns as f32,
+            label: duration(t),
+        })
+        .collect()
 }
 
 // ---- drawing ------------------------------------------------------------------------------------
@@ -180,7 +221,10 @@ pub enum Action {
     SetRange(TimeRange),
     ClearRange,
     /// A lane's label was clicked: show only this thread.
-    SelectThread { pid: i32, tid: i32 },
+    SelectThread {
+        pid: i32,
+        tid: i32,
+    },
 }
 
 pub struct Options<'a> {
@@ -227,12 +271,27 @@ pub fn draw(ui: &mut egui::Ui, o: &Options<'_>, drag: &mut Option<XDrag>) -> Vec
 
     let plot_w = (ui.available_width() - o.label_w - RIGHT_PAD).max(50.0);
     let to_time = |x: f32, left: f32| tl.time_at((x - left) / plot_w);
-    let to_x = |t: u64, left: f32| left + (t.saturating_sub(tl.t0) as f64 / span as f64 * plot_w as f64) as f32;
+    let to_x = |t: u64, left: f32| {
+        left + (t.saturating_sub(tl.t0) as f64 / span as f64 * plot_w as f64) as f32
+    };
 
     // One drawing pass per row (the overall strip, then the lanes), all sharing the same x axis.
-    let mut row = |ui: &mut egui::Ui, id: usize, h: f32, bins: &[u64], color: Color32, label: &str, label_action: Option<Action>, tip: &dyn Fn(usize) -> String| {
-        let (rect, resp) = ui.allocate_at_least(vec2(o.label_w + plot_w + RIGHT_PAD, h), Sense::click_and_drag());
-        let (label_rect, plot) = (Rect::from_min_size(rect.min, vec2(o.label_w, h)), Rect::from_min_size(pos2(rect.left() + o.label_w, rect.top()), vec2(plot_w, h)));
+    let mut row = |ui: &mut egui::Ui,
+                   id: usize,
+                   h: f32,
+                   bins: &[u64],
+                   color: Color32,
+                   label: &str,
+                   label_action: Option<Action>,
+                   tip: &dyn Fn(usize) -> String| {
+        let (rect, resp) = ui.allocate_at_least(
+            vec2(o.label_w + plot_w + RIGHT_PAD, h),
+            Sense::click_and_drag(),
+        );
+        let (label_rect, plot) = (
+            Rect::from_min_size(rect.min, vec2(o.label_w, h)),
+            Rect::from_min_size(pos2(rect.left() + o.label_w, rect.top()), vec2(plot_w, h)),
+        );
         let painter = ui.painter();
         painter.rect_filled(plot, 2.0, pal.plot_bg());
         // Bars
@@ -242,27 +301,61 @@ pub fn draw(ui: &mut egui::Ui, o: &Options<'_>, drag: &mut Option<XDrag>) -> Vec
             if c > 0 {
                 let bh = (c as f32 / max * (h - 4.0)).max(1.0);
                 let x = plot.left() + i as f32 * bw;
-                painter.rect_filled(Rect::from_min_max(pos2(x, plot.bottom() - 2.0 - bh), pos2(x + bw.max(1.0), plot.bottom() - 2.0)), 0.0, color);
+                painter.rect_filled(
+                    Rect::from_min_max(
+                        pos2(x, plot.bottom() - 2.0 - bh),
+                        pos2(x + bw.max(1.0), plot.bottom() - 2.0),
+                    ),
+                    0.0,
+                    color,
+                );
             }
         }
         // Selection (applied, or being dragged)
         let band = match *drag {
             Some(d) => Some((d.from_x.min(d.to_x), d.from_x.max(d.to_x))),
-            None => o.range.map(|r| (to_x(r.start, plot.left()), to_x(r.end, plot.left()))),
+            None => o
+                .range
+                .map(|r| (to_x(r.start, plot.left()), to_x(r.end, plot.left()))),
         };
         if let Some((xa, xb)) = band {
-            let r = Rect::from_min_max(pos2(xa.clamp(plot.left(), plot.right()), plot.top()), pos2(xb.clamp(plot.left(), plot.right()), plot.bottom()));
+            let r = Rect::from_min_max(
+                pos2(xa.clamp(plot.left(), plot.right()), plot.top()),
+                pos2(xb.clamp(plot.left(), plot.right()), plot.bottom()),
+            );
             painter.rect_filled(r, 0.0, pal.band());
-            painter.rect_stroke(r, 0.0, Stroke::new(1.0, pal.highlight()), egui::StrokeKind::Inside);
+            painter.rect_stroke(
+                r,
+                0.0,
+                Stroke::new(1.0, pal.highlight()),
+                egui::StrokeKind::Inside,
+            );
         }
         // Label
-        let selected = label_action.is_some_and(|a| matches!(a, Action::SelectThread { tid, .. } if Some(tid) == o.selected_tid));
-        painter.with_clip_rect(label_rect.shrink2(vec2(2.0, 0.0))).text(pos2(label_rect.left() + 4.0, label_rect.center().y), Align2::LEFT_CENTER, label, FontId::proportional(11.5), if selected { pal.highlight() } else { pal.text() });
+        let selected = label_action.is_some_and(
+            |a| matches!(a, Action::SelectThread { tid, .. } if Some(tid) == o.selected_tid),
+        );
+        painter
+            .with_clip_rect(label_rect.shrink2(vec2(2.0, 0.0)))
+            .text(
+                pos2(label_rect.left() + 4.0, label_rect.center().y),
+                Align2::LEFT_CENTER,
+                label,
+                FontId::proportional(11.5),
+                if selected {
+                    pal.highlight()
+                } else {
+                    pal.text()
+                },
+            );
 
         // Interaction: drag selects; a click without dragging clears; a click on the label selects a thread.
         if resp.drag_started() {
             if let Some(p) = resp.interact_pointer_pos().filter(|p| plot.contains(*p)) {
-                *drag = Some(XDrag { from_x: p.x, to_x: p.x });
+                *drag = Some(XDrag {
+                    from_x: p.x,
+                    to_x: p.x,
+                });
             }
         }
         if resp.dragged() {
@@ -273,8 +366,14 @@ pub fn draw(ui: &mut egui::Ui, o: &Options<'_>, drag: &mut Option<XDrag>) -> Vec
         if resp.drag_stopped() {
             if let Some(d) = drag.take() {
                 if (d.from_x - d.to_x).abs() >= 4.0 {
-                    let (ta, tb) = (to_time(d.from_x.min(d.to_x), plot.left()), to_time(d.from_x.max(d.to_x), plot.left()));
-                    actions.push(Action::SetRange(TimeRange { start: ta, end: tb.max(ta + 1) }));
+                    let (ta, tb) = (
+                        to_time(d.from_x.min(d.to_x), plot.left()),
+                        to_time(d.from_x.max(d.to_x), plot.left()),
+                    );
+                    actions.push(Action::SetRange(TimeRange {
+                        start: ta,
+                        end: tb.max(ta + 1),
+                    }));
                 } else {
                     actions.push(Action::ClearRange);
                 }
@@ -304,26 +403,78 @@ pub fn draw(ui: &mut egui::Ui, o: &Options<'_>, drag: &mut Option<XDrag>) -> Vec
     };
 
     // Time axis, above the overall strip
-    let (axis, _) = ui.allocate_exact_size(vec2(o.label_w + plot_w + RIGHT_PAD, 16.0), Sense::hover());
+    let (axis, _) =
+        ui.allocate_exact_size(vec2(o.label_w + plot_w + RIGHT_PAD, 16.0), Sense::hover());
     let plot_left = axis.left() + o.label_w;
     for tick in ticks(span, plot_w, 90.0) {
         let x = plot_left + tick.fraction * plot_w;
-        ui.painter().line_segment([pos2(x, axis.bottom() - 4.0), pos2(x, axis.bottom())], Stroke::new(1.0, pal.axis()));
-        ui.painter().text(pos2(x + 2.0, axis.center().y - 1.0), Align2::LEFT_CENTER, tick.label, FontId::proportional(10.5), pal.weak());
+        ui.painter().line_segment(
+            [pos2(x, axis.bottom() - 4.0), pos2(x, axis.bottom())],
+            Stroke::new(1.0, pal.axis()),
+        );
+        ui.painter().text(
+            pos2(x + 2.0, axis.center().y - 1.0),
+            Align2::LEFT_CENTER,
+            tick.label,
+            FontId::proportional(10.5),
+            pal.weak(),
+        );
     }
 
     let bin_ns = span / tl.bins.len().max(1) as u64;
-    let all_tip = |b: usize| format!("{} {} in this {} slice", o.cost.format(tl.bins.get(b).copied().unwrap_or(0)), o.noun, duration(bin_ns));
-    row(ui, usize::MAX, o.strip_h, &tl.bins, pal.timeline_bar(), &format!("All ({})", o.cost.format(tl.total)), None, &all_tip);
+    let all_tip = |b: usize| {
+        format!(
+            "{} {} in this {} slice",
+            o.cost.format(tl.bins.get(b).copied().unwrap_or(0)),
+            o.noun,
+            duration(bin_ns)
+        )
+    };
+    row(
+        ui,
+        usize::MAX,
+        o.strip_h,
+        &tl.bins,
+        pal.timeline_bar(),
+        &format!("All ({})", o.cost.format(tl.total)),
+        None,
+        &all_tip,
+    );
 
     if o.show_lanes {
         ui.add_space(4.0);
         for (i, lane) in tl.lanes.iter().enumerate() {
             let comm = o.comm.get(&lane.pid).map_or("?", String::as_str);
             let hue = ((lane.tid as u32).wrapping_mul(2654435761) >> 8) % 360;
-            let color: Color32 = egui::ecolor::Hsva::new(hue as f32 / 360.0, if pal.dark { 0.5 } else { 0.65 }, if pal.dark { 0.85 } else { 0.72 }, 1.0).into();
-            let tip = |b: usize| format!("thread {}: {} {} in this {} slice", lane.tid, o.cost.format(lane.bins.get(b).copied().unwrap_or(0)), o.noun, duration(bin_ns));
-            row(ui, i, LANE_H, &lane.bins, color, &format!("{} ({comm}) — {}", lane.tid, o.cost.format(lane.samples)), Some(Action::SelectThread { pid: lane.pid, tid: lane.tid }), &tip);
+            let color: Color32 = egui::ecolor::Hsva::new(
+                hue as f32 / 360.0,
+                if pal.dark { 0.5 } else { 0.65 },
+                if pal.dark { 0.85 } else { 0.72 },
+                1.0,
+            )
+            .into();
+            let tip = |b: usize| {
+                format!(
+                    "thread {}: {} {} in this {} slice",
+                    lane.tid,
+                    o.cost.format(lane.bins.get(b).copied().unwrap_or(0)),
+                    o.noun,
+                    duration(bin_ns)
+                )
+            };
+            row(
+                ui,
+                i,
+                LANE_H,
+                &lane.bins,
+                color,
+                &format!("{} ({comm}) — {}", lane.tid, o.cost.format(lane.samples)),
+                Some(Action::SelectThread {
+                    pid: lane.pid,
+                    tid: lane.tid,
+                }),
+                &tip,
+            );
         }
     }
     actions
@@ -340,7 +491,17 @@ mod tests {
             frames: vec![],
             full: Trie::default(),
             truncated: Trie::default(),
-            samples: samples.iter().map(|&(time, pid, tid)| SampleRef { time, period: 1, pid, tid, full: 0, truncated: 0 }).collect(),
+            samples: samples
+                .iter()
+                .map(|&(time, pid, tid)| SampleRef {
+                    time,
+                    period: 1,
+                    pid,
+                    tid,
+                    full: 0,
+                    truncated: 0,
+                })
+                .collect(),
             comm: Default::default(),
             stats: LoadStats::default(),
         }
@@ -353,22 +514,49 @@ mod tests {
         assert_eq!((tl.t0, tl.t1), (1000, 3001));
         assert_eq!(tl.bins.iter().sum::<u64>(), 4);
         assert_eq!(tl.total, 4);
-        assert_eq!(tl.bins[0], 2, "the first two samples are in the first slice");
-        assert_eq!(tl.bins[3], 1, "the last sample is in the last slice, not one past it");
+        assert_eq!(
+            tl.bins[0], 2,
+            "the first two samples are in the first slice"
+        );
+        assert_eq!(
+            tl.bins[3], 1,
+            "the last sample is in the last slice, not one past it"
+        );
     }
 
     #[test]
     fn lanes_are_the_busiest_threads_and_respect_the_filter() {
-        let p = profile(&[(0, 1, 10), (1, 1, 10), (2, 1, 10), (3, 1, 11), (4, 2, 20), (5, 2, 20)]);
+        let p = profile(&[
+            (0, 1, 10),
+            (1, 1, 10),
+            (2, 1, 10),
+            (3, 1, 11),
+            (4, 2, 20),
+            (5, 2, 20),
+        ]);
         let tl = build(&p, Filter::All, 6, 2, Cost::Samples);
-        assert_eq!(tl.lanes.iter().map(|l| (l.tid, l.samples)).collect::<Vec<_>>(), vec![(10, 3), (20, 2)], "top 2, busiest first");
+        assert_eq!(
+            tl.lanes
+                .iter()
+                .map(|l| (l.tid, l.samples))
+                .collect::<Vec<_>>(),
+            vec![(10, 3), (20, 2)],
+            "top 2, busiest first"
+        );
         assert_eq!(tl.lanes[0].bins.iter().sum::<u64>(), 3);
         let only1 = build(&p, Filter::Process(1), 6, 8, Cost::Samples);
         assert_eq!(only1.total, 4);
-        assert_eq!(only1.lanes.iter().map(|l| l.tid).collect::<Vec<_>>(), vec![10, 11]);
+        assert_eq!(
+            only1.lanes.iter().map(|l| l.tid).collect::<Vec<_>>(),
+            vec![10, 11]
+        );
         let one = build(&p, Filter::Thread(20), 6, 8, Cost::Samples);
         assert_eq!((one.total, one.lanes.len()), (2, 1));
-        assert_eq!((one.t0, one.t1), (0, 6), "the axis always spans the whole recording");
+        assert_eq!(
+            (one.t0, one.t1),
+            (0, 6),
+            "the axis always spans the whole recording"
+        );
     }
 
     fn r(start: u64, end: u64) -> TimeRange {
@@ -385,10 +573,18 @@ mod tests {
     fn sample_indices_use_a_half_open_range() {
         let p = profile(&[(10, 1, 1), (20, 1, 1), (20, 1, 1), (30, 1, 1)]);
         assert_eq!(sample_indices(&p, None), 0..4);
-        assert_eq!(sample_indices(&p, Some(r(20, 30))), 1..3, "includes 20, excludes 30");
+        assert_eq!(
+            sample_indices(&p, Some(r(20, 30))),
+            1..3,
+            "includes 20, excludes 30"
+        );
         assert_eq!(sample_indices(&p, Some(r(0, 10))), 0..0);
         assert_eq!(sample_indices(&p, Some(r(31, 99))), 4..4);
-        assert_eq!(sample_indices(&p, Some(r(25, 5))), 3..3, "an inverted range is empty");
+        assert_eq!(
+            sample_indices(&p, Some(r(25, 5))),
+            3..3,
+            "an inverted range is empty"
+        );
     }
 
     #[test]
@@ -400,9 +596,19 @@ mod tests {
         assert_eq!(nice_step(140.0), 200.0);
         // A 4.99 s recording over 900 px with ticks at least 90 px apart: 10 ticks max -> 0.5 s steps.
         let t = ticks(4_990_000_000, 900.0, 90.0);
-        assert_eq!(t[0], Tick { fraction: 0.0, label: "0 ns".to_string() });
+        assert_eq!(
+            t[0],
+            Tick {
+                fraction: 0.0,
+                label: "0 ns".to_string()
+            }
+        );
         assert_eq!(t[1].label, "500 ms");
-        assert!(t.windows(2).all(|w| (w[1].fraction - w[0].fraction) * 900.0 >= 89.0), "ticks are at least the minimum gap apart");
+        assert!(
+            t.windows(2)
+                .all(|w| (w[1].fraction - w[0].fraction) * 900.0 >= 89.0),
+            "ticks are at least the minimum gap apart"
+        );
         assert!(t.last().unwrap().fraction <= 1.0);
     }
 

@@ -28,7 +28,11 @@ pub struct Options {
 
 impl Default for Options {
     fn default() -> Self {
-        Self { cold: false, regions_per_reader: 4, corrupt_bound: false }
+        Self {
+            cold: false,
+            regions_per_reader: 4,
+            corrupt_bound: false,
+        }
     }
 }
 
@@ -73,10 +77,14 @@ where
     if opts.cold {
         split::drop_cache(file);
     }
-    let mut report = Report { regions: 1, ..Default::default() };
+    let mut report = Report {
+        regions: 1,
+        ..Default::default()
+    };
     if cfg.readers > 1 {
         let t = Instant::now();
-        let mut bounds = anchor::plan_regions(file, sec, cfg.readers * opts.regions_per_reader.max(1))?;
+        let mut bounds =
+            anchor::plan_regions(file, sec, cfg.readers * opts.regions_per_reader.max(1))?;
         if opts.corrupt_bound && bounds.len() > 2 {
             bounds[1] += 4; // record sizes are multiples of 8, so this is never a boundary
         }
@@ -94,7 +102,14 @@ where
             Err(e) => return Err(e),
         }
     }
-    let (states, metrics) = pipeline::run_regions::<S, _>(file, Some(path), sec, &[0, sec.len], Config { readers: 1, ..cfg }, &work)?;
+    let (states, metrics) = pipeline::run_regions::<S, _>(
+        file,
+        Some(path),
+        sec,
+        &[0, sec.len],
+        Config { readers: 1, ..cfg },
+        &work,
+    )?;
     report.metrics = metrics;
     Ok((states, report))
 }

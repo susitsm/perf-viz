@@ -3,10 +3,10 @@
 
 use std::{
     collections::HashMap,
-    sync::OnceLock,
     fs::File,
     ops::{Deref, Range},
     path::{Path, PathBuf},
+    sync::OnceLock,
     sync::{Arc, Mutex},
 };
 
@@ -76,7 +76,13 @@ impl Binary {
         for s in obj.sections() {
             let Ok(name) = s.name_bytes() else { continue };
             let file = s.file_range().map(|(o, l)| o as usize..(o + l) as usize);
-            sections.insert(name.to_vec(), Section { svma: s.address()..s.address() + s.size(), file });
+            sections.insert(
+                name.to_vec(),
+                Section {
+                    svma: s.address()..s.address() + s.size(),
+                    file,
+                },
+            );
         }
 
         // Program headers give the vaddr <-> file offset mapping of each loadable segment.
@@ -87,10 +93,23 @@ impl Binary {
             .map_err(|e| e.to_string())?
             .iter()
             .filter(|p| p.p_type(endian) == PT_LOAD)
-            .map(|p| Load { vaddr: p.p_vaddr(endian), offset: p.p_offset(endian), filesz: p.p_filesz(endian), executable: p.p_flags(endian).0 & PF_X.0 != 0 })
+            .map(|p| Load {
+                vaddr: p.p_vaddr(endian),
+                offset: p.p_offset(endian),
+                filesz: p.p_filesz(endian),
+                executable: p.p_flags(endian).0 & PF_X.0 != 0,
+            })
             .collect();
 
-        Ok(Binary { path: path.to_owned(), mmap, loads, sections, dev: md.dev(), ino: md.ino(), funcs: OnceLock::new() })
+        Ok(Binary {
+            path: path.to_owned(),
+            mmap,
+            loads,
+            sections,
+            dev: md.dev(),
+            ino: md.ino(),
+            funcs: OnceLock::new(),
+        })
     }
 
     /// The bias to add to a static address (svma) to get the runtime address (avma), given
@@ -113,7 +132,10 @@ impl Binary {
 
     /// The bytes at static address `svma` (up to `len`), read from the file image.
     pub fn bytes_at_svma(&self, svma: u64, len: usize) -> Option<&[u8]> {
-        let l = self.loads.iter().find(|l| svma >= l.vaddr && svma + len as u64 <= l.vaddr + l.filesz)?;
+        let l = self
+            .loads
+            .iter()
+            .find(|l| svma >= l.vaddr && svma + len as u64 <= l.vaddr + l.filesz)?;
         let off = (svma - l.vaddr + l.offset) as usize;
         self.mmap.get(off..off + len)
     }
@@ -121,12 +143,20 @@ impl Binary {
     /// Name of the function symbol containing static address `svma`, from the ELF symbol tables.
     pub fn func_at(&self, svma: u64) -> Option<&str> {
         let funcs = self.funcs.get_or_init(|| {
-            let Ok(obj) = object::File::parse(&**self.mmap) else { return Vec::new() };
+            let Ok(obj) = object::File::parse(&**self.mmap) else {
+                return Vec::new();
+            };
             let mut v: Vec<_> = obj
                 .symbols()
                 .chain(obj.dynamic_symbols())
                 .filter(|s| s.kind() == object::SymbolKind::Text && s.address() != 0)
-                .filter_map(|s| Some(FuncSym { start: s.address(), size: s.size(), name: s.name().ok()?.to_string() }))
+                .filter_map(|s| {
+                    Some(FuncSym {
+                        start: s.address(),
+                        size: s.size(),
+                        name: s.name().ok()?.to_string(),
+                    })
+                })
                 .collect();
             v.sort_by_key(|f| f.start);
             v
@@ -155,7 +185,10 @@ impl ModuleSectionInfo<SectionData> for ElfSections {
 
     fn section_data(&mut self, name: &[u8]) -> Option<SectionData> {
         let range = self.0.sections.get(name)?.file.clone()?;
-        Some(SectionData { mmap: self.0.mmap.clone(), range })
+        Some(SectionData {
+            mmap: self.0.mmap.clone(),
+            range,
+        })
     }
 }
 
@@ -180,7 +213,10 @@ impl BinaryCache {
             .or_insert_with(|| match Binary::open(path) {
                 Ok(b) => Some(Arc::new(b)),
                 Err(e) => {
-                    self.errors.lock().unwrap().push(BinaryError { path: path.to_owned(), message: e });
+                    self.errors.lock().unwrap().push(BinaryError {
+                        path: path.to_owned(),
+                        message: e,
+                    });
                     None
                 }
             })

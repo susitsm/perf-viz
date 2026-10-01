@@ -56,7 +56,10 @@ pub struct Trie {
 
 impl Trie {
     pub fn children(&self, n: u32) -> &[u32] {
-        let (a, b) = (self.child_start[n as usize] as usize, self.child_start[n as usize + 1] as usize);
+        let (a, b) = (
+            self.child_start[n as usize] as usize,
+            self.child_start[n as usize + 1] as usize,
+        );
         &self.children[a..b]
     }
 
@@ -72,7 +75,15 @@ pub struct TrieBuilder {
 
 impl Default for TrieBuilder {
     fn default() -> Self {
-        Self { nodes: vec![Node { parent: u32::MAX, frame: u32::MAX, total: 0, self_count: 0 }], index: FxHashMap::default() }
+        Self {
+            nodes: vec![Node {
+                parent: u32::MAX,
+                frame: u32::MAX,
+                total: 0,
+                self_count: 0,
+            }],
+            index: FxHashMap::default(),
+        }
     }
 }
 
@@ -80,7 +91,12 @@ impl TrieBuilder {
     /// The child of `parent` for `frame`, created if needed.
     pub fn child(&mut self, parent: u32, frame: u32) -> u32 {
         *self.index.entry((parent, frame)).or_insert_with(|| {
-            self.nodes.push(Node { parent, frame, total: 0, self_count: 0 });
+            self.nodes.push(Node {
+                parent,
+                frame,
+                total: 0,
+                self_count: 0,
+            });
             self.nodes.len() as u32 - 1
         })
     }
@@ -127,7 +143,11 @@ impl TrieBuilder {
             let (a, b) = (count[p] as usize, count[p + 1] as usize);
             children[a..b].sort_by_key(|&c| (std::cmp::Reverse(self.nodes[c as usize].total), c));
         }
-        Trie { nodes: self.nodes, child_start: count, children }
+        Trie {
+            nodes: self.nodes,
+            child_start: count,
+            children,
+        }
     }
 }
 
@@ -200,10 +220,15 @@ pub struct Profile {
 impl Profile {
     /// The module's file name, for display.
     pub fn module_name(&self, module: u32) -> &str {
-        self.module_path(module).rsplit('/').next().unwrap_or("[no module]")
+        self.module_path(module)
+            .rsplit('/')
+            .next()
+            .unwrap_or("[no module]")
     }
 
     pub fn module_path(&self, module: u32) -> &str {
-        self.modules.get(module as usize).map_or("[no module]", String::as_str)
+        self.modules
+            .get(module as usize)
+            .map_or("[no module]", String::as_str)
     }
 }

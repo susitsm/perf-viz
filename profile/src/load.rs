@@ -77,7 +77,18 @@ impl Default for Options {
         let d = ordered::Config::default();
         // Both stages are cheap next to reading; more workers only add contention.
         let cpus = std::thread::available_parallelism().map_or(4, |n| n.get());
-        Self { progress: None, dwarf: DwarfMode::Auto, readers: d.readers, workers: cpus.min(8), cold: false, region_mb: d.region_bytes >> 20, in_flight: d.in_flight, lookahead: d.lookahead, corrupt_bound: false, force_sequential: false }
+        Self {
+            progress: None,
+            dwarf: DwarfMode::Auto,
+            readers: d.readers,
+            workers: cpus.min(8),
+            cold: false,
+            region_mb: d.region_bytes >> 20,
+            in_flight: d.in_flight,
+            lookahead: d.lookahead,
+            corrupt_bound: false,
+            force_sequential: false,
+        }
     }
 }
 
@@ -119,7 +130,15 @@ struct Local {
 
 impl Default for Local {
     fn default() -> Self {
-        Self { trie: PhysTrie::default(), rows: Vec::new(), counters: Counters::default(), cache: UnwCache::new(), cache_key: u64::MAX, scratch: Scratch::default(), frames: Vec::new() }
+        Self {
+            trie: PhysTrie::default(),
+            rows: Vec::new(),
+            counters: Counters::default(),
+            cache: UnwCache::new(),
+            cache_key: u64::MAX,
+            scratch: Scratch::default(),
+            frames: Vec::new(),
+        }
     }
 }
 
@@ -156,14 +175,18 @@ impl Loader {
             big_endian,
             spaces: RwLock::new(AddressSpaces::default()),
             pending: Mutex::new(Pending::default()),
-            unwinders: (0..UNWINDER_SHARDS).map(|_| Mutex::new(HashMap::new())).collect(),
+            unwinders: (0..UNWINDER_SHARDS)
+                .map(|_| Mutex::new(HashMap::new()))
+                .collect(),
             empty: Arc::new(EpochUnwind::default()),
             bins: BinaryCache::default(),
         }
     }
 
     fn unwinder_for(&self, snap: &EpochSnap) -> Arc<EpochUnwind> {
-        let mut shard = self.unwinders[snap.id as usize % UNWINDER_SHARDS].lock().unwrap();
+        let mut shard = self.unwinders[snap.id as usize % UNWINDER_SHARDS]
+            .lock()
+            .unwrap();
         if let Some((v, eu)) = shard.get(&snap.id) {
             if *v == snap.version {
                 return eu.clone();
@@ -181,7 +204,12 @@ impl Loader {
             local.counters.records += 1;
             if r.ty == PERF_RECORD_SAMPLE {
                 // Samples are the bulk of the data and are handled by `process`; only their time is needed here.
-                max_sample_time = max_sample_time.max(self.ctx.raw_event::<T>(r.ty, r.misc, r.body).timestamp().unwrap_or(0));
+                max_sample_time = max_sample_time.max(
+                    self.ctx
+                        .raw_event::<T>(r.ty, r.misc, r.body)
+                        .timestamp()
+                        .unwrap_or(0),
+                );
                 return Ok(());
             }
             // User records and types without task/mmap meaning are skipped without parsing.
@@ -199,7 +227,10 @@ impl Loader {
             }
             Ok(())
         })?;
-        Ok(Extracted { events, max_sample_time })
+        Ok(Extracted {
+            events,
+            max_sample_time,
+        })
     }
 
     fn process_samples<T: ByteOrder>(&self, local: &mut Local, buf: &[u8]) -> Result<()> {
@@ -207,21 +238,35 @@ impl Loader {
             if r.ty != PERF_RECORD_SAMPLE {
                 return Ok(());
             }
-            let EventRecord::Sample(s) = self.ctx.raw_event::<T>(r.ty, r.misc, r.body).parse()? else { return Ok(()) };
+            let EventRecord::Sample(s) = self.ctx.raw_event::<T>(r.ty, r.misc, r.body).parse()?
+            else {
+                return Ok(());
+            };
             local.counters.samples += 1;
             let (Some(regs), Some((stack, dyn_size))) = (&s.user_regs, &s.user_stack) else {
                 local.counters.without_stack += 1;
                 return Ok(());
             };
-            let (Some(ip), Some(sp), Some(bp)) = (regs.get(PERF_REG_X86_IP), regs.get(PERF_REG_X86_SP), regs.get(PERF_REG_X86_BP)) else {
+            let (Some(ip), Some(sp), Some(bp)) = (
+                regs.get(PERF_REG_X86_IP),
+                regs.get(PERF_REG_X86_SP),
+                regs.get(PERF_REG_X86_BP),
+            ) else {
                 local.counters.without_stack += 1;
                 return Ok(());
             };
-            let (pid, time, tid) = (s.pid.unwrap_or(-1), s.timestamp.unwrap_or(0), s.tid.unwrap_or(-1));
+            let (pid, time, tid) = (
+                s.pid.unwrap_or(-1),
+                s.timestamp.unwrap_or(0),
+                s.tid.unwrap_or(-1),
+            );
             // The address-space epoch current for this process at this time, as applied so far.
             let snap = self.spaces.read().unwrap().snapshot(pid, time);
             let (key, eu) = match &snap {
-                Some(sn) => (((sn.id as u64) << 32) | sn.version as u64, self.unwinder_for(sn)),
+                Some(sn) => (
+                    ((sn.id as u64) << 32) | sn.version as u64,
+                    self.unwinder_for(sn),
+                ),
                 None => (u64::MAX - 1, self.empty.clone()),
             };
             if local.cache_key != key {
@@ -231,7 +276,17 @@ impl Loader {
             let stack = stack.as_slice();
             let valid = (*dyn_size as usize).min(stack.len());
             local.frames.clear();
-            let suspect_from = unwind_sample(&eu, &mut local.cache, &mut local.scratch, ip, sp, bp, &stack, valid, &mut local.frames);
+            let suspect_from = unwind_sample(
+                &eu,
+                &mut local.cache,
+                &mut local.scratch,
+                ip,
+                sp,
+                bp,
+                &stack,
+                valid,
+                &mut local.frames,
+            );
             local.counters.frames += local.frames.len() as u64;
             if suspect_from != usize::MAX {
                 local.counters.suspect_samples += 1;
@@ -239,7 +294,13 @@ impl Loader {
             }
             let node = local.trie.insert_leaf_first(&local.frames);
             local.counters.with_period += s.period.is_some() as u64;
-            local.rows.push(Row { time, period: s.period.unwrap_or(1), pid, tid, node });
+            local.rows.push(Row {
+                time,
+                period: s.period.unwrap_or(1),
+                pid,
+                tid,
+                node,
+            });
             Ok(())
         })
     }
@@ -250,7 +311,11 @@ impl Consumer for Loader {
     type Events = Extracted;
 
     fn extract(&self, _region: usize, local: &mut Local, buf: &[u8]) -> Result<Extracted> {
-        if self.big_endian { self.extract_events::<BigEndian>(local, buf) } else { self.extract_events::<LittleEndian>(local, buf) }
+        if self.big_endian {
+            self.extract_events::<BigEndian>(local, buf)
+        } else {
+            self.extract_events::<LittleEndian>(local, buf)
+        }
     }
 
     fn commit(&self, _region: usize, extracted: Vec<Extracted>) -> Result<()> {
@@ -284,7 +349,11 @@ impl Consumer for Loader {
     }
 
     fn process(&self, _region: usize, local: &mut Local, buf: &[u8]) -> Result<()> {
-        if self.big_endian { self.process_samples::<BigEndian>(local, buf) } else { self.process_samples::<LittleEndian>(local, buf) }
+        if self.big_endian {
+            self.process_samples::<BigEndian>(local, buf)
+        } else {
+            self.process_samples::<LittleEndian>(local, buf)
+        }
     }
 }
 
@@ -292,20 +361,38 @@ pub fn load(path: &Path, opts: Options, progress: &mut dyn FnMut(&str)) -> Resul
     let mut stats = LoadStats::default();
     let src = Source::open(path)?;
     let big_endian = src.sec.big_endian;
-    let cfg = ordered::Config { block: 1 << 20, workers: opts.workers, readers: opts.readers, region_bytes: opts.region_mb << 20, in_flight: opts.in_flight, lookahead: opts.lookahead.max(1) /* required: see the module docs */ };
-    let sopts = ordered::Options { progress: opts.progress.clone(), cold: opts.cold, corrupt_bound: opts.corrupt_bound, force_sequential: opts.force_sequential };
+    let cfg = ordered::Config {
+        block: 1 << 20,
+        workers: opts.workers,
+        readers: opts.readers,
+        region_bytes: opts.region_mb << 20,
+        in_flight: opts.in_flight,
+        lookahead: opts.lookahead.max(1), /* required: see the module docs */
+    };
+    let sopts = ordered::Options {
+        progress: opts.progress.clone(),
+        cold: opts.cold,
+        corrupt_bound: opts.corrupt_bound,
+        force_sequential: opts.force_sequential,
+    };
 
     // ---- one pass: read, extract events, commit, unwind ---------------------------------------
     progress("reading and unwinding");
     let t = Instant::now();
-    let (loader, states, rep) = ordered::stream_ordered(path, cfg, sopts, || Loader::new(src.ctx.clone(), big_endian))?;
+    let (loader, states, rep) = ordered::stream_ordered(path, cfg, sopts, || {
+        Loader::new(src.ctx.clone(), big_endian)
+    })?;
     stats.secs_stream = t.elapsed().as_secs_f64();
     stats.secs_plan = rep.plan_time.as_secs_f64();
     stats.stream_regions = rep.metrics.regions;
     stats.stream_max_held_units = rep.metrics.max_held_units;
     stats.fell_back = rep.fell_back;
     let spaces = loader.spaces.into_inner().unwrap();
-    let module_paths: Vec<PathBuf> = spaces.module_paths().iter().map(|p| PathBuf::from(&**p)).collect();
+    let module_paths: Vec<PathBuf> = spaces
+        .module_paths()
+        .iter()
+        .map(|p| PathBuf::from(&**p))
+        .collect();
     stats.processes = spaces.pids().count();
     stats.epochs = spaces.epoch_count();
 
@@ -317,7 +404,10 @@ pub fn load(path: &Path, opts: Options, progress: &mut dyn FnMut(&str)) -> Resul
     let mut c = Counters::default();
     for st in states {
         let map = phys.merge(&st.trie);
-        rows.extend(st.rows.iter().map(|r| Row { node: map[r.node as usize], ..*r }));
+        rows.extend(st.rows.iter().map(|r| Row {
+            node: map[r.node as usize],
+            ..*r
+        }));
         c.samples += st.counters.samples;
         c.without_stack += st.counters.without_stack;
         c.frames += st.counters.frames;
@@ -345,10 +435,19 @@ pub fn load(path: &Path, opts: Options, progress: &mut dyn FnMut(&str)) -> Resul
     let mut per_module: BTreeMap<u32, BTreeSet<u64>> = BTreeMap::new();
     for n in &phys.nodes[1..] {
         if n.frame.module != NO_MODULE {
-            per_module.entry(n.frame.module).or_default().insert(n.frame.svma);
+            per_module
+                .entry(n.frame.module)
+                .or_default()
+                .insert(n.frame.svma);
         }
     }
-    let tasks: Vec<ModuleAddrs> = per_module.into_iter().map(|(module, s)| ModuleAddrs { module, addrs: s.into_iter().collect() }).collect();
+    let tasks: Vec<ModuleAddrs> = per_module
+        .into_iter()
+        .map(|(module, s)| ModuleAddrs {
+            module,
+            addrs: s.into_iter().collect(),
+        })
+        .collect();
     stats.unique_addresses = tasks.iter().map(|t| t.addrs.len()).sum();
     let results = symbolize_many(&module_paths, tasks, opts.dwarf);
     for syms in results.values() {
@@ -368,12 +467,30 @@ pub fn load(path: &Path, opts: Options, progress: &mut dyn FnMut(&str)) -> Resul
     let mut frames: Vec<FrameInfo> = Vec::new();
     let mut frame_ids: FxHashMap<FrameKey, u32> = FxHashMap::default();
     let mut intern = |lf: &LogicalFrame, module: u32, suspect: bool| -> u32 {
-        *frame_ids.entry(FrameKey { name: lf.name.clone(), module, suspect }).or_insert_with(|| {
-            frames.push(FrameInfo { name: lf.name.clone(), module, file: lf.file.clone(), line: lf.line, suspect, raw: lf.raw });
-            frames.len() as u32 - 1
-        })
+        *frame_ids
+            .entry(FrameKey {
+                name: lf.name.clone(),
+                module,
+                suspect,
+            })
+            .or_insert_with(|| {
+                frames.push(FrameInfo {
+                    name: lf.name.clone(),
+                    module,
+                    file: lf.file.clone(),
+                    line: lf.line,
+                    suspect,
+                    raw: lf.raw,
+                });
+                frames.len() as u32 - 1
+            })
     };
-    let unmapped = LogicalFrame { name: "[unmapped]".into(), file: None, line: None, raw: true };
+    let unmapped = LogicalFrame {
+        name: "[unmapped]".into(),
+        file: None,
+        line: None,
+        raw: true,
+    };
     let (mut full, mut truncated) = (TrieBuilder::default(), TrieBuilder::default());
     // Where each physical node ends up: the innermost logical frame of its chain.
     let mut full_of = vec![ROOT; phys.nodes.len()];
@@ -382,7 +499,11 @@ pub fn load(path: &Path, opts: Options, progress: &mut dyn FnMut(&str)) -> Resul
         let chain: Vec<u32> = if n.frame.module == NO_MODULE {
             vec![intern(&unmapped, NO_MODULE, n.frame.suspect)]
         } else {
-            results[&n.frame.module].frames_of(n.frame.svma).iter().map(|lf| intern(lf, n.frame.module, n.frame.suspect)).collect()
+            results[&n.frame.module]
+                .frames_of(n.frame.svma)
+                .iter()
+                .map(|lf| intern(lf, n.frame.module, n.frame.suspect))
+                .collect()
         };
         // The chain is innermost-first; a path is root-first, so walk it backwards.
         let mut cur = full_of[n.parent as usize];
@@ -402,9 +523,30 @@ pub fn load(path: &Path, opts: Options, progress: &mut dyn FnMut(&str)) -> Resul
         truncated.add_self(cur, n.self_count);
     }
     let (full, truncated) = (full.finish(), truncated.finish());
-    let samples = rows.iter().map(|r| SampleRef { time: r.time, period: r.period, pid: r.pid, tid: r.tid, full: full_of[r.node as usize], truncated: trunc_of[r.node as usize] }).collect();
+    let samples = rows
+        .iter()
+        .map(|r| SampleRef {
+            time: r.time,
+            period: r.period,
+            pid: r.pid,
+            tid: r.tid,
+            full: full_of[r.node as usize],
+            truncated: trunc_of[r.node as usize],
+        })
+        .collect();
     stats.secs_build = t.elapsed().as_secs_f64();
 
-    let modules = module_paths.iter().map(|p| p.to_string_lossy().to_string()).collect();
-    Ok(Profile { modules, frames, full, truncated, samples, comm: spaces.comm, stats })
+    let modules = module_paths
+        .iter()
+        .map(|p| p.to_string_lossy().to_string())
+        .collect();
+    Ok(Profile {
+        modules,
+        frames,
+        full,
+        truncated,
+        samples,
+        comm: spaces.comm,
+        stats,
+    })
 }

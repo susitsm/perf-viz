@@ -35,7 +35,10 @@ impl Functions {
             .iter()
             .map(|f| {
                 *ids.entry((f.name.as_str(), f.module)).or_insert_with(|| {
-                    funcs.push(Func { name: f.name.clone(), module: f.module });
+                    funcs.push(Func {
+                        name: f.name.clone(),
+                        module: f.module,
+                    });
                     funcs.len() as u32 - 1
                 })
             })
@@ -52,7 +55,14 @@ impl Functions {
 /// Samples that end at each node, given inclusive `totals`.
 pub fn self_counts(trie: &Trie, totals: &[u64]) -> Vec<u64> {
     (0..trie.nodes.len() as u32)
-        .map(|n| totals[n as usize].saturating_sub(trie.children(n).iter().map(|&c| totals[c as usize]).sum::<u64>()))
+        .map(|n| {
+            totals[n as usize].saturating_sub(
+                trie.children(n)
+                    .iter()
+                    .map(|&c| totals[c as usize])
+                    .sum::<u64>(),
+            )
+        })
         .collect()
 }
 
@@ -63,7 +73,10 @@ pub struct Costs {
 }
 
 pub fn costs(trie: &Trie, totals: &[u64], selfs: &[u64], funcs: &Functions) -> Costs {
-    let mut c = Costs { self_: vec![0; funcs.funcs.len()], inclusive: vec![0; funcs.funcs.len()] };
+    let mut c = Costs {
+        self_: vec![0; funcs.funcs.len()],
+        inclusive: vec![0; funcs.funcs.len()],
+    };
     let mut on_stack = vec![0u32; funcs.funcs.len()];
     // Depth-first with an explicit stack: (node, next child index).
     let mut stack: Vec<(u32, usize)> = vec![(ROOT, 0)];
@@ -107,7 +120,12 @@ pub struct TdRow {
 }
 
 fn kids_by_cost(trie: &Trie, totals: &[u64], n: u32) -> Vec<u32> {
-    let mut k: Vec<u32> = trie.children(n).iter().copied().filter(|&c| totals[c as usize] > 0).collect();
+    let mut k: Vec<u32> = trie
+        .children(n)
+        .iter()
+        .copied()
+        .filter(|&c| totals[c as usize] > 0)
+        .collect();
     k.sort_by_key(|&c| (Reverse(totals[c as usize]), c));
     k
 }
@@ -116,11 +134,20 @@ fn kids_by_cost(trie: &Trie, totals: &[u64], n: u32) -> Vec<u32> {
 /// expanded node, heaviest first.
 pub fn top_down_rows(trie: &Trie, totals: &[u64], expanded: &HashSet<u32>) -> Vec<TdRow> {
     let mut rows = Vec::new();
-    let mut stack: Vec<(u32, u32)> = kids_by_cost(trie, totals, ROOT).into_iter().rev().map(|c| (c, 0)).collect();
+    let mut stack: Vec<(u32, u32)> = kids_by_cost(trie, totals, ROOT)
+        .into_iter()
+        .rev()
+        .map(|c| (c, 0))
+        .collect();
     while let Some((n, depth)) = stack.pop() {
         let kids = kids_by_cost(trie, totals, n);
         let is_expanded = !kids.is_empty() && expanded.contains(&n);
-        rows.push(TdRow { node: n, depth, expandable: !kids.is_empty(), expanded: is_expanded });
+        rows.push(TdRow {
+            node: n,
+            depth,
+            expandable: !kids.is_empty(),
+            expanded: is_expanded,
+        });
         if is_expanded {
             stack.extend(kids.into_iter().rev().map(|c| (c, depth + 1)));
         }
@@ -153,7 +180,9 @@ pub fn hottest_path(trie: &Trie, totals: &[u64], min_share: f32) -> Vec<u32> {
     let mut path = Vec::new();
     let mut n = ROOT;
     loop {
-        let Some(&best) = kids_by_cost(trie, totals, n).first() else { break };
+        let Some(&best) = kids_by_cost(trie, totals, n).first() else {
+            break;
+        };
         if (totals[best as usize] as f32) < min_share * totals[n as usize] as f32 {
             break;
         }
@@ -186,7 +215,11 @@ fn group(trie: &Trie, funcs: &Functions, entries: impl Iterator<Item = Weighted>
     let mut by_func: HashMap<u32, BuNode> = HashMap::new();
     for entry in entries {
         let f = funcs.of_node(trie, entry.id);
-        let e = by_func.entry(f).or_insert_with(|| BuNode { func: f, cost: 0, entries: Vec::new() });
+        let e = by_func.entry(f).or_insert_with(|| BuNode {
+            func: f,
+            cost: 0,
+            entries: Vec::new(),
+        });
         e.cost += entry.cost;
         e.entries.push(entry);
     }
@@ -197,7 +230,16 @@ fn group(trie: &Trie, funcs: &Functions, entries: impl Iterator<Item = Weighted>
 
 /// The first level of the bottom-up tree: functions ranked by self cost.
 pub fn bu_roots(trie: &Trie, funcs: &Functions, selfs: &[u64]) -> Vec<BuNode> {
-    group(trie, funcs, (1..trie.nodes.len() as u32).filter(|&n| selfs[n as usize] > 0).map(|n| Weighted { id: n, cost: selfs[n as usize] }))
+    group(
+        trie,
+        funcs,
+        (1..trie.nodes.len() as u32)
+            .filter(|&n| selfs[n as usize] > 0)
+            .map(|n| Weighted {
+                id: n,
+                cost: selfs[n as usize],
+            }),
+    )
 }
 
 /// The callers of a bottom-up node, ranked by the samples that reach them through it.
@@ -207,7 +249,10 @@ pub fn bu_callers(trie: &Trie, funcs: &Functions, node: &BuNode) -> Vec<BuNode> 
         funcs,
         node.entries.iter().filter_map(|e| {
             let parent = trie.nodes[e.id as usize].parent;
-            (parent != ROOT).then_some(Weighted { id: parent, cost: e.cost })
+            (parent != ROOT).then_some(Weighted {
+                id: parent,
+                cost: e.cost,
+            })
         }),
     )
 }
@@ -223,21 +268,46 @@ pub struct BuRow {
 }
 
 /// The visible rows of the bottom-up tree, computing callers only for expanded rows.
-pub fn bu_rows(trie: &Trie, funcs: &Functions, selfs: &[u64], expanded: &HashSet<Vec<u32>>) -> Vec<BuRow> {
-    fn walk(trie: &Trie, funcs: &Functions, expanded: &HashSet<Vec<u32>>, nodes: Vec<BuNode>, prefix: &[u32], out: &mut Vec<BuRow>) {
+pub fn bu_rows(
+    trie: &Trie,
+    funcs: &Functions,
+    selfs: &[u64],
+    expanded: &HashSet<Vec<u32>>,
+) -> Vec<BuRow> {
+    fn walk(
+        trie: &Trie,
+        funcs: &Functions,
+        expanded: &HashSet<Vec<u32>>,
+        nodes: Vec<BuNode>,
+        prefix: &[u32],
+        out: &mut Vec<BuRow>,
+    ) {
         for n in nodes {
             let mut path = prefix.to_vec();
             path.push(n.func);
             let callers = bu_callers(trie, funcs, &n);
             let is_expanded = !callers.is_empty() && expanded.contains(&path);
-            out.push(BuRow { path: path.clone(), func: n.func, cost: n.cost, has_callers: !callers.is_empty(), expanded: is_expanded });
+            out.push(BuRow {
+                path: path.clone(),
+                func: n.func,
+                cost: n.cost,
+                has_callers: !callers.is_empty(),
+                expanded: is_expanded,
+            });
             if is_expanded {
                 walk(trie, funcs, expanded, callers, &path, out);
             }
         }
     }
     let mut out = Vec::new();
-    walk(trie, funcs, expanded, bu_roots(trie, funcs, selfs), &[], &mut out);
+    walk(
+        trie,
+        funcs,
+        expanded,
+        bu_roots(trie, funcs, selfs),
+        &[],
+        &mut out,
+    );
     out
 }
 
@@ -257,14 +327,24 @@ pub fn ranked_functions(costs: &Costs, funcs: &Functions, by: SortBy, query_lc: 
         SortBy::Self_ => costs.self_[f as usize],
     };
     let mut v: Vec<u32> = (0..funcs.funcs.len() as u32)
-        .filter(|&f| costs.inclusive[f as usize] > 0 && (query_lc.is_empty() || funcs.funcs[f as usize].name.to_lowercase().contains(query_lc)))
+        .filter(|&f| {
+            costs.inclusive[f as usize] > 0
+                && (query_lc.is_empty()
+                    || funcs.funcs[f as usize]
+                        .name
+                        .to_lowercase()
+                        .contains(query_lc))
+        })
         .collect();
     v.sort_by_key(|&f| (Reverse(key(f)), f));
     v
 }
 
 fn ranked(m: HashMap<u32, u64>) -> Vec<Weighted> {
-    let mut v: Vec<Weighted> = m.into_iter().map(|(id, cost)| Weighted { id, cost }).collect();
+    let mut v: Vec<Weighted> = m
+        .into_iter()
+        .map(|(id, cost)| Weighted { id, cost })
+        .collect();
     v.sort_by_key(|w| (Reverse(w.cost), w.id));
     v
 }
@@ -323,7 +403,14 @@ mod tests {
     }
 
     fn frame(name: &str, module: u32, suspect: bool) -> FrameInfo {
-        FrameInfo { name: name.into(), module, file: None, line: None, suspect, raw: false }
+        FrameInfo {
+            name: name.into(),
+            module,
+            file: None,
+            line: None,
+            suspect,
+            raw: false,
+        }
     }
 
     /// Frames: 0 main, 1 work, 2 helper, 3 idle, 4 helper-in-other-module, 5 main (suspect variant).
@@ -333,9 +420,21 @@ mod tests {
     ///   main>idle (x2)                   self: idle 2
     ///   main>work (x1)                   self: work 1
     fn profile() -> (Profile, Vec<u64>) {
-        let frames = vec![frame("main", 0, false), frame("work", 0, false), frame("helper", 0, false), frame("idle", 0, false), frame("helper", 1, false), frame("main", 0, true)];
+        let frames = vec![
+            frame("main", 0, false),
+            frame("work", 0, false),
+            frame("helper", 0, false),
+            frame("idle", 0, false),
+            frame("helper", 1, false),
+            frame("main", 0, true),
+        ];
         let mut b = TrieBuilder::default();
-        let stacks: [(&[u32], u32); 4] = [(&[0, 1, 2], 3), (&[0, 1, 2, 2], 1), (&[0, 3], 2), (&[0, 1], 1)];
+        let stacks: [(&[u32], u32); 4] = [
+            (&[0, 1, 2], 3),
+            (&[0, 1, 2, 2], 1),
+            (&[0, 3], 2),
+            (&[0, 1], 1),
+        ];
         for (path, n) in stacks {
             let mut cur = ROOT;
             for &f in path {
@@ -345,7 +444,18 @@ mod tests {
         }
         let full = b.finish();
         let totals = full.nodes.iter().map(|n| n.total as u64).collect();
-        (Profile { modules: vec!["/a".into(), "/b".into()], frames, full, truncated: Trie::default(), samples: vec![], comm: Default::default(), stats: LoadStats::default() }, totals)
+        (
+            Profile {
+                modules: vec!["/a".into(), "/b".into()],
+                frames,
+                full,
+                truncated: Trie::default(),
+                samples: vec![],
+                comm: Default::default(),
+                stats: LoadStats::default(),
+            },
+            totals,
+        )
     }
 
     fn name_of(fns: &Functions, f: u32) -> &str {
@@ -356,8 +466,14 @@ mod tests {
     fn functions_merge_suspect_variants_but_not_modules() {
         let (p, _) = profile();
         let f = Functions::new(&p);
-        assert_eq!(f.frame_func[0], f.frame_func[5], "main and its suspect variant are one function");
-        assert_ne!(f.frame_func[2], f.frame_func[4], "same name in another module is another function");
+        assert_eq!(
+            f.frame_func[0], f.frame_func[5],
+            "main and its suspect variant are one function"
+        );
+        assert_ne!(
+            f.frame_func[2], f.frame_func[4],
+            "same name in another module is another function"
+        );
         assert_eq!(f.funcs.len(), 5);
     }
 
@@ -375,14 +491,30 @@ mod tests {
         let funcs = Functions::new(&p);
         let selfs = self_counts(&p.full, &totals);
         let c = costs(&p.full, &totals, &selfs, &funcs);
-        let by_name = |n: &str| funcs.funcs.iter().position(|f| f.name == n && f.module == 0).unwrap();
+        let by_name = |n: &str| {
+            funcs
+                .funcs
+                .iter()
+                .position(|f| f.name == n && f.module == 0)
+                .unwrap()
+        };
         // helper is in 4 samples (3 + the recursing one), not 5.
         assert_eq!(c.inclusive[by_name("helper")], 4);
-        assert_eq!(c.self_[by_name("helper")], 4, "self counts the leaf of each sample, recursion included");
+        assert_eq!(
+            c.self_[by_name("helper")],
+            4,
+            "self counts the leaf of each sample, recursion included"
+        );
         assert_eq!(c.inclusive[by_name("main")], 7);
         assert_eq!(c.self_[by_name("main")], 0);
-        assert_eq!((c.inclusive[by_name("work")], c.self_[by_name("work")]), (5, 1));
-        assert_eq!((c.inclusive[by_name("idle")], c.self_[by_name("idle")]), (2, 2));
+        assert_eq!(
+            (c.inclusive[by_name("work")], c.self_[by_name("work")]),
+            (5, 1)
+        );
+        assert_eq!(
+            (c.inclusive[by_name("idle")], c.self_[by_name("idle")]),
+            (2, 2)
+        );
     }
 
     #[test]
@@ -398,8 +530,27 @@ mod tests {
         assert_eq!(path.len(), 4, "main, work, helper, helper");
         let rows = top_down_rows(t, &totals, &path.iter().copied().collect());
         // main; work (5) before idle (2); helper (4) then work's self is not a row; helper>helper.
-        let names: Vec<_> = rows.iter().map(|r| (p.frames[t.nodes[r.node as usize].frame as usize].name.as_str(), r.depth)).collect();
-        assert_eq!(names, vec![("main", 0), ("work", 1), ("helper", 2), ("helper", 3), ("idle", 1)]);
+        let names: Vec<_> = rows
+            .iter()
+            .map(|r| {
+                (
+                    p.frames[t.nodes[r.node as usize].frame as usize]
+                        .name
+                        .as_str(),
+                    r.depth,
+                )
+            })
+            .collect();
+        assert_eq!(
+            names,
+            vec![
+                ("main", 0),
+                ("work", 1),
+                ("helper", 2),
+                ("helper", 3),
+                ("idle", 1)
+            ]
+        );
         assert!(!rows[3].expandable, "the innermost helper has no children");
     }
 
@@ -430,7 +581,14 @@ mod tests {
             }
         }
         let rows = top_down_rows(t, &totals, &[main].into_iter().collect());
-        let names: Vec<_> = rows.iter().map(|r| p.frames[t.nodes[r.node as usize].frame as usize].name.as_str()).collect();
+        let names: Vec<_> = rows
+            .iter()
+            .map(|r| {
+                p.frames[t.nodes[r.node as usize].frame as usize]
+                    .name
+                    .as_str()
+            })
+            .collect();
         assert_eq!(names, vec!["main", "idle"]);
     }
 
@@ -441,15 +599,26 @@ mod tests {
         let funcs = Functions::new(&p);
         let selfs = self_counts(t, &totals);
         let roots = bu_roots(t, &funcs, &selfs);
-        let names: Vec<_> = roots.iter().map(|n| (name_of(&funcs, n.func), n.cost)).collect();
+        let names: Vec<_> = roots
+            .iter()
+            .map(|n| (name_of(&funcs, n.func), n.cost))
+            .collect();
         assert_eq!(names, vec![("helper", 4), ("idle", 2), ("work", 1)]);
         // helper's callers: work (3 samples that end in helper under work) and helper itself (1, the recursion).
         let callers = bu_callers(t, &funcs, &roots[0]);
-        let c: Vec<_> = callers.iter().map(|n| (name_of(&funcs, n.func), n.cost)).collect();
+        let c: Vec<_> = callers
+            .iter()
+            .map(|n| (name_of(&funcs, n.func), n.cost))
+            .collect();
         assert_eq!(c, vec![("work", 3), ("helper", 1)]);
         // ...and work's caller is main (3), as the recursing helper's caller chain is helper>work>main.
         let up = bu_callers(t, &funcs, &callers[0]);
-        assert_eq!(up.iter().map(|n| (name_of(&funcs, n.func), n.cost)).collect::<Vec<_>>(), vec![("main", 3)]);
+        assert_eq!(
+            up.iter()
+                .map(|n| (name_of(&funcs, n.func), n.cost))
+                .collect::<Vec<_>>(),
+            vec![("main", 3)]
+        );
         // main is the outermost: it has no callers.
         assert!(bu_callers(t, &funcs, &up[0]).is_empty());
     }
@@ -477,14 +646,40 @@ mod tests {
         let (p, totals) = profile();
         let t = &p.full;
         let funcs = Functions::new(&p);
-        let f = |n: &str| funcs.funcs.iter().position(|x| x.name == n && x.module == 0).unwrap() as u32;
+        let f = |n: &str| {
+            funcs
+                .funcs
+                .iter()
+                .position(|x| x.name == n && x.module == 0)
+                .unwrap() as u32
+        };
         // helper is called only by work; the samples through that call are 4 (3 + the recursing one).
-        assert_eq!(callers_of(t, &totals, &funcs, f("helper")), vec![w(f("work"), 4)]);
-        assert_eq!(callees_of(t, &totals, &funcs, f("helper")), vec![], "helper only calls itself");
-        assert_eq!(callees_of(t, &totals, &funcs, f("main")), vec![w(f("work"), 5), w(f("idle"), 2)]);
-        assert_eq!(callees_of(t, &totals, &funcs, f("work")), vec![w(f("helper"), 4)]);
-        assert_eq!(callers_of(t, &totals, &funcs, f("main")), vec![], "main is a stack root");
-        assert_eq!(callers_of(t, &totals, &funcs, f("idle")), vec![w(f("main"), 2)]);
+        assert_eq!(
+            callers_of(t, &totals, &funcs, f("helper")),
+            vec![w(f("work"), 4)]
+        );
+        assert_eq!(
+            callees_of(t, &totals, &funcs, f("helper")),
+            vec![],
+            "helper only calls itself"
+        );
+        assert_eq!(
+            callees_of(t, &totals, &funcs, f("main")),
+            vec![w(f("work"), 5), w(f("idle"), 2)]
+        );
+        assert_eq!(
+            callees_of(t, &totals, &funcs, f("work")),
+            vec![w(f("helper"), 4)]
+        );
+        assert_eq!(
+            callers_of(t, &totals, &funcs, f("main")),
+            vec![],
+            "main is a stack root"
+        );
+        assert_eq!(
+            callers_of(t, &totals, &funcs, f("idle")),
+            vec![w(f("main"), 2)]
+        );
     }
 
     #[test]
@@ -493,10 +688,24 @@ mod tests {
         let funcs = Functions::new(&p);
         let selfs = self_counts(&p.full, &totals);
         let c = costs(&p.full, &totals, &selfs, &funcs);
-        let names = |v: Vec<u32>| v.iter().map(|&f| funcs.funcs[f as usize].name.clone()).collect::<Vec<_>>();
-        assert_eq!(names(ranked_functions(&c, &funcs, SortBy::Inclusive, "")), vec!["main", "work", "helper", "idle"]);
-        assert_eq!(names(ranked_functions(&c, &funcs, SortBy::Self_, "")), vec!["helper", "idle", "work", "main"], "main has no self samples: last, but still listed");
-        assert_eq!(names(ranked_functions(&c, &funcs, SortBy::Inclusive, "el")), vec!["helper"]);
+        let names = |v: Vec<u32>| {
+            v.iter()
+                .map(|&f| funcs.funcs[f as usize].name.clone())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            names(ranked_functions(&c, &funcs, SortBy::Inclusive, "")),
+            vec!["main", "work", "helper", "idle"]
+        );
+        assert_eq!(
+            names(ranked_functions(&c, &funcs, SortBy::Self_, "")),
+            vec!["helper", "idle", "work", "main"],
+            "main has no self samples: last, but still listed"
+        );
+        assert_eq!(
+            names(ranked_functions(&c, &funcs, SortBy::Inclusive, "el")),
+            vec!["helper"]
+        );
         assert!(ranked_functions(&c, &funcs, SortBy::Inclusive, "zzz").is_empty());
     }
 

@@ -26,13 +26,26 @@ pub fn trie_totals(trie: &Trie) -> Vec<u64> {
 
 /// Lay out the subtree under `focus` into `out` (cleared first). `totals[node]` is the inclusive
 /// sample count of each node. `max_depth` bounds the number of rows produced.
-pub fn layout(trie: &Trie, totals: &[u64], focus: u32, width: f32, min_w: f32, max_depth: u32, out: &mut Vec<Item>) {
+pub fn layout(
+    trie: &Trie,
+    totals: &[u64],
+    focus: u32,
+    width: f32,
+    min_w: f32,
+    max_depth: u32,
+    out: &mut Vec<Item>,
+) {
     out.clear();
     let total = totals[focus as usize];
     if total == 0 || width <= 0.0 {
         return;
     }
-    let mut stack = vec![Item { node: focus, depth: 0, x: 0.0, w: width }];
+    let mut stack = vec![Item {
+        node: focus,
+        depth: 0,
+        x: 0.0,
+        w: width,
+    }];
     while let Some(it) = stack.pop() {
         out.push(it);
         if it.depth + 1 >= max_depth {
@@ -46,7 +59,12 @@ pub fn layout(trie: &Trie, totals: &[u64], focus: u32, width: f32, min_w: f32, m
             if w < min_w {
                 continue;
             }
-            stack.push(Item { node: c, depth: it.depth + 1, x, w });
+            stack.push(Item {
+                node: c,
+                depth: it.depth + 1,
+                x,
+                w,
+            });
             x += w;
         }
     }
@@ -54,7 +72,9 @@ pub fn layout(trie: &Trie, totals: &[u64], focus: u32, width: f32, min_w: f32, m
 
 /// The item under pixel `(x, depth)`, if any.
 pub fn hit(items: &[Item], x: f32, depth: u32) -> Option<&Item> {
-    items.iter().find(|i| i.depth == depth && x >= i.x && x < i.x + i.w)
+    items
+        .iter()
+        .find(|i| i.depth == depth && x >= i.x && x < i.x + i.w)
 }
 
 #[cfg(test)]
@@ -83,12 +103,18 @@ mod tests {
         assert_eq!((root.x, root.w), (0.0, 400.0));
         let a = t.children(ROOT)[0];
         let ia = by_node(a);
-        assert!((ia.w - 300.0).abs() < 1e-3 && ia.x == 0.0, "a is 3/4 of the width, leftmost (heaviest)");
+        assert!(
+            (ia.w - 300.0).abs() < 1e-3 && ia.x == 0.0,
+            "a is 3/4 of the width, leftmost (heaviest)"
+        );
         let kids = t.children(a);
         let (ib, ic) = (by_node(kids[0]), by_node(kids[1]));
         assert!((ib.w - 200.0).abs() < 1e-3 && (ic.w - 100.0).abs() < 1e-3);
         assert!((ic.x - (ib.x + ib.w)).abs() < 1e-3, "siblings are adjacent");
-        assert!(ib.x >= ia.x && ic.x + ic.w <= ia.x + ia.w + 1e-3, "children stay inside the parent");
+        assert!(
+            ib.x >= ia.x && ic.x + ic.w <= ia.x + ia.w + 1e-3,
+            "children stay inside the parent"
+        );
         assert_eq!(ib.depth, 2);
     }
 
@@ -111,7 +137,11 @@ mod tests {
         // Focusing on `a` makes it the full-width root of the layout.
         let a = t.children(ROOT)[0];
         layout(&t, &trie_totals(&t), a, 300.0, 0.0, 100, &mut out);
-        assert_eq!(out.iter().map(|i| i.depth).max(), Some(1), "a's children are one row above it");
+        assert_eq!(
+            out.iter().map(|i| i.depth).max(),
+            Some(1),
+            "a's children are one row above it"
+        );
         let root = out.iter().find(|i| i.node == a).unwrap();
         assert_eq!((root.depth, root.x, root.w), (0, 0.0, 300.0));
     }
@@ -131,14 +161,26 @@ mod tests {
         totals[d as usize] = 1;
         let mut out = Vec::new();
         layout(&t, &totals, ROOT, 400.0, 0.5, 100, &mut out);
-        assert!(out.iter().any(|i| i.node == d && (i.w - 400.0).abs() < 1e-3), "d fills the whole width");
-        assert!(out.iter().all(|i| i.node != a), "the emptied subtree is not drawn");
+        assert!(
+            out.iter()
+                .any(|i| i.node == d && (i.w - 400.0).abs() < 1e-3),
+            "d fills the whole width"
+        );
+        assert!(
+            out.iter().all(|i| i.node != a),
+            "the emptied subtree is not drawn"
+        );
     }
 
     #[test]
     fn empty_and_hit_test() {
         let t = TrieBuilder::default().finish();
-        let mut out = vec![Item { node: 9, depth: 9, x: 0.0, w: 1.0 }];
+        let mut out = vec![Item {
+            node: 9,
+            depth: 9,
+            x: 0.0,
+            w: 1.0,
+        }];
         layout(&t, &trie_totals(&t), ROOT, 400.0, 0.0, 10, &mut out);
         assert!(out.is_empty());
         let t = trie();

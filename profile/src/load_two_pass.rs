@@ -15,13 +15,20 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::{Path, PathBuf},
-    sync::{OnceLock, atomic::{AtomicUsize, Ordering}},
+    sync::{
+        OnceLock,
+        atomic::{AtomicUsize, Ordering},
+    },
     time::Instant,
 };
 
 use byteorder::{BigEndian, ByteOrder, LittleEndian};
 use linux_perf_event_reader::EventRecord;
-use perf_bench::{pipeline::{Config, Evict}, records::for_each_record, stream};
+use perf_bench::{
+    pipeline::{Config, Evict},
+    records::for_each_record,
+    stream,
+};
 use rustc_hash::FxHashMap;
 
 use crate::{
@@ -56,7 +63,13 @@ impl Default for Options {
         // Both passes are I/O bound; more workers than this only add contention (measured on a
         // 37.8 GB file: 8 workers 7.9 s, 16 workers 9.2 s, 32 workers 9.2 s for one pass).
         let cpus = std::thread::available_parallelism().map_or(4, |n| n.get());
-        Self { dwarf: DwarfMode::Auto, readers: 3, workers: cpus.min(8), cold: false, corrupt_bound: false }
+        Self {
+            dwarf: DwarfMode::Auto,
+            readers: 3,
+            workers: cpus.min(8),
+            cold: false,
+            corrupt_bound: false,
+        }
     }
 }
 
@@ -92,7 +105,15 @@ struct Pass2State {
 
 impl Default for Pass2State {
     fn default() -> Self {
-        Self { trie: PhysTrie::default(), rows: Vec::new(), counters: Counters::default(), cache: UnwCache::new(), cache_epoch: u32::MAX, scratch: Scratch::default(), frames: Vec::new() }
+        Self {
+            trie: PhysTrie::default(),
+            rows: Vec::new(),
+            counters: Counters::default(),
+            cache: UnwCache::new(),
+            cache_epoch: u32::MAX,
+            scratch: Scratch::default(),
+            frames: Vec::new(),
+        }
     }
 }
 
@@ -109,20 +130,34 @@ fn pass2_collect<T: ByteOrder>(st: &mut Pass2State, sh: &Shared<'_>, buf: &[u8])
         if r.ty != PERF_RECORD_SAMPLE {
             return Ok(());
         }
-        let EventRecord::Sample(s) = sh.src.ctx.raw_event::<T>(r.ty, r.misc, r.body).parse()? else { return Ok(()) };
+        let EventRecord::Sample(s) = sh.src.ctx.raw_event::<T>(r.ty, r.misc, r.body).parse()?
+        else {
+            return Ok(());
+        };
         st.counters.samples += 1;
         let (Some(regs), Some((stack, dyn_size))) = (&s.user_regs, &s.user_stack) else {
             st.counters.without_stack += 1;
             return Ok(());
         };
-        let (Some(ip), Some(sp), Some(bp)) = (regs.get(PERF_REG_X86_IP), regs.get(PERF_REG_X86_SP), regs.get(PERF_REG_X86_BP)) else {
+        let (Some(ip), Some(sp), Some(bp)) = (
+            regs.get(PERF_REG_X86_IP),
+            regs.get(PERF_REG_X86_SP),
+            regs.get(PERF_REG_X86_BP),
+        ) else {
             st.counters.without_stack += 1;
             return Ok(());
         };
-        let (pid, time, tid) = (s.pid.unwrap_or(-1), s.timestamp.unwrap_or(0), s.tid.unwrap_or(-1));
+        let (pid, time, tid) = (
+            s.pid.unwrap_or(-1),
+            s.timestamp.unwrap_or(0),
+            s.tid.unwrap_or(-1),
+        );
         // The address-space epoch current for this process at this time, unwinder built on first use.
         let (eid, eu) = match sh.spaces.epoch(pid, time) {
-            Some(ep) => (ep.id, sh.unwinds[ep.id as usize].get_or_init(|| EpochUnwind::build(&ep.maps, sh.bins))),
+            Some(ep) => (
+                ep.id,
+                sh.unwinds[ep.id as usize].get_or_init(|| EpochUnwind::build(&ep.maps, sh.bins)),
+            ),
             None => (u32::MAX - 1, &sh.empty),
         };
         if st.cache_epoch != eid {
@@ -132,7 +167,17 @@ fn pass2_collect<T: ByteOrder>(st: &mut Pass2State, sh: &Shared<'_>, buf: &[u8])
         let stack = stack.as_slice();
         let valid = (*dyn_size as usize).min(stack.len());
         st.frames.clear();
-        let suspect_from = unwind_sample(eu, &mut st.cache, &mut st.scratch, ip, sp, bp, &stack, valid, &mut st.frames);
+        let suspect_from = unwind_sample(
+            eu,
+            &mut st.cache,
+            &mut st.scratch,
+            ip,
+            sp,
+            bp,
+            &stack,
+            valid,
+            &mut st.frames,
+        );
         st.counters.frames += st.frames.len() as u64;
         if suspect_from != usize::MAX {
             st.counters.suspect_samples += 1;
@@ -144,11 +189,25 @@ fn pass2_collect<T: ByteOrder>(st: &mut Pass2State, sh: &Shared<'_>, buf: &[u8])
     })
 }
 
-pub fn load_two_pass(path: &Path, opts: Options, progress: &mut dyn FnMut(&str)) -> Result<Profile> {
+pub fn load_two_pass(
+    path: &Path,
+    opts: Options,
+    progress: &mut dyn FnMut(&str),
+) -> Result<Profile> {
     let mut stats = LoadStats::default();
     let src = Source::open(path)?;
-    let cfg = Config { block: 1 << 20, workers: opts.workers, buffers: opts.workers * 2 + 2 + opts.readers * 2, evict: Evict::Off, readers: opts.readers };
-    let sopts = stream::Options { cold: opts.cold, corrupt_bound: opts.corrupt_bound, ..Default::default() };
+    let cfg = Config {
+        block: 1 << 20,
+        workers: opts.workers,
+        buffers: opts.workers * 2 + 2 + opts.readers * 2,
+        evict: Evict::Off,
+        readers: opts.readers,
+    };
+    let sopts = stream::Options {
+        cold: opts.cold,
+        corrupt_bound: opts.corrupt_bound,
+        ..Default::default()
+    };
 
     // ---- pass 1: events and sample rows -> address spaces ------------------------------------
     progress("pass 1: reading task and mmap events");
@@ -166,7 +225,11 @@ pub fn load_two_pass(path: &Path, opts: Options, progress: &mut dyn FnMut(&str))
     // ---- module table and binaries, opened in parallel ---------------------------------------
     progress("opening binaries");
     let t = Instant::now();
-    let module_paths: Vec<PathBuf> = spaces.module_paths().iter().map(|p| PathBuf::from(&**p)).collect();
+    let module_paths: Vec<PathBuf> = spaces
+        .module_paths()
+        .iter()
+        .map(|p| PathBuf::from(&**p))
+        .collect();
     let bins = BinaryCache::default();
     {
         let next = AtomicUsize::new(0);
@@ -192,9 +255,14 @@ pub fn load_two_pass(path: &Path, opts: Options, progress: &mut dyn FnMut(&str))
         empty: EpochUnwind::default(),
         bins: &bins,
     };
-    let (states, rep2) = stream::stream_open::<Pass2State, _>(&src.file, &src.sec, path, cfg, sopts, |st, buf| {
-        if src.sec.big_endian { pass2_collect::<BigEndian>(st, &shared, buf) } else { pass2_collect::<LittleEndian>(st, &shared, buf) }
-    })?;
+    let (states, rep2) =
+        stream::stream_open::<Pass2State, _>(&src.file, &src.sec, path, cfg, sopts, |st, buf| {
+            if src.sec.big_endian {
+                pass2_collect::<BigEndian>(st, &shared, buf)
+            } else {
+                pass2_collect::<LittleEndian>(st, &shared, buf)
+            }
+        })?;
     stats.secs_pass2 = t.elapsed().as_secs_f64();
     stats.fell_back |= rep2.fell_back;
 
@@ -206,7 +274,10 @@ pub fn load_two_pass(path: &Path, opts: Options, progress: &mut dyn FnMut(&str))
     let mut c = Counters::default();
     for st in states {
         let map = phys.merge(&st.trie);
-        rows.extend(st.rows.iter().map(|r| Row { node: map[r.node as usize], ..*r }));
+        rows.extend(st.rows.iter().map(|r| Row {
+            node: map[r.node as usize],
+            ..*r
+        }));
         c.samples += st.counters.samples;
         c.without_stack += st.counters.without_stack;
         c.frames += st.counters.frames;
@@ -227,10 +298,19 @@ pub fn load_two_pass(path: &Path, opts: Options, progress: &mut dyn FnMut(&str))
     let mut per_module: BTreeMap<u32, BTreeSet<u64>> = BTreeMap::new();
     for n in &phys.nodes[1..] {
         if n.frame.module != NO_MODULE {
-            per_module.entry(n.frame.module).or_default().insert(n.frame.svma);
+            per_module
+                .entry(n.frame.module)
+                .or_default()
+                .insert(n.frame.svma);
         }
     }
-    let tasks: Vec<ModuleAddrs> = per_module.into_iter().map(|(module, s)| ModuleAddrs { module, addrs: s.into_iter().collect() }).collect();
+    let tasks: Vec<ModuleAddrs> = per_module
+        .into_iter()
+        .map(|(module, s)| ModuleAddrs {
+            module,
+            addrs: s.into_iter().collect(),
+        })
+        .collect();
     stats.unique_addresses = tasks.iter().map(|t| t.addrs.len()).sum();
     let results = symbolize_many(&module_paths, tasks, opts.dwarf);
     for syms in results.values() {
@@ -250,12 +330,30 @@ pub fn load_two_pass(path: &Path, opts: Options, progress: &mut dyn FnMut(&str))
     let mut frames: Vec<FrameInfo> = Vec::new();
     let mut frame_ids: FxHashMap<FrameKey, u32> = FxHashMap::default();
     let mut intern = |lf: &LogicalFrame, module: u32, suspect: bool| -> u32 {
-        *frame_ids.entry(FrameKey { name: lf.name.clone(), module, suspect }).or_insert_with(|| {
-            frames.push(FrameInfo { name: lf.name.clone(), module, file: lf.file.clone(), line: lf.line, suspect, raw: lf.raw });
-            frames.len() as u32 - 1
-        })
+        *frame_ids
+            .entry(FrameKey {
+                name: lf.name.clone(),
+                module,
+                suspect,
+            })
+            .or_insert_with(|| {
+                frames.push(FrameInfo {
+                    name: lf.name.clone(),
+                    module,
+                    file: lf.file.clone(),
+                    line: lf.line,
+                    suspect,
+                    raw: lf.raw,
+                });
+                frames.len() as u32 - 1
+            })
     };
-    let unmapped = LogicalFrame { name: "[unmapped]".into(), file: None, line: None, raw: true };
+    let unmapped = LogicalFrame {
+        name: "[unmapped]".into(),
+        file: None,
+        line: None,
+        raw: true,
+    };
     let (mut full, mut truncated) = (TrieBuilder::default(), TrieBuilder::default());
     // Where each physical node ends up: the innermost logical frame of its chain.
     let mut full_of = vec![ROOT; phys.nodes.len()];
@@ -264,7 +362,11 @@ pub fn load_two_pass(path: &Path, opts: Options, progress: &mut dyn FnMut(&str))
         let chain: Vec<u32> = if n.frame.module == NO_MODULE {
             vec![intern(&unmapped, NO_MODULE, n.frame.suspect)]
         } else {
-            results[&n.frame.module].frames_of(n.frame.svma).iter().map(|lf| intern(lf, n.frame.module, n.frame.suspect)).collect()
+            results[&n.frame.module]
+                .frames_of(n.frame.svma)
+                .iter()
+                .map(|lf| intern(lf, n.frame.module, n.frame.suspect))
+                .collect()
         };
         // The chain is innermost-first; a path is root-first, so walk it backwards.
         let mut cur = full_of[n.parent as usize];
@@ -284,9 +386,30 @@ pub fn load_two_pass(path: &Path, opts: Options, progress: &mut dyn FnMut(&str))
         truncated.add_self(cur, n.self_count);
     }
     let (full, truncated) = (full.finish(), truncated.finish());
-    let samples: Vec<SampleRef> = rows.iter().map(|r| SampleRef { time: r.time, period: 1, pid: -1, tid: r.tid, full: full_of[r.node as usize], truncated: trunc_of[r.node as usize] }).collect();
+    let samples: Vec<SampleRef> = rows
+        .iter()
+        .map(|r| SampleRef {
+            time: r.time,
+            period: 1,
+            pid: -1,
+            tid: r.tid,
+            full: full_of[r.node as usize],
+            truncated: trunc_of[r.node as usize],
+        })
+        .collect();
     stats.secs_build = t.elapsed().as_secs_f64();
 
-    let modules = module_paths.iter().map(|p| p.to_string_lossy().to_string()).collect();
-    Ok(Profile { modules, frames, full, truncated, samples, comm: spaces.comm.clone(), stats })
+    let modules = module_paths
+        .iter()
+        .map(|p| p.to_string_lossy().to_string())
+        .collect();
+    Ok(Profile {
+        modules,
+        frames,
+        full,
+        truncated,
+        samples,
+        comm: spaces.comm.clone(),
+        stats,
+    })
 }

@@ -18,7 +18,10 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use blazesym::symbolize::{Input, Symbolized, Symbolizer, source::{Elf, Source}};
+use blazesym::symbolize::{
+    Input, Symbolized, Symbolizer,
+    source::{Elf, Source},
+};
 use memmap2::Mmap;
 use object::{Object, ObjectSection, ObjectSymbol};
 
@@ -81,7 +84,9 @@ impl Capability {
         let mmap = unsafe { Mmap::map(&file) }.map_err(|e| e.to_string())?;
         let obj = object::File::parse(&*mmap).map_err(|e| e.to_string())?;
 
-        let has_embedded_dwarf = obj.section_by_name(".debug_info").is_some_and(|s| s.size() > 0);
+        let has_embedded_dwarf = obj
+            .section_by_name(".debug_info")
+            .is_some_and(|s| s.size() > 0);
         let has_symbols = obj
             .symbols()
             .chain(obj.dynamic_symbols())
@@ -94,7 +99,10 @@ impl Capability {
                 if id.len() > 1 {
                     let hex: String = id.iter().map(|b| format!("{b:02x}")).collect();
                     for d in DEBUG_DIRS {
-                        let p = Path::new(d).join(".build-id").join(&hex[..2]).join(format!("{}.debug", &hex[2..]));
+                        let p = Path::new(d)
+                            .join(".build-id")
+                            .join(&hex[..2])
+                            .join(format!("{}.debug", &hex[2..]));
                         if p.is_file() {
                             separate_debug_file = Some(p);
                             break;
@@ -108,19 +116,35 @@ impl Capability {
                     let dir = path.parent().unwrap_or(Path::new("/"));
                     let mut cands = vec![dir.join(&name), dir.join(".debug").join(&name)];
                     for d in DEBUG_DIRS {
-                        cands.push(Path::new(d).join(dir.strip_prefix("/").unwrap_or(dir)).join(&name));
+                        cands.push(
+                            Path::new(d)
+                                .join(dir.strip_prefix("/").unwrap_or(dir))
+                                .join(&name),
+                        );
                     }
                     separate_debug_file = cands.into_iter().find(|p| p.is_file());
                 }
             }
         }
-        Ok(Capability { has_embedded_dwarf, separate_debug_file, has_symbols })
+        Ok(Capability {
+            has_embedded_dwarf,
+            separate_debug_file,
+            has_symbols,
+        })
     }
 }
 
 fn raw_frame(path: &Path, svma: u64) -> LogicalFrame {
-    let m = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| "?".into());
-    LogicalFrame { name: format!("[{m}+{svma:#x}]"), file: None, line: None, raw: true }
+    let m = path
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| "?".into());
+    LogicalFrame {
+        name: format!("[{m}+{svma:#x}]"),
+        file: None,
+        line: None,
+        raw: true,
+    }
 }
 
 fn all_raw(path: &Path, addrs: &[u64]) -> Vec<Vec<LogicalFrame>> {
@@ -129,10 +153,20 @@ fn all_raw(path: &Path, addrs: &[u64]) -> Vec<Vec<LogicalFrame>> {
 
 /// Run `blazesym` over one module. `dwarf` turns on inlined frames and file:line.
 fn run_blaze(path: &Path, addrs: &[u64], dwarf: bool) -> Result<Vec<Vec<LogicalFrame>>, String> {
-    let sym = Symbolizer::builder().enable_code_info(dwarf).enable_inlined_fns(dwarf).enable_demangling(true).build();
-    let res = sym.symbolize(&Source::Elf(Elf::new(path)), Input::VirtOffset(addrs)).map_err(|e| e.to_string())?;
+    let sym = Symbolizer::builder()
+        .enable_code_info(dwarf)
+        .enable_inlined_fns(dwarf)
+        .enable_demangling(true)
+        .build();
+    let res = sym
+        .symbolize(&Source::Elf(Elf::new(path)), Input::VirtOffset(addrs))
+        .map_err(|e| e.to_string())?;
     if res.len() != addrs.len() {
-        return Err(format!("expected {} results, got {}", addrs.len(), res.len()));
+        return Err(format!(
+            "expected {} results, got {}",
+            addrs.len(),
+            res.len()
+        ));
     }
     let to_frame = |name: &str, ci: Option<&blazesym::symbolize::CodeInfo<'_>>| LogicalFrame {
         name: name.to_string(),
@@ -146,7 +180,12 @@ fn run_blaze(path: &Path, addrs: &[u64], dwarf: bool) -> Result<Vec<Vec<LogicalF
         .map(|(r, &a)| match r {
             Symbolized::Sym(s) => {
                 // Innermost inlined call first, the containing function last.
-                let mut v: Vec<_> = s.inlined.iter().rev().map(|i| to_frame(&i.name, i.code_info.as_ref())).collect();
+                let mut v: Vec<_> = s
+                    .inlined
+                    .iter()
+                    .rev()
+                    .map(|i| to_frame(&i.name, i.code_info.as_ref()))
+                    .collect();
                 v.push(to_frame(&s.name, s.code_info.as_deref()));
                 v
             }
@@ -160,7 +199,12 @@ pub fn symbolize_module(path: &Path, addrs: &[u64], mode: DwarfMode) -> ModuleRe
     let mut notes = Vec::new();
     let finish = |level, frames: Vec<Vec<LogicalFrame>>, notes| {
         let unresolved = frames.iter().filter(|f| f.len() == 1 && f[0].raw).count();
-        ModuleResult { level, notes, frames, unresolved }
+        ModuleResult {
+            level,
+            notes,
+            frames,
+            unresolved,
+        }
     };
 
     let cap = match Capability::detect(path) {
@@ -175,12 +219,16 @@ pub fn symbolize_module(path: &Path, addrs: &[u64], mode: DwarfMode) -> ModuleRe
     if mode == DwarfMode::Auto && cap.has_dwarf() {
         match run_blaze(path, addrs, true) {
             Ok(frames) => return finish(Level::Full, frames, notes),
-            Err(e) => notes.push(format!("DWARF symbolization failed ({e}); using symbols only")),
+            Err(e) => notes.push(format!(
+                "DWARF symbolization failed ({e}); using symbols only"
+            )),
         }
     } else if mode == DwarfMode::Never {
         notes.push("DWARF disabled by option".into());
     } else {
-        notes.push("no debug info (no embedded DWARF, no separate debug file); using symbols only".into());
+        notes.push(
+            "no debug info (no embedded DWARF, no separate debug file); using symbols only".into(),
+        );
     }
 
     // Level 2: ELF symbol tables.
@@ -213,17 +261,26 @@ pub struct ModuleSymbols {
 impl ModuleSymbols {
     /// The logical frames (innermost first) for `addr`, which must be one of the looked-up addresses.
     pub fn frames_of(&self, addr: u64) -> &[LogicalFrame] {
-        let idx = self.addrs.binary_search(&addr).expect("address was symbolized");
+        let idx = self
+            .addrs
+            .binary_search(&addr)
+            .expect("address was symbolized");
         &self.result.frames[idx]
     }
 }
 
 /// Symbolize many modules in parallel, one module per task. `paths[module id]` is the file. Returns,
 /// per module id, its addresses and result.
-pub fn symbolize_many(paths: &[PathBuf], per_module: Vec<ModuleAddrs>, mode: DwarfMode) -> std::collections::HashMap<u32, ModuleSymbols> {
+pub fn symbolize_many(
+    paths: &[PathBuf],
+    per_module: Vec<ModuleAddrs>,
+    mode: DwarfMode,
+) -> std::collections::HashMap<u32, ModuleSymbols> {
     use std::sync::atomic::{AtomicUsize, Ordering};
     let next = AtomicUsize::new(0);
-    let workers = std::thread::available_parallelism().map_or(4, |n| n.get()).min(per_module.len().max(1));
+    let workers = std::thread::available_parallelism()
+        .map_or(4, |n| n.get())
+        .min(per_module.len().max(1));
     let tasks = &per_module;
     let mut results = std::collections::HashMap::new();
     std::thread::scope(|s| {
@@ -234,7 +291,10 @@ pub fn symbolize_many(paths: &[PathBuf], per_module: Vec<ModuleAddrs>, mode: Dwa
                     loop {
                         let i = next.fetch_add(1, Ordering::Relaxed);
                         let Some(task) = tasks.get(i) else { return out };
-                        out.push((task.module, symbolize_module(&paths[task.module as usize], &task.addrs, mode)));
+                        out.push((
+                            task.module,
+                            symbolize_module(&paths[task.module as usize], &task.addrs, mode),
+                        ));
                     }
                 })
             })
@@ -249,7 +309,13 @@ pub fn symbolize_many(paths: &[PathBuf], per_module: Vec<ModuleAddrs>, mode: Dwa
         .into_iter()
         .map(|t| {
             let result = results.remove(&t.module).unwrap();
-            (t.module, ModuleSymbols { addrs: t.addrs, result })
+            (
+                t.module,
+                ModuleSymbols {
+                    addrs: t.addrs,
+                    result,
+                },
+            )
         })
         .collect()
 }
@@ -265,7 +331,11 @@ mod tests {
 
     #[test]
     fn missing_file_gives_raw_names() {
-        let r = symbolize_module(Path::new("/nonexistent/libnothing.so"), &[0x10, 0x2000], DwarfMode::Auto);
+        let r = symbolize_module(
+            Path::new("/nonexistent/libnothing.so"),
+            &[0x10, 0x2000],
+            DwarfMode::Auto,
+        );
         assert_eq!(r.level, Level::Raw);
         assert_eq!(r.frames.len(), 2);
         assert_eq!(r.frames[0][0].name, "[libnothing.so+0x10]");
@@ -284,7 +354,9 @@ mod tests {
     #[test]
     fn stripped_binary_uses_symbols_and_never_dwarf() {
         // libc has dynamic symbols but on most systems no embedded DWARF.
-        let Some(p) = find(&["/usr/lib64/libc.so.6", "/lib/x86_64-linux-gnu/libc.so.6"]) else { return };
+        let Some(p) = find(&["/usr/lib64/libc.so.6", "/lib/x86_64-linux-gnu/libc.so.6"]) else {
+            return;
+        };
         let cap = Capability::detect(&p).unwrap();
         if cap.has_dwarf() {
             return; // debuginfo installed here: covered by the DWARF test instead
@@ -297,27 +369,45 @@ mod tests {
 
     #[test]
     fn dwarf_disabled_by_option_falls_back_to_symbols() {
-        let Some(p) = find(&["/usr/lib64/ld-linux-x86-64.so.2", "/lib64/ld-linux-x86-64.so.2"]) else { return };
+        let Some(p) = find(&[
+            "/usr/lib64/ld-linux-x86-64.so.2",
+            "/lib64/ld-linux-x86-64.so.2",
+        ]) else {
+            return;
+        };
         let r = symbolize_module(&p, &[0x1df40, 0x1df43], DwarfMode::Never);
         assert_ne!(r.level, Level::Full);
-        assert!(r.frames.iter().all(|f| f.len() == 1), "no inlined expansion without DWARF");
+        assert!(
+            r.frames.iter().all(|f| f.len() == 1),
+            "no inlined expansion without DWARF"
+        );
         assert!(r.frames.iter().all(|f| f[0].file.is_none()));
     }
 
     #[test]
     fn dwarf_module_gives_lines_when_available() {
-        let Some(p) = find(&["/usr/lib64/ld-linux-x86-64.so.2", "/lib64/ld-linux-x86-64.so.2"]) else { return };
+        let Some(p) = find(&[
+            "/usr/lib64/ld-linux-x86-64.so.2",
+            "/lib64/ld-linux-x86-64.so.2",
+        ]) else {
+            return;
+        };
         if !Capability::detect(&p).unwrap().has_dwarf() {
             return;
         }
         let r = symbolize_module(&p, &[0x1df40, 0x1df43, 0x1e0a0], DwarfMode::Auto);
         assert_eq!(r.level, Level::Full);
-        assert!(r.frames.iter().flatten().any(|f| f.line.is_some()), "expected at least one line number");
+        assert!(
+            r.frames.iter().flatten().any(|f| f.line.is_some()),
+            "expected at least one line number"
+        );
     }
 
     #[test]
     fn unresolvable_address_falls_back_per_address() {
-        let Some(p) = find(&["/usr/lib64/libc.so.6", "/lib/x86_64-linux-gnu/libc.so.6"]) else { return };
+        let Some(p) = find(&["/usr/lib64/libc.so.6", "/lib/x86_64-linux-gnu/libc.so.6"]) else {
+            return;
+        };
         // 0x10 lies in the ELF header area, not inside any function.
         let r = symbolize_module(&p, &[0x10], DwarfMode::Auto);
         assert_eq!(r.frames[0].len(), 1);

@@ -8,9 +8,9 @@
 
 use std::{
     fs::File,
+    os::{fd::AsRawFd, unix::fs::FileExt},
     path::Path,
     sync::atomic::{AtomicBool, AtomicUsize, Ordering},
-    os::{fd::AsRawFd, unix::fs::FileExt},
     time::{Duration, Instant},
 };
 
@@ -115,9 +115,16 @@ where
     W: Fn(&mut S, &[u8]) -> Result<()> + Sync,
 {
     assert!(bounds.len() >= 2 && bounds[0] == 0 && *bounds.last().unwrap() == sec.len);
-    assert!(bounds.windows(2).all(|w| w[0] < w[1]), "bounds must be strictly increasing");
+    assert!(
+        bounds.windows(2).all(|w| w[0] < w[1]),
+        "bounds must be strictly increasing"
+    );
     let regions = bounds.len() - 1;
-    let nreaders = if path.is_some() { cfg.readers.clamp(1, regions) } else { 1 };
+    let nreaders = if path.is_some() {
+        cfg.readers.clamp(1, regions)
+    } else {
+        1
+    };
 
     let (free_tx, free_rx) = bounded::<Vec<u8>>(cfg.buffers);
     for _ in 0..cfg.buffers {
@@ -132,7 +139,8 @@ where
             .map(|_| {
                 let (rx, free_tx, work) = (work_rx.clone(), free_tx.clone(), &work);
                 s.spawn(move || {
-                    let (mut state, mut err, mut wait, mut busy) = (S::default(), None, Duration::ZERO, Duration::ZERO);
+                    let (mut state, mut err, mut wait, mut busy) =
+                        (S::default(), None, Duration::ZERO, Duration::ZERO);
                     loop {
                         let t = Instant::now();
                         let Ok(unit) = rx.recv() else { break };
@@ -178,7 +186,9 @@ where
                         let res = if sec.big_endian {
                             reader::<BigEndian>(f, sec, lo, hi, &free_rx, &work_tx, abort, &mut m)
                         } else {
-                            reader::<LittleEndian>(f, sec, lo, hi, &free_rx, &work_tx, abort, &mut m)
+                            reader::<LittleEndian>(
+                                f, sec, lo, hi, &free_rx, &work_tx, abort, &mut m,
+                            )
                         };
                         if let Err(e) = res {
                             abort.store(true, Ordering::Relaxed);
@@ -234,7 +244,11 @@ fn reader<T: ByteOrder>(
     abort: &AtomicBool,
     m: &mut Metrics,
 ) -> Result<()> {
-    let mismatch = |what: &str, off: u64| BoundaryMismatch(format!("{what} in region [{lo}, {hi}) at data offset {off}"));
+    let mismatch = |what: &str, off: u64| {
+        BoundaryMismatch(format!(
+            "{what} in region [{lo}, {hi}) at data offset {off}"
+        ))
+    };
     let mut off = lo;
     while off < hi {
         if abort.load(Ordering::Relaxed) {
@@ -267,7 +281,9 @@ fn reader<T: ByteOrder>(
                 // A single record (e.g. AUXTRACE payload) is bigger than the buffer: grow it.
                 Whole::NeedAtLeast(need) if !reaches_end => want = need,
                 // The last record runs past the region end: the end was not a boundary.
-                Whole::NeedAtLeast(_) | Whole::Bad("trailing bytes") => return Err(mismatch("record straddles region end", off).into()),
+                Whole::NeedAtLeast(_) | Whole::Bad("trailing bytes") => {
+                    return Err(mismatch("record straddles region end", off).into());
+                }
                 // Garbage headers: a guessed region start was inside a record. (At the true
                 // start of the data this is just a corrupt file.)
                 Whole::Bad(e) if lo > 0 => return Err(mismatch(e, off).into()),
@@ -279,7 +295,14 @@ fn reader<T: ByteOrder>(
         m.units += 1;
         m.bytes += len as u64;
         off = consumed;
-        if work_tx.send(Unit { buf, file_off: sec.start + unit_off, len }).is_err() {
+        if work_tx
+            .send(Unit {
+                buf,
+                file_off: sec.start + unit_off,
+                len,
+            })
+            .is_err()
+        {
             return Err("workers exited early".into());
         }
     }
@@ -307,12 +330,20 @@ pub(crate) fn whole_records<T: ByteOrder>(buf: &[u8], at_eof: bool) -> Whole {
             // The payload length is the first u64 of the body. If it isn't in the buffer
             // yet, treat the record as incomplete (the caller re-reads from this record).
             if off + HEADER_LEN + 8 > buf.len() {
-                return if off == 0 { Whole::NeedAtLeast(HEADER_LEN + 8) } else { Whole::Len(off) };
+                return if off == 0 {
+                    Whole::NeedAtLeast(HEADER_LEN + 8)
+                } else {
+                    Whole::Len(off)
+                };
             }
             total += T::read_u64(&buf[off + HEADER_LEN..]) as usize;
         }
         if off + total > buf.len() {
-            return if off == 0 { Whole::NeedAtLeast(total) } else { Whole::Len(off) };
+            return if off == 0 {
+                Whole::NeedAtLeast(total)
+            } else {
+                Whole::Len(off)
+            };
         }
         off += total;
     }

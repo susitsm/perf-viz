@@ -81,7 +81,12 @@ impl ReaderConfig {
     }
 
     fn validate(&self) -> Result<(), String> {
-        for (name, v) in [("readers", self.readers.map(|v| v as u64)), ("threads", self.threads.map(|v| v as u64)), ("region_mb", self.region_mb), ("in_flight", self.in_flight.map(|v| v as u64))] {
+        for (name, v) in [
+            ("readers", self.readers.map(|v| v as u64)),
+            ("threads", self.threads.map(|v| v as u64)),
+            ("region_mb", self.region_mb),
+            ("in_flight", self.in_flight.map(|v| v as u64)),
+        ] {
             if v == Some(0) {
                 return Err(format!("reader.{name} must be at least 1"));
             }
@@ -150,13 +155,19 @@ impl Config {
 
     pub fn to_toml(&self) -> String {
         let body = toml::to_string_pretty(self).expect("a config always serializes");
-        format!("# perf-viz settings. Written by perf-viz when you change one; edit freely.\n# theme = \"system\" | \"light\" | \"dark\"; cost = \"samples\" | \"cycles\";\n# tab = \"summary\" | \"flame\" | \"topdown\" | \"bottomup\" | \"callercallee\" | \"timeline\"\n# [reader]: readers, threads, region_mb, in_flight, lookahead, dwarf = \"auto\" | \"never\", cold\n{body}")
+        format!(
+            "# perf-viz settings. Written by perf-viz when you change one; edit freely.\n# theme = \"system\" | \"light\" | \"dark\"; cost = \"samples\" | \"cycles\";\n# tab = \"summary\" | \"flame\" | \"topdown\" | \"bottomup\" | \"callercallee\" | \"timeline\"\n# [reader]: readers, threads, region_mb, in_flight, lookahead, dwarf = \"auto\" | \"never\", cold\n{body}"
+        )
     }
 }
 
 /// Where the config file lives, if a location can be determined.
 pub fn path() -> Option<PathBuf> {
-    path_from(|k| std::env::var_os(k).filter(|v| !v.is_empty()).map(PathBuf::from))
+    path_from(|k| {
+        std::env::var_os(k)
+            .filter(|v| !v.is_empty())
+            .map(PathBuf::from)
+    })
 }
 
 fn path_from(var: impl Fn(&str) -> Option<PathBuf>) -> Option<PathBuf> {
@@ -170,7 +181,9 @@ fn path_from(var: impl Fn(&str) -> Option<PathBuf>) -> Option<PathBuf> {
 /// Load the settings. A missing file is normal (defaults); an unreadable or invalid one is reported
 /// on stderr and ignored, so a typo never stops the viewer from starting.
 pub fn load() -> Config {
-    let Some(path) = path() else { return Config::default() };
+    let Some(path) = path() else {
+        return Config::default();
+    };
     load_from(&path)
 }
 
@@ -216,15 +229,45 @@ mod tests {
 
     #[test]
     fn settings_round_trip() {
-        let c = Config { theme: Some(Theme::Light), cost: Some(Cost::Samples), truncate_suspect_tails: Some(true), tab: Some(TabName::Callercallee), reader: ReaderConfig { readers: Some(3), threads: Some(6), region_mb: Some(64), in_flight: Some(4), lookahead: Some(2), dwarf: Some(Dwarf::Never), cold: Some(true) }, tuning_prompted: Some(true) };
+        let c = Config {
+            theme: Some(Theme::Light),
+            cost: Some(Cost::Samples),
+            truncate_suspect_tails: Some(true),
+            tab: Some(TabName::Callercallee),
+            reader: ReaderConfig {
+                readers: Some(3),
+                threads: Some(6),
+                region_mb: Some(64),
+                in_flight: Some(4),
+                lookahead: Some(2),
+                dwarf: Some(Dwarf::Never),
+                cold: Some(true),
+            },
+            tuning_prompted: Some(true),
+        };
         assert_eq!(Config::parse(&c.to_toml()).unwrap(), c);
-        assert_eq!(Config::parse(&Config::default().to_toml()).unwrap(), Config::default(), "comments only");
+        assert_eq!(
+            Config::parse(&Config::default().to_toml()).unwrap(),
+            Config::default(),
+            "comments only"
+        );
     }
 
     #[test]
     fn values_are_lowercase_words() {
-        let c = Config::parse("theme = \"dark\"\ncost = \"cycles\"\ntab = \"flame\"\ntruncate_suspect_tails = false").unwrap();
-        assert_eq!((c.theme, c.cost, c.tab, c.truncate_suspect_tails), (Some(Theme::Dark), Some(Cost::Cycles), Some(TabName::Flame), Some(false)));
+        let c = Config::parse(
+            "theme = \"dark\"\ncost = \"cycles\"\ntab = \"flame\"\ntruncate_suspect_tails = false",
+        )
+        .unwrap();
+        assert_eq!(
+            (c.theme, c.cost, c.tab, c.truncate_suspect_tails),
+            (
+                Some(Theme::Dark),
+                Some(Cost::Cycles),
+                Some(TabName::Flame),
+                Some(false)
+            )
+        );
     }
 
     #[test]
@@ -233,33 +276,68 @@ mod tests {
         let mut opts = load::Options::default();
         let defaults = opts.clone();
         c.reader.apply(&mut opts);
-        assert_eq!((opts.readers, opts.region_mb, opts.dwarf, opts.cold), (2, 32, DwarfMode::Never, true));
-        assert_eq!((opts.workers, opts.in_flight, opts.lookahead), (defaults.workers, defaults.in_flight, defaults.lookahead), "unset values keep the defaults");
+        assert_eq!(
+            (opts.readers, opts.region_mb, opts.dwarf, opts.cold),
+            (2, 32, DwarfMode::Never, true)
+        );
+        assert_eq!(
+            (opts.workers, opts.in_flight, opts.lookahead),
+            (defaults.workers, defaults.in_flight, defaults.lookahead),
+            "unset values keep the defaults"
+        );
         assert!(Config::default().reader.is_empty());
-        assert!(Config::default().to_toml().lines().all(|l| l.starts_with('#')), "an empty config writes only comments");
+        assert!(
+            Config::default()
+                .to_toml()
+                .lines()
+                .all(|l| l.starts_with('#')),
+            "an empty config writes only comments"
+        );
     }
 
     #[test]
     fn zero_sized_reader_settings_are_rejected() {
-        for bad in ["readers = 0", "threads = 0", "region_mb = 0", "in_flight = 0"] {
+        for bad in [
+            "readers = 0",
+            "threads = 0",
+            "region_mb = 0",
+            "in_flight = 0",
+        ] {
             assert!(Config::parse(&format!("[reader]\n{bad}")).is_err(), "{bad}");
         }
-        assert!(Config::parse("[reader]\nlookahead = 0").is_ok(), "no lookahead is valid");
+        assert!(
+            Config::parse("[reader]\nlookahead = 0").is_ok(),
+            "no lookahead is valid"
+        );
         assert!(Config::parse("[reader]\nreaderz = 2").is_err());
     }
 
     #[test]
     fn bad_values_and_unknown_keys_are_errors() {
         assert!(Config::parse("theme = \"purple\"").is_err());
-        assert!(Config::parse("thme = \"dark\"").is_err(), "a typo'd key is reported, not silently ignored");
+        assert!(
+            Config::parse("thme = \"dark\"").is_err(),
+            "a typo'd key is reported, not silently ignored"
+        );
     }
 
     #[test]
     fn location_prefers_the_override_then_xdg_then_home() {
-        let env = |pairs: &'static [(&str, &str)]| move |k: &str| pairs.iter().find(|p| p.0 == k).map(|p| PathBuf::from(p.1));
-        assert_eq!(path_from(env(&[("PERF_VIZ_CONFIG", "/x/c.toml"), ("HOME", "/h")])), Some("/x/c.toml".into()));
-        assert_eq!(path_from(env(&[("XDG_CONFIG_HOME", "/xdg"), ("HOME", "/h")])), Some("/xdg/perf-viz/config.toml".into()));
-        assert_eq!(path_from(env(&[("HOME", "/h")])), Some("/h/.config/perf-viz/config.toml".into()));
+        let env = |pairs: &'static [(&str, &str)]| {
+            move |k: &str| pairs.iter().find(|p| p.0 == k).map(|p| PathBuf::from(p.1))
+        };
+        assert_eq!(
+            path_from(env(&[("PERF_VIZ_CONFIG", "/x/c.toml"), ("HOME", "/h")])),
+            Some("/x/c.toml".into())
+        );
+        assert_eq!(
+            path_from(env(&[("XDG_CONFIG_HOME", "/xdg"), ("HOME", "/h")])),
+            Some("/xdg/perf-viz/config.toml".into())
+        );
+        assert_eq!(
+            path_from(env(&[("HOME", "/h")])),
+            Some("/h/.config/perf-viz/config.toml".into())
+        );
         assert_eq!(path_from(env(&[])), None);
     }
 
@@ -267,12 +345,19 @@ mod tests {
     fn save_creates_directories_and_load_reads_it_back() {
         let dir = std::env::temp_dir().join(format!("perf-viz-test-{}", std::process::id()));
         let file = dir.join("nested").join("config.toml");
-        let c = Config { theme: Some(Theme::Dark), ..Default::default() };
+        let c = Config {
+            theme: Some(Theme::Dark),
+            ..Default::default()
+        };
         save_to(&file, &c).unwrap();
         assert_eq!(load_from(&file), c);
         assert_eq!(load_from(&dir.join("missing.toml")), Config::default());
         fs::write(&file, "theme = 3").unwrap();
-        assert_eq!(load_from(&file), Config::default(), "invalid file is ignored");
+        assert_eq!(
+            load_from(&file),
+            Config::default(),
+            "invalid file is ignored"
+        );
         let _ = fs::remove_dir_all(&dir);
     }
 }

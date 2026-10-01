@@ -9,12 +9,12 @@ pub mod anchor;
 pub mod baseline;
 pub mod fast;
 pub mod ordered;
-pub mod pipeline;
 pub mod piped;
+pub mod pipeline;
 pub mod records;
 pub mod split;
-pub mod stream;
 pub mod stats;
+pub mod stream;
 pub mod synth;
 pub mod tune;
 

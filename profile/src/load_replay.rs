@@ -67,7 +67,13 @@ pub struct Options {
 pub fn follows_call(b: &[u8]) -> bool {
     let n = b.len();
     let modrm_call = |i: usize| b[i] == 0xff && (b[i + 1] & 0x38) == 0x10; // FF /2
-    b[n - 5] == 0xe8 || modrm_call(n - 2) || modrm_call(n - 3) || modrm_call(n - 4) || modrm_call(n - 6) || modrm_call(n - 7) || modrm_call(n - 8)
+    b[n - 5] == 0xe8
+        || modrm_call(n - 2)
+        || modrm_call(n - 3)
+        || modrm_call(n - 4)
+        || modrm_call(n - 6)
+        || modrm_call(n - 7)
+        || modrm_call(n - 8)
 }
 
 /// A physical frame (module, static address, suspect-tail flag) whose logical frames are cached.
@@ -95,19 +101,30 @@ pub fn load_replay(path: &Path, opts: Options, progress: &mut dyn FnMut(&str)) -
     // ---- replay + unwind -------------------------------------------------------------------
     progress("replaying records and unwinding");
     let t = Instant::now();
-    let PerfFileReader { mut perf_file, mut record_iter } = PerfFileReader::parse_file(BufReader::new(File::open(path)?))?;
+    let PerfFileReader {
+        mut perf_file,
+        mut record_iter,
+    } = PerfFileReader::parse_file(BufReader::new(File::open(path)?))?;
     while let Some(rec) = record_iter.next_record(&mut perf_file)? {
-        let PerfFileRecord::EventRecord { record, .. } = rec else { continue };
+        let PerfFileRecord::EventRecord { record, .. } = rec else {
+            continue;
+        };
         match record.parse()? {
             EventRecord::Mmap2(m) if m.protection & PROT_EXEC != 0 => {
                 let p = m.path.as_slice();
-                let Ok(p) = std::str::from_utf8(&p) else { continue };
+                let Ok(p) = std::str::from_utf8(&p) else {
+                    continue;
+                };
                 let p = p.trim_end_matches('\0');
                 if !crate::addrspace::is_file_backed(p) {
                     continue; // [vdso], //anon, [stack]...
                 }
-                let Some(bin) = cache.get(Path::new(p)) else { continue };
-                let Some(bias) = bin.bias_for_mapping(m.address, m.page_offset, m.length) else { continue };
+                let Some(bin) = cache.get(Path::new(p)) else {
+                    continue;
+                };
+                let Some(bias) = bin.bias_for_mapping(m.address, m.page_offset, m.length) else {
+                    continue;
+                };
                 let next_id = module_ids.len() as u32;
                 let module = *module_ids.entry(PathBuf::from(p)).or_insert_with(|| {
                     module_paths.push(PathBuf::from(p));
@@ -125,8 +142,19 @@ pub fn load_replay(path: &Path, opts: Options, progress: &mut dyn FnMut(&str)) -
                     }
                     !overlaps
                 });
-                proc.unwinder.add_module(Module::new(p.to_string(), s..e, bias, bin.section_info()));
-                proc.mods.push(Mod { start: s, end: e, bias, bin, module });
+                proc.unwinder.add_module(Module::new(
+                    p.to_string(),
+                    s..e,
+                    bias,
+                    bin.section_info(),
+                ));
+                proc.mods.push(Mod {
+                    start: s,
+                    end: e,
+                    bias,
+                    bin,
+                    module,
+                });
             }
             EventRecord::Fork(f) if f.pid != f.ppid => {
                 let parent = procs.get(&f.ppid).cloned().unwrap_or_default();
@@ -142,7 +170,11 @@ pub fn load_replay(path: &Path, opts: Options, progress: &mut dyn FnMut(&str)) -
                     stats.samples_without_stack += 1;
                     continue;
                 };
-                let (Some(ip), Some(sp), Some(bp)) = (regs.get(PERF_REG_X86_IP), regs.get(PERF_REG_X86_SP), regs.get(PERF_REG_X86_BP)) else {
+                let (Some(ip), Some(sp), Some(bp)) = (
+                    regs.get(PERF_REG_X86_IP),
+                    regs.get(PERF_REG_X86_SP),
+                    regs.get(PERF_REG_X86_BP),
+                ) else {
                     stats.samples_without_stack += 1;
                     continue;
                 };
@@ -150,7 +182,11 @@ pub fn load_replay(path: &Path, opts: Options, progress: &mut dyn FnMut(&str)) -
                 let valid = (*dyn_size as usize).min(stack.len());
                 let mut read_stack = |addr: u64| -> std::result::Result<u64, ()> {
                     let off = addr.checked_sub(sp).ok_or(())? as usize;
-                    stack.get(off..off + 8).map(|b| u64::from_le_bytes(b.try_into().unwrap())).filter(|_| off + 8 <= valid).ok_or(())
+                    stack
+                        .get(off..off + 8)
+                        .map(|b| u64::from_le_bytes(b.try_into().unwrap()))
+                        .filter(|_| off + 8 <= valid)
+                        .ok_or(())
                 };
 
                 if cache_pid != s.pid.unwrap_or(-1) {
@@ -163,7 +199,12 @@ pub fn load_replay(path: &Path, opts: Options, progress: &mut dyn FnMut(&str)) -
                 // function (return address minus one, so a call at the end of a function stays in it).
                 let mut lookup: Vec<u64> = vec![ip];
                 let mut ras: Vec<u64> = Vec::new();
-                let mut iter = proc.unwinder.iter_frames(ip, UnwindRegsX86_64::new(ip, sp, bp), &mut unwind_cache, &mut read_stack);
+                let mut iter = proc.unwinder.iter_frames(
+                    ip,
+                    UnwindRegsX86_64::new(ip, sp, bp),
+                    &mut unwind_cache,
+                    &mut read_stack,
+                );
                 loop {
                     match iter.next() {
                         Ok(Some(FrameAddress::InstructionPointer(_))) => {}
@@ -179,7 +220,11 @@ pub fn load_replay(path: &Path, opts: Options, progress: &mut dyn FnMut(&str)) -
                 let find = |a: u64| proc.mods.iter().find(|m| a >= m.start && a < m.end);
                 let mut suspect_from = usize::MAX;
                 for (k, &ra) in ras.iter().enumerate() {
-                    let ok = find(ra).is_some_and(|m| m.bin.bytes_at_svma(ra.wrapping_sub(m.bias).wrapping_sub(8), 8).is_some_and(follows_call));
+                    let ok = find(ra).is_some_and(|m| {
+                        m.bin
+                            .bytes_at_svma(ra.wrapping_sub(m.bias).wrapping_sub(8), 8)
+                            .is_some_and(follows_call)
+                    });
                     if !ok {
                         suspect_from = k + 1; // index into `lookup` (frame k+1 has return address ras[k])
                         break;
@@ -189,8 +234,16 @@ pub fn load_replay(path: &Path, opts: Options, progress: &mut dyn FnMut(&str)) -
                 for (i, &a) in lookup.iter().enumerate() {
                     let suspect = i >= suspect_from;
                     match find(a) {
-                        Some(m) => stacks.push(Phys { module: m.module, svma: a.wrapping_sub(m.bias), suspect }),
-                        None => stacks.push(Phys { module: NO_MODULE, svma: 0, suspect }),
+                        Some(m) => stacks.push(Phys {
+                            module: m.module,
+                            svma: a.wrapping_sub(m.bias),
+                            suspect,
+                        }),
+                        None => stacks.push(Phys {
+                            module: NO_MODULE,
+                            svma: 0,
+                            suspect,
+                        }),
                     }
                 }
                 stats.physical_frames += lookup.len() as u64;
@@ -215,7 +268,13 @@ pub fn load_replay(path: &Path, opts: Options, progress: &mut dyn FnMut(&str)) -
             per_module.entry(p.module).or_default().insert(p.svma);
         }
     }
-    let tasks: Vec<ModuleAddrs> = per_module.into_iter().map(|(module, s)| ModuleAddrs { module, addrs: s.into_iter().collect() }).collect();
+    let tasks: Vec<ModuleAddrs> = per_module
+        .into_iter()
+        .map(|(module, s)| ModuleAddrs {
+            module,
+            addrs: s.into_iter().collect(),
+        })
+        .collect();
     stats.unique_addresses = tasks.iter().map(|t| t.addrs.len()).sum();
     let results = symbolize_many(&module_paths, tasks, opts.dwarf);
     for syms in results.values() {
@@ -235,14 +294,32 @@ pub fn load_replay(path: &Path, opts: Options, progress: &mut dyn FnMut(&str)) -
     let mut frames: Vec<FrameInfo> = Vec::new();
     let mut frame_ids: FxHashMap<FrameKey, u32> = FxHashMap::default();
     let mut intern = |lf: &LogicalFrame, module: u32, suspect: bool| -> u32 {
-        *frame_ids.entry(FrameKey { name: lf.name.clone(), module, suspect }).or_insert_with(|| {
-            frames.push(FrameInfo { name: lf.name.clone(), module, file: lf.file.clone(), line: lf.line, suspect, raw: lf.raw });
-            frames.len() as u32 - 1
-        })
+        *frame_ids
+            .entry(FrameKey {
+                name: lf.name.clone(),
+                module,
+                suspect,
+            })
+            .or_insert_with(|| {
+                frames.push(FrameInfo {
+                    name: lf.name.clone(),
+                    module,
+                    file: lf.file.clone(),
+                    line: lf.line,
+                    suspect,
+                    raw: lf.raw,
+                });
+                frames.len() as u32 - 1
+            })
     };
     // Frame-id chains (innermost first) per (module, svma, suspect).
     let mut chains: FxHashMap<ChainKey, Vec<u32>> = FxHashMap::default();
-    let unmapped = LogicalFrame { name: "[unmapped]".into(), file: None, line: None, raw: true };
+    let unmapped = LogicalFrame {
+        name: "[unmapped]".into(),
+        file: None,
+        line: None,
+        raw: true,
+    };
     let (mut full, mut truncated) = (TrieBuilder::default(), TrieBuilder::default());
     let mut path_full: Vec<u32> = Vec::new();
     let mut path_trunc: Vec<u32> = Vec::new();
@@ -251,12 +328,20 @@ pub fn load_replay(path: &Path, opts: Options, progress: &mut dyn FnMut(&str)) -
         path_full.clear();
         path_trunc.clear();
         for p in sample.iter().rev() {
-            let key = ChainKey { module: p.module, svma: p.svma, suspect: p.suspect };
+            let key = ChainKey {
+                module: p.module,
+                svma: p.svma,
+                suspect: p.suspect,
+            };
             if !chains.contains_key(&key) {
                 let chain: Vec<u32> = if p.module == NO_MODULE {
                     vec![intern(&unmapped, NO_MODULE, p.suspect)]
                 } else {
-                    results[&p.module].frames_of(p.svma).iter().map(|lf| intern(lf, p.module, p.suspect)).collect()
+                    results[&p.module]
+                        .frames_of(p.svma)
+                        .iter()
+                        .map(|lf| intern(lf, p.module, p.suspect))
+                        .collect()
                 };
                 chains.insert(key, chain);
             }
@@ -274,6 +359,17 @@ pub fn load_replay(path: &Path, opts: Options, progress: &mut dyn FnMut(&str)) -
     let (full, truncated) = (full.finish(), truncated.finish());
     stats.secs_build = t.elapsed().as_secs_f64();
 
-    let modules = module_paths.iter().map(|p| p.to_string_lossy().to_string()).collect();
-    Ok(Profile { modules, frames, full, truncated, samples: Vec::new(), comm: Default::default(), stats })
+    let modules = module_paths
+        .iter()
+        .map(|p| p.to_string_lossy().to_string())
+        .collect();
+    Ok(Profile {
+        modules,
+        frames,
+        full,
+        truncated,
+        samples: Vec::new(),
+        comm: Default::default(),
+        stats,
+    })
 }

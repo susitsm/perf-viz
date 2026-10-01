@@ -25,8 +25,18 @@ pub fn data_section(file: &File) -> Result<DataSection> {
         b"2ELIFREP" => true,
         _ => return Err("not a perf.data file".into()),
     };
-    let rd = |o: usize| if big_endian { BigEndian::read_u64(&h[o..]) } else { LittleEndian::read_u64(&h[o..]) };
-    Ok(DataSection { start: rd(40), len: rd(48), big_endian })
+    let rd = |o: usize| {
+        if big_endian {
+            BigEndian::read_u64(&h[o..])
+        } else {
+            LittleEndian::read_u64(&h[o..])
+        }
+    };
+    Ok(DataSection {
+        start: rd(40),
+        len: rd(48),
+        big_endian,
+    })
 }
 
 /// Drop the file's pages from the page cache, so the next read is cold.
@@ -51,7 +61,12 @@ pub fn read_only(file: &File, sec: &DataSection, block: usize) -> Result<u8> {
 
 /// Exact chunk boundaries, found while streaming `block`-byte reads.
 /// A chunk is cut at the first record boundary once it holds `chunk_bytes` or more.
-pub fn split(file: &File, sec: &DataSection, block: usize, chunk_bytes: u64) -> Result<Vec<(u64, u64)>> {
+pub fn split(
+    file: &File,
+    sec: &DataSection,
+    block: usize,
+    chunk_bytes: u64,
+) -> Result<Vec<(u64, u64)>> {
     if sec.big_endian {
         walk::<BigEndian>(file, sec, block, chunk_bytes)
     } else {
@@ -59,7 +74,12 @@ pub fn split(file: &File, sec: &DataSection, block: usize, chunk_bytes: u64) -> 
     }
 }
 
-fn walk<T: ByteOrder>(file: &File, sec: &DataSection, block: usize, chunk_bytes: u64) -> Result<Vec<(u64, u64)>> {
+fn walk<T: ByteOrder>(
+    file: &File,
+    sec: &DataSection,
+    block: usize,
+    chunk_bytes: u64,
+) -> Result<Vec<(u64, u64)>> {
     let mut buf = vec![0u8; block.max(1 << 17)];
     let (mut buf_at, mut filled) = (0u64, 0usize); // buffer holds data-section bytes [buf_at, buf_at+filled)
     let mut chunks = Vec::with_capacity(((sec.len / chunk_bytes) as usize + 1).min(1 << 20));
@@ -113,7 +133,13 @@ pub fn open(path: &Path) -> Result<(File, DataSection)> {
 /// interleaved streams look random), pull `region_bytes`-sized regions from a shared
 /// counter and read them in `block`-byte preads. Regions are not record-aligned;
 /// nothing is parsed. Returns a checksum of one byte per block.
-pub fn read_parallel(path: &Path, sec: &DataSection, readers: usize, block: usize, region_bytes: u64) -> Result<u8> {
+pub fn read_parallel(
+    path: &Path,
+    sec: &DataSection,
+    readers: usize,
+    block: usize,
+    region_bytes: u64,
+) -> Result<u8> {
     use std::sync::atomic::{AtomicU64, Ordering};
     let next = AtomicU64::new(0);
     let regions = sec.len.div_ceil(region_bytes);
@@ -129,7 +155,8 @@ pub fn read_parallel(path: &Path, sec: &DataSection, readers: usize, block: usiz
                         if r >= regions {
                             return Ok(x);
                         }
-                        let (mut pos, end) = (r * region_bytes, ((r + 1) * region_bytes).min(sec.len));
+                        let (mut pos, end) =
+                            (r * region_bytes, ((r + 1) * region_bytes).min(sec.len));
                         while pos < end {
                             let n = block.min((end - pos) as usize);
                             file.read_exact_at(&mut buf[..n], sec.start + pos)?;

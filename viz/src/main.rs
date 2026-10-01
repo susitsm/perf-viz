@@ -763,11 +763,17 @@ impl App {
                 };
             };
             ui.horizontal(|ui| match entry {
-                Some(Phase { start, end: Some(end), .. }) => {
+                Some(Phase {
+                    start,
+                    end: Some(end),
+                    ..
+                }) => {
                     dot(ui, Some(Color32::from_rgb(90, 200, 120)));
                     ui.label(format!("{label}  ({:.2}s)", (*end - *start).as_secs_f32()));
                 }
-                Some(Phase { start, end: None, .. }) => {
+                Some(Phase {
+                    start, end: None, ..
+                }) => {
                     ui.spinner();
                     ui.label(
                         RichText::new(format!("{label}  ({:.1}s)", start.elapsed().as_secs_f32()))
@@ -1238,7 +1244,10 @@ impl eframe::App for App {
                     ui.weak("(click a box to zoom, Esc to zoom out)");
                     if searching {
                         ui.separator();
-                        let Coverage { cost: samples, boxes } = self.coverage;
+                        let Coverage {
+                            cost: samples,
+                            boxes,
+                        } = self.coverage;
                         if boxes == 0 {
                             ui.colored_label(
                                 pal.warning(),
@@ -1771,7 +1780,11 @@ fn draw_caller_callee(
     version: u64,
 ) {
     if let Some(f) = st.selected {
-        if !st.lists.as_ref().is_some_and(|l| l.func == f && l.version == version) {
+        if !st
+            .lists
+            .as_ref()
+            .is_some_and(|l| l.func == f && l.version == version)
+        {
             st.lists = Some(CallLists {
                 func: f,
                 version,
@@ -1787,7 +1800,12 @@ fn draw_caller_callee(
         .default_size(250.0)
         .min_size(100.0)
         .show(ui, |ui| match (&st.selected, &st.lists) {
-            (Some(f), Some(CallLists { callers, callees, .. })) => {
+            (
+                Some(f),
+                Some(CallLists {
+                    callers, callees, ..
+                }),
+            ) => {
                 let (name, incl) = (&funcs.funcs[*f as usize].name, costs.inclusive[*f as usize]);
                 ui.horizontal(|ui| {
                     ui.strong(name.chars().take(90).collect::<String>());
@@ -2011,12 +2029,17 @@ fn main() -> eframe::Result {
     let show = cli.show;
     let args = Args {
         path: cli.file,
-        truncated: show.view.map_or(config.truncate_suspect_tails.unwrap_or(false), |v| {
-            v == cli::View::Truncated
-        }),
+        truncated: show
+            .view
+            .map_or(config.truncate_suspect_tails.unwrap_or(false), |v| {
+                v == cli::View::Truncated
+            }),
         cost: show.cost.or(config.cost),
         theme: cli.theme.or(config.theme).map(theme_pref),
-        tab: show.tab.or(config.tab).map_or(Tab::FlameGraph, Tab::from_name),
+        tab: show
+            .tab
+            .or(config.tab)
+            .map_or(Tab::FlameGraph, Tab::from_name),
         cold: opts.cold,
         opts,
         process: show.process,
@@ -2027,7 +2050,9 @@ fn main() -> eframe::Result {
         config,
     };
     // Maximized unless `--size` asks for a fixed window (which the screenshot checks rely on).
-    let (size, maximized) = cli.size.map_or(([1500.0, 900.0], true), |s| ([s.width, s.height], false));
+    let (size, maximized) = cli
+        .size
+        .map_or(([1500.0, 900.0], true), |s| ([s.width, s.height], false));
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size(size)

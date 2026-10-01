@@ -13,7 +13,9 @@ fn synthetic(nodes_target: usize) -> Trie {
     // paths and a long tail. Each stack is 5..60 frames deep.
     let mut x = 0x9E3779B97F4A7C15u64;
     let mut rnd = move || {
-        x ^= x << 13; x ^= x >> 7; x ^= x << 17;
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
         x
     };
     let mut b = TrieBuilder::default();
@@ -43,7 +45,11 @@ fn time(label: &str, t: &Trie, focus: u32) {
             layout(t, &totals, focus, w, min_w, 400, &mut out);
             best = best.min(s.elapsed().as_secs_f64());
         }
-        println!("{label:<34} width {w:>6} min_w {min_w:>3}: {:>9} rects in {:>8.3} ms", out.len(), best * 1e3);
+        println!(
+            "{label:<34} width {w:>6} min_w {min_w:>3}: {:>9} rects in {:>8.3} ms",
+            out.len(),
+            best * 1e3
+        );
     }
 }
 
@@ -57,11 +63,19 @@ struct Cli {
 fn main() {
     let cli = <Cli as clap::Parser>::parse();
     let t = synthetic(1_000_000);
-    println!("synthetic trie: {} nodes, {} samples", t.nodes.len(), t.total());
+    println!(
+        "synthetic trie: {} nodes, {} samples",
+        t.nodes.len(),
+        t.total()
+    );
     time("synthetic ~1M nodes", &t, ROOT);
     if let Some(path) = cli.path {
         let p = perf_profile::load::load(path.as_ref(), Default::default(), &mut |_| {}).unwrap();
-        println!("\nreal profile: {} full nodes, {} truncated nodes", p.full.nodes.len(), p.truncated.nodes.len());
+        println!(
+            "\nreal profile: {} full nodes, {} truncated nodes",
+            p.full.nodes.len(),
+            p.truncated.nodes.len()
+        );
         time("real (full)", &p.full, ROOT);
         time("real (truncated)", &p.truncated, ROOT);
     }

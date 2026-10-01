@@ -47,14 +47,20 @@ fn header(data_len: u64) -> [u8; HEADER_LEN] {
 pub fn free_bytes(dir: &Path) -> Option<u64> {
     let c = std::ffi::CString::new(dir.as_os_str().as_encoded_bytes()).ok()?;
     let mut s: libc::statvfs = unsafe { std::mem::zeroed() };
-    (unsafe { libc::statvfs(c.as_ptr(), &mut s) } == 0).then(|| s.f_bavail as u64 * s.f_frsize as u64)
+    (unsafe { libc::statvfs(c.as_ptr(), &mut s) } == 0)
+        .then(|| s.f_bavail as u64 * s.f_frsize as u64)
 }
 
 /// Write a synthetic recording of about `bytes` bytes of records to `path`. Returns the length of the
 /// data section (a little under `bytes`: it ends on a record boundary). `progress` is told how much
 /// has been written every few hundred MB; setting `cancel` stops the write with an error (the partly
 /// written file is left for the caller to delete, see [`Temp`]).
-pub fn write(path: &Path, bytes: u64, cancel: &AtomicBool, mut progress: impl FnMut(u64)) -> std::io::Result<u64> {
+pub fn write(
+    path: &Path,
+    bytes: u64,
+    cancel: &AtomicBool,
+    mut progress: impl FnMut(u64),
+) -> std::io::Result<u64> {
     let mut out = BufWriter::with_capacity(8 << 20, File::create(path)?);
     out.write_all(&header(0))?;
     let mut rng = Rng(0x9E37_79B9_7F4A_7C15);
@@ -67,7 +73,10 @@ pub fn write(path: &Path, bytes: u64, cancel: &AtomicBool, mut progress: impl Fn
             0 => (PERF_RECORD_MMAP2, 72 + ((rng.next() % 12) * 8) as usize),
             1 => (PERF_RECORD_COMM, 24 + ((rng.next() % 4) * 8) as usize),
             // Samples dominate: header, a few words, and a stack dump of 56 to 64 KB.
-            _ => (PERF_RECORD_SAMPLE, 256 + (((56 << 10) + rng.next() % (7 << 10)) & !7) as usize), // below the 64 KiB record limit
+            _ => (
+                PERF_RECORD_SAMPLE,
+                256 + (((56 << 10) + rng.next() % (7 << 10)) & !7) as usize,
+            ), // below the 64 KiB record limit
         };
         rec.resize(size, 0);
         LittleEndian::write_u32(&mut rec[0..], ty);
@@ -88,7 +97,10 @@ pub fn write(path: &Path, bytes: u64, cancel: &AtomicBool, mut progress: impl Fn
         }
         if len - last_report >= 256 << 20 {
             if cancel.load(Ordering::Relaxed) {
-                return Err(std::io::Error::new(std::io::ErrorKind::Interrupted, "cancelled"));
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::Interrupted,
+                    "cancelled",
+                ));
             }
             progress(len);
             last_report = len;
@@ -100,7 +112,14 @@ pub fn write(path: &Path, bytes: u64, cancel: &AtomicBool, mut progress: impl Fn
     f.write_all(&header(len))?;
     f.sync_all()?;
     // Just written, the file sits in the page cache; a read test must start from the disk.
-    unsafe { libc::posix_fadvise(std::os::fd::AsRawFd::as_raw_fd(&f), 0, 0, libc::POSIX_FADV_DONTNEED) };
+    unsafe {
+        libc::posix_fadvise(
+            std::os::fd::AsRawFd::as_raw_fd(&f),
+            0,
+            0,
+            libc::POSIX_FADV_DONTNEED,
+        )
+    };
     Ok(len)
 }
 
@@ -113,10 +132,19 @@ pub fn temp_path(dir: &Path) -> std::path::PathBuf {
 
 /// Remove generated recordings in `dir` left by processes that no longer exist (killed mid-run).
 pub fn remove_stale(dir: &Path) {
-    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
     for e in entries.flatten() {
         let name = e.file_name();
-        let Some(pid) = name.to_str().and_then(|n| n.strip_prefix(TEMP_PREFIX)).and_then(|n| n.strip_suffix(".data")).and_then(|n| n.parse::<u32>().ok()) else { continue };
+        let Some(pid) = name
+            .to_str()
+            .and_then(|n| n.strip_prefix(TEMP_PREFIX))
+            .and_then(|n| n.strip_suffix(".data"))
+            .and_then(|n| n.parse::<u32>().ok())
+        else {
+            continue;
+        };
         if !Path::new(&format!("/proc/{pid}")).exists() {
             let _ = std::fs::remove_file(e.path());
         }
@@ -152,11 +180,18 @@ mod tests {
         std::os::unix::fs::FileExt::read_exact_at(&file, &mut buf, sec.start).unwrap();
         let (mut samples, mut other) = (0, 0);
         records::for_each_record::<LittleEndian>(&buf, |r| {
-            if r.ty == PERF_RECORD_SAMPLE { samples += 1 } else { other += 1 }
+            if r.ty == PERF_RECORD_SAMPLE {
+                samples += 1
+            } else {
+                other += 1
+            }
             Ok(())
         })
         .unwrap();
-        assert!(samples > 400 && other > 0, "{samples} samples, {other} others");
+        assert!(
+            samples > 400 && other > 0,
+            "{samples} samples, {other} others"
+        );
     }
 
     #[test]
@@ -175,8 +210,13 @@ mod tests {
         write(&t.0, 4 << 20, &AtomicBool::new(false), |_| {}).unwrap();
         let data = std::fs::read(&t.0).unwrap();
         let mut seen = [false; 256];
-        data[1000..9000].iter().for_each(|&b| seen[b as usize] = true);
-        assert!(seen.iter().filter(|&&s| s).count() > 200, "bytes are not varied enough");
+        data[1000..9000]
+            .iter()
+            .for_each(|&b| seen[b as usize] = true);
+        assert!(
+            seen.iter().filter(|&&s| s).count() > 200,
+            "bytes are not varied enough"
+        );
     }
 
     #[test]
@@ -192,7 +232,11 @@ mod tests {
     fn stale_generated_files_of_dead_processes_are_removed() {
         let dir = std::env::temp_dir().join(format!("synth-stale-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let (dead, mine, other) = (dir.join(".perf-synthetic-4194300.data"), temp_path(&dir), dir.join("keep.data"));
+        let (dead, mine, other) = (
+            dir.join(".perf-synthetic-4194300.data"),
+            temp_path(&dir),
+            dir.join("keep.data"),
+        );
         for f in [&dead, &mine, &other] {
             std::fs::write(f, b"x").unwrap();
         }

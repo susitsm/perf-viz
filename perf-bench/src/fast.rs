@@ -3,14 +3,15 @@
 //! *within* a chunk but chunks complete in any order (no time sorting).
 
 use std::{
-    os::unix::fs::FileExt,
     fs::File,
     io::Cursor,
+    os::unix::fs::FileExt,
     path::Path,
     sync::atomic::{AtomicUsize, Ordering},
     time::{Duration, Instant},
 };
 
+use byteorder::{BigEndian, ByteOrder, LittleEndian};
 use linux_perf_data::{AttributeDescription, PerfFileReader};
 use linux_perf_event_reader::{
     Endianness, RawData, RawEventRecord, RecordIdParseInfo, RecordParseInfo, RecordType,
@@ -18,7 +19,6 @@ use linux_perf_event_reader::{
 };
 use memmap2::Mmap;
 use rustc_hash::FxHashMap;
-use byteorder::{BigEndian, ByteOrder, LittleEndian};
 
 use crate::{Result, records::for_each_record, stats::Stats};
 
@@ -48,18 +48,30 @@ impl Ctx {
         if attrs.is_empty() {
             return Err("no event attributes".into());
         }
-        let parse_infos = attrs.iter().map(|a| RecordParseInfo::new(&a.attr, endian)).collect();
+        let parse_infos = attrs
+            .iter()
+            .map(|a| RecordParseInfo::new(&a.attr, endian))
+            .collect();
         let mut id_to_attr = FxHashMap::default();
         for (i, a) in attrs.iter().enumerate() {
             for &id in &a.event_ids {
                 id_to_attr.insert(id, i);
             }
         }
-        Ok(Self { id_info: RecordIdParseInfo::new(&attrs[0].attr), parse_infos, id_to_attr })
+        Ok(Self {
+            id_info: RecordIdParseInfo::new(&attrs[0].attr),
+            parse_infos,
+            id_to_attr,
+        })
     }
 }
 
-pub fn read_all(path: &Path, threads: usize, populate: bool, touch: bool) -> Result<(Stats, Timings)> {
+pub fn read_all(
+    path: &Path,
+    threads: usize,
+    populate: bool,
+    touch: bool,
+) -> Result<(Stats, Timings)> {
     let t0 = Instant::now();
     let file = File::open(path)?;
     let mmap = unsafe { Mmap::map(&file)? };
@@ -89,8 +101,12 @@ pub fn read_all(path: &Path, threads: usize, populate: bool, touch: bool) -> Res
     let data = &bytes[data_start..data_end];
 
     let (stats, mut timings) = match endian {
-        Endianness::LittleEndian => run::<LittleEndian>(&file, data_start, data, &ctx, threads, setup, populate_t, touch)?,
-        Endianness::BigEndian => run::<BigEndian>(&file, data_start, data, &ctx, threads, setup, populate_t, touch)?,
+        Endianness::LittleEndian => run::<LittleEndian>(
+            &file, data_start, data, &ctx, threads, setup, populate_t, touch,
+        )?,
+        Endianness::BigEndian => run::<BigEndian>(
+            &file, data_start, data, &ctx, threads, setup, populate_t, touch,
+        )?,
     };
     let t = Instant::now();
     drop(reader);
@@ -105,7 +121,12 @@ pub fn read_all(path: &Path, threads: usize, populate: bool, touch: bool) -> Res
 /// doesn't take a page fault per record on the mmap; the workers fault pages in
 /// parallel later.
 /// Endianness-dispatching wrapper, used to cross-check other splitters.
-pub fn scan_chunks_file(file: &File, data_start: u64, data_len: u64, big_endian: bool) -> Result<Vec<(usize, usize)>> {
+pub fn scan_chunks_file(
+    file: &File,
+    data_start: u64,
+    data_len: u64,
+    big_endian: bool,
+) -> Result<Vec<(usize, usize)>> {
     if big_endian {
         scan_chunks::<BigEndian>(file, data_start, data_len)
     } else {
@@ -113,7 +134,11 @@ pub fn scan_chunks_file(file: &File, data_start: u64, data_len: u64, big_endian:
     }
 }
 
-pub fn scan_chunks<T: ByteOrder>(file: &File, data_start: u64, data_len: u64) -> Result<Vec<(usize, usize)>> {
+pub fn scan_chunks<T: ByteOrder>(
+    file: &File,
+    data_start: u64,
+    data_len: u64,
+) -> Result<Vec<(usize, usize)>> {
     let mut chunks = Vec::new();
     let (mut start, mut off) = (0u64, 0u64);
     let mut hdr = [0u8; HEADER_LEN];
@@ -179,25 +204,46 @@ fn run<T: ByteOrder>(
     for r in results {
         total.merge(&r?);
     }
-    Ok((total, Timings { setup, populate, scan, parse: t.elapsed(), teardown: Duration::ZERO }))
+    Ok((
+        total,
+        Timings {
+            setup,
+            populate,
+            scan,
+            parse: t.elapsed(),
+            teardown: Duration::ZERO,
+        },
+    ))
 }
 
 impl Ctx {
     /// Wrap the body of a built-in (kernel event) record for parsing, picking the right attr.
-    pub fn raw_event<'a, T: ByteOrder>(&self, ty: u32, misc: u16, body: &'a [u8]) -> RawEventRecord<'a> {
+    pub fn raw_event<'a, T: ByteOrder>(
+        &self,
+        ty: u32,
+        misc: u16,
+        body: &'a [u8],
+    ) -> RawEventRecord<'a> {
         let record_type = RecordType(ty);
         let data = RawData::Single(body);
         let attr_index = if self.parse_infos.len() == 1 {
             0
         } else {
-            get_record_id::<T>(record_type, data, &self.id_info).and_then(|id| self.id_to_attr.get(&id).copied()).unwrap_or(0)
+            get_record_id::<T>(record_type, data, &self.id_info)
+                .and_then(|id| self.id_to_attr.get(&id).copied())
+                .unwrap_or(0)
         };
         RawEventRecord::new(record_type, misc, data, self.parse_infos[attr_index])
     }
 }
 
 /// Parse a slice made of whole records, accumulating into `stats`.
-pub fn parse_chunk<T: ByteOrder>(chunk: &[u8], ctx: &Ctx, touch: bool, stats: &mut Stats) -> Result<()> {
+pub fn parse_chunk<T: ByteOrder>(
+    chunk: &[u8],
+    ctx: &Ctx,
+    touch: bool,
+    stats: &mut Stats,
+) -> Result<()> {
     for_each_record::<T>(chunk, |r| {
         stats.count(r.ty, r.size);
         if RecordType(r.ty).is_builtin_type() {

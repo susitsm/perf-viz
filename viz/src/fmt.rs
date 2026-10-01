@@ -13,7 +13,9 @@ pub fn sig3(x: f64) -> String {
     // Scientific notation with two decimals already rounds to three significant digits, carries
     // included (99.96 -> 1.00e2), so the digits and exponent can be trusted.
     let s = format!("{:.2e}", x.abs());
-    let (mantissa, exp) = s.split_once('e').expect("scientific notation has an exponent");
+    let (mantissa, exp) = s
+        .split_once('e')
+        .expect("scientific notation has an exponent");
     let e: i32 = exp.parse().expect("exponent is an integer");
     let digits: String = mantissa.chars().filter(|&c| c != '.').collect();
     let body = if e >= 2 {
@@ -29,7 +31,17 @@ pub fn sig3(x: f64) -> String {
 
 /// What the views add up: the number of samples, or the sum of the samples' periods (cycles, for a
 /// cycles event), which weighs each sample by the work it stands for.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize, clap::ValueEnum)]
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    PartialEq,
+    Eq,
+    Default,
+    serde::Serialize,
+    serde::Deserialize,
+    clap::ValueEnum,
+)]
 #[serde(rename_all = "lowercase")]
 pub enum Cost {
     Samples,
@@ -54,13 +66,25 @@ pub fn si(x: f64) -> String {
     }
     // Round first, so 999_600 (1000 K after rounding) is shown as 1.00 M.
     let r: f64 = sig3(x).parse().unwrap_or(x);
-    let (scale, suffix) = if r >= 1e12 { (1e12, "T") } else if r >= 1e9 { (1e9, "G") } else if r >= 1e6 { (1e6, "M") } else { (1e3, "K") };
+    let (scale, suffix) = if r >= 1e12 {
+        (1e12, "T")
+    } else if r >= 1e9 {
+        (1e9, "G")
+    } else if r >= 1e6 {
+        (1e6, "M")
+    } else {
+        (1e3, "K")
+    };
     format!("{} {suffix}", sig3(r / scale))
 }
 
 /// A percentage: `fraction` of `whole`, as `sig3` digits (no `%` sign). Zero if `whole` is zero.
 pub fn pct_of(part: f64, whole: f64) -> String {
-    if whole == 0.0 { "0".into() } else { sig3(100.0 * part / whole) }
+    if whole == 0.0 {
+        "0".into()
+    } else {
+        sig3(100.0 * part / whole)
+    }
 }
 
 #[cfg(test)]
@@ -93,7 +117,11 @@ mod tests {
         assert_eq!(si(1234.0), "1.23 K");
         assert_eq!(si(1_322_465.0), "1.32 M");
         assert_eq!(si(53_818_498_413.0), "53.8 G");
-        assert_eq!(si(999_600.0), "1.00 M", "rounding up crosses into the next unit");
+        assert_eq!(
+            si(999_600.0),
+            "1.00 M",
+            "rounding up crosses into the next unit"
+        );
         assert_eq!(si(12_345_678_901_234.0), "12.3 T");
         assert_eq!(Cost::Samples.format(41390), "41390");
         assert_eq!(Cost::Cycles.format(41390), "41.4 K");
@@ -111,8 +139,16 @@ mod tests {
     #[test]
     fn always_three_digits_that_are_not_leading_zeros() {
         for x in [0.00417, 0.0417, 0.417, 4.17, 41.7, 99.0, 12.0, 0.5] {
-            let digits: Vec<char> = sig3(x).chars().filter(|c| c.is_ascii_digit()).skip_while(|&c| c == '0').collect();
-            assert!(digits.len() >= 3, "{x} -> {} has fewer than three significant digits", sig3(x));
+            let digits: Vec<char> = sig3(x)
+                .chars()
+                .filter(|c| c.is_ascii_digit())
+                .skip_while(|&c| c == '0')
+                .collect();
+            assert!(
+                digits.len() >= 3,
+                "{x} -> {} has fewer than three significant digits",
+                sig3(x)
+            );
         }
     }
 }

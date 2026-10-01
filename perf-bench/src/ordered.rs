@@ -90,7 +90,14 @@ impl Default for Config {
     fn default() -> Self {
         // Measured on a 37.8 GB file: 128 MiB regions with 6 in flight (about 790 MiB held) beat
         // 32 MiB regions (readahead restarts more often, and head-of-line blocking stalls readers).
-        Self { block: 1 << 20, workers: 8, readers: 3, region_bytes: 128 << 20, in_flight: 6, lookahead: 1 }
+        Self {
+            block: 1 << 20,
+            workers: 8,
+            readers: 3,
+            region_bytes: 128 << 20,
+            in_flight: 6,
+            lookahead: 1,
+        }
     }
 }
 
@@ -200,7 +207,13 @@ impl<C: Consumer> Shared<'_, C> {
     }
 
     fn region<'t>(t: &'t mut Table<C::Events>, r: usize) -> &'t mut Region<C::Events> {
-        t.regions.entry(r).or_insert_with(|| Region { total: None, extracted: 0, events: Vec::new(), parked: Vec::new(), processed: 0 })
+        t.regions.entry(r).or_insert_with(|| Region {
+            total: None,
+            extracted: 0,
+            events: Vec::new(),
+            parked: Vec::new(),
+            processed: 0,
+        })
     }
 
     /// Commit every region that is ready, in order, then release the regions whose lookahead is
@@ -214,7 +227,10 @@ impl<C: Consumer> Shared<'_, C> {
         t.advancing = true;
         loop {
             let r = t.next_commit;
-            let ready = t.regions.get(&r).is_some_and(|g| g.total == Some(g.extracted));
+            let ready = t
+                .regions
+                .get(&r)
+                .is_some_and(|g| g.total == Some(g.extracted));
             if ready {
                 let events = std::mem::take(&mut t.regions.get_mut(&r).unwrap().events);
                 drop(t);
@@ -239,7 +255,9 @@ impl<C: Consumer> Shared<'_, C> {
                 }
                 t = self.table.lock().unwrap();
             }
-            while t.next_release < t.next_commit && (t.next_release + self.lookahead < t.next_commit || end) {
+            while t.next_release < t.next_commit
+                && (t.next_release + self.lookahead < t.next_commit || end)
+            {
                 let q = t.next_release;
                 t.next_release += 1;
                 let g = t.regions.get_mut(&q).unwrap();
@@ -274,7 +292,9 @@ impl<C: Consumer> Shared<'_, C> {
             return self.recycle(unit.buf);
         }
         let t0 = Instant::now();
-        let res = self.consumer.extract(unit.region, local, &unit.buf[..unit.len]);
+        let res = self
+            .consumer
+            .extract(unit.region, local, &unit.buf[..unit.len]);
         self.add_ns(NS_EXTRACT, t0);
         match res {
             Ok(ev) => {
@@ -299,7 +319,9 @@ impl<C: Consumer> Shared<'_, C> {
     fn do_process(&self, local: &mut C::Local, unit: Unit) {
         if !self.aborted() {
             let t0 = Instant::now();
-            let res = self.consumer.process(unit.region, local, &unit.buf[..unit.len]);
+            let res = self
+                .consumer
+                .process(unit.region, local, &unit.buf[..unit.len]);
             self.add_ns(NS_PROCESS, t0);
             if let Err(e) = res {
                 self.fail(e);
@@ -329,8 +351,20 @@ impl<C: Consumer> Shared<'_, C> {
 
 /// Read one unit: up to `buf.len()` bytes from data offset `off`, trimmed to whole records.
 /// `hi` is the end of the region (`lo` its start, for error messages). Returns the valid length.
-fn fill_unit<T: ByteOrder>(file: &File, sec: &DataSection, lo: u64, hi: u64, off: u64, buf: &mut Vec<u8>, read_ns: &mut u64) -> Result<usize> {
-    let mismatch = |what: &str| BoundaryMismatch(format!("{what} in region [{lo}, {hi}) at data offset {off}"));
+fn fill_unit<T: ByteOrder>(
+    file: &File,
+    sec: &DataSection,
+    lo: u64,
+    hi: u64,
+    off: u64,
+    buf: &mut Vec<u8>,
+    read_ns: &mut u64,
+) -> Result<usize> {
+    let mismatch = |what: &str| {
+        BoundaryMismatch(format!(
+            "{what} in region [{lo}, {hi}) at data offset {off}"
+        ))
+    };
     let mut want = buf.len();
     loop {
         let n = want.min((hi - off) as usize);
@@ -344,7 +378,9 @@ fn fill_unit<T: ByteOrder>(file: &File, sec: &DataSection, lo: u64, hi: u64, off
         match whole_records::<T>(&buf[..n], reaches_end) {
             Whole::Len(l) => return Ok(l),
             Whole::NeedAtLeast(need) if !reaches_end => want = need, // one record bigger than the buffer
-            Whole::NeedAtLeast(_) | Whole::Bad("trailing bytes") => return Err(mismatch("record straddles region end").into()),
+            Whole::NeedAtLeast(_) | Whole::Bad("trailing bytes") => {
+                return Err(mismatch("record straddles region end").into());
+            }
             Whole::Bad(e) if lo > 0 => return Err(mismatch(e).into()),
             Whole::Bad(e) => return Err(format!("{e} at data offset {off}").into()),
         }
@@ -378,17 +414,28 @@ impl<C: Consumer> ReaderCtx<'_, '_, C> {
         if let Some(p) = &self.sh.progress {
             p.fetch_add(len as u64, Ordering::Relaxed);
         }
-        let _ = self.sh.tasks_tx.send(Task::Extract(Unit { region, buf, len }));
+        let _ = self
+            .sh
+            .tasks_tx
+            .send(Task::Extract(Unit { region, buf, len }));
     }
 
     /// Read region `[lo, hi)` (whose bounds are guesses) and hand its units to the workers.
-    fn read_region<T: ByteOrder>(&self, file: &File, region: usize, lo: u64, hi: u64) -> Result<()> {
+    fn read_region<T: ByteOrder>(
+        &self,
+        file: &File,
+        region: usize,
+        lo: u64,
+        hi: u64,
+    ) -> Result<()> {
         let (mut off, mut units, mut read_ns) = (lo, 0usize, 0u64);
         while off < hi {
             if self.sh.aborted() {
                 return Ok(());
             }
-            let Some(mut buf) = self.take_buffer() else { return Ok(()) };
+            let Some(mut buf) = self.take_buffer() else {
+                return Ok(());
+            };
             let len = match fill_unit::<T>(file, self.sec, lo, hi, off, &mut buf, &mut read_ns) {
                 Ok(l) => l,
                 Err(e) => {
@@ -409,7 +456,8 @@ impl<C: Consumer> ReaderCtx<'_, '_, C> {
     /// `region_bytes`, so every cut is exact.
     fn read_sequential<T: ByteOrder>(&self, file: &File, region_bytes: u64) -> Result<usize> {
         let len_total = self.sec.len;
-        let (mut off, mut region, mut region_start, mut units, mut read_ns) = (0u64, 0usize, 0u64, 0usize, 0u64);
+        let (mut off, mut region, mut region_start, mut units, mut read_ns) =
+            (0u64, 0usize, 0u64, 0usize, 0u64);
         if len_total == 0 {
             return Ok(0);
         }
@@ -418,7 +466,9 @@ impl<C: Consumer> ReaderCtx<'_, '_, C> {
             if self.sh.aborted() {
                 break;
             }
-            let Some(mut buf) = self.take_buffer() else { break };
+            let Some(mut buf) = self.take_buffer() else {
+                break;
+            };
             let len = fill_unit::<T>(file, self.sec, 0, len_total, off, &mut buf, &mut read_ns)?;
             self.send(region, buf, len);
             units += 1;
@@ -441,7 +491,15 @@ impl<C: Consumer> ReaderCtx<'_, '_, C> {
 /// Run the pipeline over `sec`. With `bounds` (region starts/ends, strictly increasing from 0 to
 /// `sec.len`) up to `cfg.readers` readers take regions in order; with `None` a single reader
 /// cuts regions as it goes. Returns the workers' states.
-pub fn run_ordered<C: Consumer>(file: &File, path: Option<&Path>, sec: &DataSection, bounds: Option<&[u64]>, cfg: Config, progress: Option<std::sync::Arc<AtomicU64>>, consumer: &C) -> Result<(Vec<C::Local>, Metrics)> {
+pub fn run_ordered<C: Consumer>(
+    file: &File,
+    path: Option<&Path>,
+    sec: &DataSection,
+    bounds: Option<&[u64]>,
+    cfg: Config,
+    progress: Option<std::sync::Arc<AtomicU64>>,
+    consumer: &C,
+) -> Result<(Vec<C::Local>, Metrics)> {
     let region_len_max = match bounds {
         Some(b) => b.windows(2).map(|w| w[1] - w[0]).max().unwrap_or(0),
         None => cfg.region_bytes + cfg.block as u64 * 2, // a cut lands within one block past the target
@@ -461,7 +519,17 @@ pub fn run_ordered<C: Consumer>(file: &File, path: Option<&Path>, sec: &DataSect
     let sh = Shared {
         consumer,
         lookahead: cfg.lookahead,
-        table: Mutex::new(Table { regions: BTreeMap::new(), next_commit: 0, next_release: 0, total_regions: None, finished: false, advancing: false, completed: 0, held_units: 0, max_held_units: 0 }),
+        table: Mutex::new(Table {
+            regions: BTreeMap::new(),
+            next_commit: 0,
+            next_release: 0,
+            total_regions: None,
+            finished: false,
+            advancing: false,
+            completed: 0,
+            held_units: 0,
+            max_held_units: 0,
+        }),
         done: Condvar::new(),
         tasks_tx: tasks_tx.clone(),
         free_tx: free_tx.clone(),
@@ -475,7 +543,11 @@ pub fn run_ordered<C: Consumer>(file: &File, path: Option<&Path>, sec: &DataSect
     };
     let next_region = AtomicUsize::new(0);
     let regions_total = bounds.map_or(0, |b| b.len() - 1);
-    let nreaders = if bounds.is_some() && path.is_some() { cfg.readers.clamp(1, regions_total.max(1)) } else { 1 };
+    let nreaders = if bounds.is_some() && path.is_some() {
+        cfg.readers.clamp(1, regions_total.max(1))
+    } else {
+        1
+    };
 
     let (locals, total_regions) = std::thread::scope(|s| {
         let workers: Vec<_> = (0..cfg.workers)
@@ -501,9 +573,15 @@ pub fn run_ordered<C: Consumer>(file: &File, path: Option<&Path>, sec: &DataSect
 
         let readers: Vec<_> = (0..nreaders)
             .map(|_| {
-                let (sh, free_rx, tokens_rx, next_region) = (&sh, &free_rx, &tokens_rx, &next_region);
+                let (sh, free_rx, tokens_rx, next_region) =
+                    (&sh, &free_rx, &tokens_rx, &next_region);
                 s.spawn(move || -> Result<usize> {
-                    let rc = ReaderCtx { sh, sec, free_rx, tokens_rx };
+                    let rc = ReaderCtx {
+                        sh,
+                        sec,
+                        free_rx,
+                        tokens_rx,
+                    };
                     let own; // each reader opens the file itself: readahead state is per open file
                     let f: &File = match path {
                         Some(p) if nreaders > 1 => {
@@ -514,7 +592,11 @@ pub fn run_ordered<C: Consumer>(file: &File, path: Option<&Path>, sec: &DataSect
                     };
                     let res = (|| -> Result<usize> {
                         let Some(bounds) = bounds else {
-                            return if sec.big_endian { rc.read_sequential::<BigEndian>(f, cfg.region_bytes) } else { rc.read_sequential::<LittleEndian>(f, cfg.region_bytes) };
+                            return if sec.big_endian {
+                                rc.read_sequential::<BigEndian>(f, cfg.region_bytes)
+                            } else {
+                                rc.read_sequential::<LittleEndian>(f, cfg.region_bytes)
+                            };
                         };
                         let mut claimed = 0;
                         loop {
@@ -526,7 +608,11 @@ pub fn run_ordered<C: Consumer>(file: &File, path: Option<&Path>, sec: &DataSect
                             }
                             claimed += 1;
                             let (lo, hi) = (bounds[r], bounds[r + 1]);
-                            if sec.big_endian { rc.read_region::<BigEndian>(f, r, lo, hi)? } else { rc.read_region::<LittleEndian>(f, r, lo, hi)? }
+                            if sec.big_endian {
+                                rc.read_region::<BigEndian>(f, r, lo, hi)?
+                            } else {
+                                rc.read_region::<LittleEndian>(f, r, lo, hi)?
+                            }
                         }
                     })();
                     if res.is_err() {
@@ -557,7 +643,11 @@ pub fn run_ordered<C: Consumer>(file: &File, path: Option<&Path>, sec: &DataSect
             *sh.error.lock().unwrap() = Some(e);
             sh.abort.store(true, Ordering::Relaxed);
         }
-        let total_regions = if bounds.is_some() { regions_total } else { opened };
+        let total_regions = if bounds.is_some() {
+            regions_total
+        } else {
+            opened
+        };
         if !sh.aborted() {
             // Nothing more will be committed after the last region: release what lookahead holds back.
             sh.table.lock().unwrap().total_regions = Some(total_regions);
@@ -568,7 +658,11 @@ pub fn run_ordered<C: Consumer>(file: &File, path: Option<&Path>, sec: &DataSect
         {
             let mut t = sh.table.lock().unwrap();
             while t.completed < total_regions && !sh.aborted() {
-                t = sh.done.wait_timeout(t, Duration::from_millis(100)).unwrap().0;
+                t = sh
+                    .done
+                    .wait_timeout(t, Duration::from_millis(100))
+                    .unwrap()
+                    .0;
             }
         }
         for _ in 0..cfg.workers {
@@ -613,7 +707,12 @@ pub struct Options {
 /// Plan regions, run the ordered pipeline with a consumer made by `make`, and fall back to the
 /// single-reader mode (with a fresh consumer) if the guessed bounds fail verification or turn
 /// out too coarse to bound memory. Returns the consumer that finished the successful run.
-pub fn stream_ordered<C, F>(path: &Path, cfg: Config, opts: Options, make: F) -> Result<(C, Vec<C::Local>, Report)>
+pub fn stream_ordered<C, F>(
+    path: &Path,
+    cfg: Config,
+    opts: Options,
+    make: F,
+) -> Result<(C, Vec<C::Local>, Report)>
 where
     C: Consumer,
     F: Fn() -> C,
@@ -622,7 +721,10 @@ where
     if opts.cold {
         split::drop_cache(&file);
     }
-    let mut report = Report { regions: 1, ..Default::default() };
+    let mut report = Report {
+        regions: 1,
+        ..Default::default()
+    };
     if cfg.readers > 1 && !opts.force_sequential {
         let t = Instant::now();
         let regions = (sec.len / cfg.region_bytes.max(1)).max(1) as usize;
@@ -634,11 +736,21 @@ where
         report.regions = bounds.len() - 1;
         let largest = bounds.windows(2).map(|w| w[1] - w[0]).max().unwrap_or(0);
         if largest > cfg.region_bytes * 4 {
-            eprintln!("warning: region planning too coarse (largest region {largest} bytes); using a single reader");
+            eprintln!(
+                "warning: region planning too coarse (largest region {largest} bytes); using a single reader"
+            );
             report.fell_back = true;
         } else {
             let consumer = make();
-            match run_ordered(&file, Some(path), &sec, Some(&bounds), cfg, opts.progress.clone(), &consumer) {
+            match run_ordered(
+                &file,
+                Some(path),
+                &sec,
+                Some(&bounds),
+                cfg,
+                opts.progress.clone(),
+                &consumer,
+            ) {
                 Ok((locals, metrics)) => {
                     report.metrics = metrics;
                     return Ok((consumer, locals, report));
@@ -655,7 +767,15 @@ where
         p.store(0, Ordering::Relaxed); // a fallback rereads from the start
     }
     let consumer = make();
-    let (locals, metrics) = run_ordered(&file, Some(path), &sec, None, Config { readers: 1, ..cfg }, opts.progress.clone(), &consumer)?;
+    let (locals, metrics) = run_ordered(
+        &file,
+        Some(path),
+        &sec,
+        None,
+        Config { readers: 1, ..cfg },
+        opts.progress.clone(),
+        &consumer,
+    )?;
     report.metrics = metrics;
     Ok((consumer, locals, report))
 }

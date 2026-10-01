@@ -4,8 +4,9 @@
 use std::{
     path::{Path, PathBuf},
     sync::{
-        Arc, Mutex, mpsc,
+        Arc, Mutex,
         atomic::{AtomicBool, Ordering},
+        mpsc,
     },
 };
 
@@ -79,7 +80,18 @@ fn describe(e: &Event) -> String {
     match e {
         Event::Info(s) => s.clone(),
         Event::Probe { secs, gbps } => format!("  {secs:.0} s: {gbps:.2} GB/s"),
-        Event::Trial { what, settings: s, gbps, long } => format!("  {what}: {} readers, {} MiB regions, {} open: {gbps:.2} GB/s{}", s.readers, s.region_mb, s.in_flight, if *long { " (full length)" } else { "" }),
+        Event::Trial {
+            what,
+            settings: s,
+            gbps,
+            long,
+        } => format!(
+            "  {what}: {} readers, {} MiB regions, {} open: {gbps:.2} GB/s{}",
+            s.readers,
+            s.region_mb,
+            s.in_flight,
+            if *long { " (full length)" } else { "" }
+        ),
     }
 }
 
@@ -130,14 +142,23 @@ impl Tuner {
     }
 
     fn synth_gb(&self) -> f64 {
-        if self.synth_gb > 0.0 { self.synth_gb } else { DEFAULT_SYNTH_GB }
+        if self.synth_gb > 0.0 {
+            self.synth_gb
+        } else {
+            DEFAULT_SYNTH_GB
+        }
     }
 
     /// The folder a generated recording goes to: the chosen one, else next to the recording, else home.
     fn synth_folder(&self) -> PathBuf {
         self.synth_dir
             .clone()
-            .or_else(|| self.source.as_ref().and_then(|p| p.canonicalize().ok()).and_then(|p| p.parent().map(Path::to_path_buf)))
+            .or_else(|| {
+                self.source
+                    .as_ref()
+                    .and_then(|p| p.canonicalize().ok())
+                    .and_then(|p| p.parent().map(Path::to_path_buf))
+            })
             .or_else(|| std::env::var_os("HOME").map(PathBuf::from))
             .unwrap_or_else(|| PathBuf::from("."))
     }
@@ -155,7 +176,11 @@ impl Tuner {
         let (folder, bytes) = (self.synth_folder(), (self.synth_gb() * 1e9) as u64);
         self.cancel.store(false, Ordering::Relaxed);
         self.settled = false;
-        *self.shared.lock().unwrap() = Shared { lines: Vec::new(), running: true, result: None };
+        *self.shared.lock().unwrap() = Shared {
+            lines: Vec::new(),
+            running: true,
+            result: None,
+        };
         let (shared, cancel, ctx) = (self.shared.clone(), self.cancel.clone(), ctx.clone());
         std::thread::spawn(move || {
             let say = |s: String| {
@@ -166,7 +191,10 @@ impl Tuner {
             let mut opts = tune::Options::default();
             // A testing aid: scale every duration (0.1 makes a run about ten times shorter).
             #[cfg(any(test, feature = "scripted"))]
-            if let Some(f) = std::env::var("PERF_VIZ_TUNE_SCALE").ok().and_then(|v| v.parse::<f64>().ok()) {
+            if let Some(f) = std::env::var("PERF_VIZ_TUNE_SCALE")
+                .ok()
+                .and_then(|v| v.parse::<f64>().ok())
+            {
                 opts = opts.scaled(f);
             }
             // Dropped at the end of the thread: a generated recording is deleted however the run ends.
@@ -175,11 +203,24 @@ impl Tuner {
                 synth::remove_stale(&folder);
                 let path = synth::temp_path(&folder);
                 match synth::free_bytes(&folder) {
-                    Some(free) if free < bytes + (256 << 20) => Err(format!("not enough free space in {}: {:.1} GB free, {:.1} GB needed", folder.display(), free as f64 / 1e9, bytes as f64 / 1e9)),
+                    Some(free) if free < bytes + (256 << 20) => Err(format!(
+                        "not enough free space in {}: {:.1} GB free, {:.1} GB needed",
+                        folder.display(),
+                        free as f64 / 1e9,
+                        bytes as f64 / 1e9
+                    )),
                     _ => {
-                        say(format!("Writing a {:.1} GB generated recording to {}", bytes as f64 / 1e9, folder.display()));
+                        say(format!(
+                            "Writing a {:.1} GB generated recording to {}",
+                            bytes as f64 / 1e9,
+                            folder.display()
+                        ));
                         generated = Some(synth::Temp(path.clone()));
-                        synth::write(&path, bytes, &cancel, |done| say(format!("  {:.1} GB written", done as f64 / 1e9))).map(|_| path).map_err(|e| e.to_string())
+                        synth::write(&path, bytes, &cancel, |done| {
+                            say(format!("  {:.1} GB written", done as f64 / 1e9))
+                        })
+                        .map(|_| path)
+                        .map_err(|e| e.to_string())
                     }
                 }
             } else {
@@ -206,7 +247,11 @@ impl Tuner {
         let (tx, rx) = mpsc::channel();
         let ctx = ctx.clone();
         std::thread::spawn(move || {
-            let _ = tx.send(rfd::FileDialog::new().set_title("Folder for the generated recording (on the disk to tune for)").pick_folder());
+            let _ = tx.send(
+                rfd::FileDialog::new()
+                    .set_title("Folder for the generated recording (on the disk to tune for)")
+                    .pick_folder(),
+            );
             ctx.request_repaint();
         });
         self.dir_picker = Some(rx);
@@ -219,7 +264,11 @@ impl Tuner {
         let (tx, rx) = mpsc::channel();
         let ctx = ctx.clone();
         std::thread::spawn(move || {
-            let _ = tx.send(rfd::FileDialog::new().set_title("Choose a perf.data file to tune with").pick_file());
+            let _ = tx.send(
+                rfd::FileDialog::new()
+                    .set_title("Choose a perf.data file to tune with")
+                    .pick_file(),
+            );
             ctx.request_repaint();
         });
         self.picker = Some(rx);
@@ -257,11 +306,19 @@ impl Tuner {
         if !self.open && self.confirm.is_none() {
             return out;
         }
-        let pal = Pal { dark: ctx.global_style().visuals.dark_mode };
+        let pal = Pal {
+            dark: ctx.global_style().visuals.dark_mode,
+        };
         let saved_before = self.settled;
         // A testing aid: start tuning as soon as the window opens (clicks cannot reach this window).
         #[cfg(any(test, feature = "scripted"))]
-        if self.open && std::env::var_os("PERF_VIZ_TUNE_AUTOSTART").is_some() && self.source.is_some() && !self.running() && self.shared.lock().unwrap().result.is_none() && self.shared.lock().unwrap().lines.is_empty() {
+        if self.open
+            && std::env::var_os("PERF_VIZ_TUNE_AUTOSTART").is_some()
+            && self.source.is_some()
+            && !self.running()
+            && self.shared.lock().unwrap().result.is_none()
+            && self.shared.lock().unwrap().lines.is_empty()
+        {
             self.start(ctx);
         }
         let mut close_requested = false;
@@ -269,7 +326,9 @@ impl Tuner {
         let viewport = viewport_id();
         if self.open {
             // Its own window, so the loaded profile stays usable while tuning runs.
-            let builder = egui::ViewportBuilder::default().with_title("perf-viz: tune reader").with_inner_size([620.0, 640.0]);
+            let builder = egui::ViewportBuilder::default()
+                .with_title("perf-viz: tune reader")
+                .with_inner_size([620.0, 640.0]);
             ctx.show_viewport_immediate(viewport, builder, |vui, _class| {
                 if vui.input(|i| i.viewport().close_requested()) {
                     close_requested = true;
@@ -405,7 +464,10 @@ impl Tuner {
                 ui.set_width(380.0);
                 ui.heading("Save the tuning results?");
                 if let Some(b) = best {
-                    ui.label(format!("Best settings found: {} readers, {} MiB regions, {} regions open.", b.readers, b.region_mb, b.in_flight));
+                    ui.label(format!(
+                        "Best settings found: {} readers, {} MiB regions, {} regions open.",
+                        b.readers, b.region_mb, b.in_flight
+                    ));
                 }
                 ui.label(match ask {
                     Ask::Open(_) => "Unsaved results are lost when another file is opened.",
@@ -419,7 +481,14 @@ impl Tuner {
                     if ui.button("Discard").clicked() {
                         answer = Some(Answer::Discard);
                     }
-                    if ui.button(if matches!(ask, Ask::Open(_)) { "Don't open the file" } else { "Keep tuning window open" }).clicked() {
+                    if ui
+                        .button(if matches!(ask, Ask::Open(_)) {
+                            "Don't open the file"
+                        } else {
+                            "Keep tuning window open"
+                        })
+                        .clicked()
+                    {
                         answer = Some(Answer::Cancel);
                     }
                 });

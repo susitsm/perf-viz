@@ -23,15 +23,30 @@ pub struct PhysTrie {
 
 impl Default for PhysTrie {
     fn default() -> Self {
-        let root = PNode { parent: u32::MAX, frame: Phys { module: NO_MODULE, svma: 0, suspect: false }, self_count: 0 };
-        Self { nodes: vec![root], index: FxHashMap::default() }
+        let root = PNode {
+            parent: u32::MAX,
+            frame: Phys {
+                module: NO_MODULE,
+                svma: 0,
+                suspect: false,
+            },
+            self_count: 0,
+        };
+        Self {
+            nodes: vec![root],
+            index: FxHashMap::default(),
+        }
     }
 }
 
 impl PhysTrie {
     fn child(&mut self, parent: u32, frame: Phys) -> u32 {
         *self.index.entry((parent, frame)).or_insert_with(|| {
-            self.nodes.push(PNode { parent, frame, self_count: 0 });
+            self.nodes.push(PNode {
+                parent,
+                frame,
+                self_count: 0,
+            });
             self.nodes.len() as u32 - 1
         })
     }
@@ -63,7 +78,11 @@ mod tests {
     use super::*;
 
     fn f(svma: u64) -> Phys {
-        Phys { module: 0, svma, suspect: false }
+        Phys {
+            module: 0,
+            svma,
+            suspect: false,
+        }
     }
 
     #[test]
@@ -82,7 +101,10 @@ mod tests {
     fn suspect_flag_distinguishes_frames() {
         let mut t = PhysTrie::default();
         t.insert_leaf_first(&[f(1)]);
-        t.insert_leaf_first(&[Phys { suspect: true, ..f(1) }]);
+        t.insert_leaf_first(&[Phys {
+            suspect: true,
+            ..f(1)
+        }]);
         assert_eq!(t.nodes.len(), 3);
     }
 
@@ -95,7 +117,10 @@ mod tests {
         let map = a.merge(&b);
         assert_eq!(a.nodes.len(), 4);
         let g = map[leaf_b as usize];
-        assert_eq!(a.nodes[g as usize].self_count, 2, "same stack in both tries adds up");
+        assert_eq!(
+            a.nodes[g as usize].self_count, 2,
+            "same stack in both tries adds up"
+        );
         assert!(map.iter().all(|&g| (g as usize) < a.nodes.len()));
         assert_eq!(map[0], ROOT);
     }

@@ -1,0 +1,35 @@
+[package]
+name = "perf-viz"
+version = "0.1.0"
+edition = "2024"
+default-run = "perf-viz"
+
+[[bin]]
+name = "perf-viz"
+path = "src/main.rs"
+
+[[bin]]
+name = "flame-bench"
+path = "src/bin/flame-bench.rs"
+# A benchmark; keep it out of `cargo doc`, so the viewer's page is the one that opens.
+doc = false
+
+[dependencies]
+perf-profile = { path = "../profile" }
+eframe = { version = "=0.36.1", default-features = false, features = ["accesskit", "default_fonts", "glow", "wayland", "x11"] }
+image = { version = "0.25", default-features = false, features = ["png"], optional = true }
+rustc-hash = "2.1"
+toml = "1.1.6"
+serde = { version = "1.0.229", features = ["derive"] }
+rfd = "0.17.2"
+perf-bench = { version = "0.1.0", path = "../perf-bench" }
+clap = { version = "4.6.7", features = ["derive"] }
+
+[features]
+# Scripted pointer input and screenshots, for checking the GUI without a person (see `harness`).
+# Off in normal builds; the code is also compiled for `cargo test`, which has `image` as a
+# dev-dependency for that.
+scripted = ["dep:image"]
+
+[dev-dependencies]
+image = { version = "0.25", default-features = false, features = ["png"] }

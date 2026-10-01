@@ -1,0 +1,17 @@
+[package]
+name = "perf-profile"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+addr2line = "0.27.1"
+blazesym = "0.2.6"
+byteorder = "1.5.0"
+clap = { version = "4.6.7", features = ["derive"] }
+framehop = "0.16.0"
+linux-perf-data = "0.13"
+linux-perf-event-reader = "0.10.2"
+memmap2 = "0.9.11"
+object = "0.40.0"
+perf-bench = { path = "../perf-bench" }
+rustc-hash = "2.1.3"

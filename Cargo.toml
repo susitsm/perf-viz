@@ -1,0 +1,16 @@
+[workspace]
+members = ["perf-bench", "profile", "viz"]
+# `cargo run` / `cargo build` without -p act on the viewer; `--workspace` covers everything.
+default-members = ["viz"]
+resolver = "3"
+
+[profile.release]
+incremental = true
+
+# Full production build: `cargo build --profile dist` (binaries in target/dist/).
+[profile.dist]
+inherits = "release"
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+incremental = false

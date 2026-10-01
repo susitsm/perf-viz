@@ -108,7 +108,7 @@ mod scripted {
     impl Harness {
         pub fn from_cli(cli: &Cli) -> Self {
             let mut files = Vec::new();
-            let steps: VecDeque<Step> = cli
+            let steps: VecDeque<Step> = cli.script
                 .steps()
                 .iter()
                 .map(|s| match s {
@@ -124,8 +124,8 @@ mod scripted {
                 })
                 .collect();
             Harness {
-                screenshot: cli.screenshot.clone(),
-                load_screenshot: cli.load_screenshot(),
+                screenshot: cli.script.screenshot.clone(),
+                load_screenshot: cli.script.load_screenshot(),
                 script: (!steps.is_empty()).then(|| Script { files, steps, current: None, wait_until: Instant::now(), finished: None }),
                 injected_open: None,
                 tune_window: false,

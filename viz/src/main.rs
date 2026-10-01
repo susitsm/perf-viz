@@ -42,7 +42,6 @@ use eframe::egui::{
 use perf_profile::{
     load,
     model::{FrameInfo, Profile, ROOT, Trie},
-    symbolize::DwarfMode,
 };
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -2007,38 +2006,23 @@ fn main() -> eframe::Result {
     let mut opts = load::Options::default();
     config.reader.apply(&mut opts);
     // Flags override the saved settings for this run.
-    if let Some(v) = cli.readers {
-        opts.readers = v as usize;
-    }
-    if let Some(v) = cli.threads {
-        opts.workers = v as usize;
-    }
-    if let Some(v) = cli.region_mb {
-        opts.region_mb = v;
-    }
-    if cli.no_dwarf {
-        opts.dwarf = DwarfMode::Never;
-    }
+    cli.reader.apply(&mut opts);
     let harness = Harness::from_cli(&cli);
+    let show = cli.show;
     let args = Args {
         path: cli.file,
-        truncated: cli
-            .view
-            .map_or(config.truncate_suspect_tails.unwrap_or(false), |v| {
-                v == cli::View::Truncated
-            }),
-        cost: cli.cost.or(config.cost),
+        truncated: show.view.map_or(config.truncate_suspect_tails.unwrap_or(false), |v| {
+            v == cli::View::Truncated
+        }),
+        cost: show.cost.or(config.cost),
         theme: cli.theme.or(config.theme).map(theme_pref),
-        tab: cli
-            .tab
-            .or(config.tab)
-            .map_or(Tab::FlameGraph, Tab::from_name),
-        cold: cli.cold || opts.cold,
+        tab: show.tab.or(config.tab).map_or(Tab::FlameGraph, Tab::from_name),
+        cold: opts.cold,
         opts,
-        process: cli.process,
-        thread: cli.thread,
-        search: cli.search.unwrap_or_default(),
-        range_ms: cli.range,
+        process: show.process,
+        thread: show.thread,
+        search: show.search.unwrap_or_default(),
+        range_ms: show.range,
         harness,
         config,
     };

@@ -512,18 +512,63 @@ impl<C: Consumer> ReaderCtx<'_, '_, C> {
     }
 }
 
-/// Run the pipeline over `section`. With `bounds` (region starts/ends, strictly increasing from 0 to
-/// `section.len`) up to `cfg.readers` readers take regions in order; with `None` a single reader
-/// cuts regions as it goes. Returns the workers' states.
-pub fn run_ordered<C: Consumer>(
-    file: &File,
-    path: Option<&Path>,
-    section: &DataSection,
-    bounds: Option<&[u64]>,
-    config: Config,
-    progress: Option<std::sync::Arc<AtomicU64>>,
-    consumer: &C,
-) -> Result<(Vec<C::Local>, Metrics)> {
+/// How the readers split the work: which file to read, and where the regions come from.
+struct ReaderPlan<'a> {
+    file: &'a File,
+    /// Set when each reader opens the file itself (readahead state is per open file).
+    own_path: Option<&'a Path>,
+    /// Planned region bounds; none means a single reader cuts regions as it goes.
+    bounds: Option<&'a [u64]>,
+    next_region: &'a AtomicUsize,
+    region_bytes: u64,
+}
+
+impl<C: Consumer> ReaderCtx<'_, '_, C> {
+    fn run(&self, plan: &ReaderPlan) -> Result<usize> {
+        let own = plan.own_path.map(File::open).transpose()?;
+        let reader_file = own.as_ref().unwrap_or(plan.file);
+        let result = self.read_claimed(reader_file, plan);
+        if result.is_err() {
+            // The error itself is kept (with its type, so a mismatch is recognisable)
+            // and recorded by the thread that joins the readers.
+            self.sh.abort.store(true, Ordering::Relaxed);
+            self.sh.done.notify_all();
+        }
+        result
+    }
+
+    /// Read regions until none are left, returning how many this reader opened.
+    fn read_claimed(&self, reader_file: &File, plan: &ReaderPlan) -> Result<usize> {
+        let big_endian = self.section.big_endian;
+        let Some(bounds) = plan.bounds else {
+            return if big_endian {
+                self.read_sequential::<BigEndian>(reader_file, plan.region_bytes)
+            } else {
+                self.read_sequential::<LittleEndian>(reader_file, plan.region_bytes)
+            };
+        };
+        let regions_total = bounds.len() - 1;
+        let mut claimed = 0;
+        loop {
+            self.take_token(); // before claiming: bounds the regions in flight
+            let region_index = plan.next_region.fetch_add(1, Ordering::Relaxed);
+            if region_index >= regions_total || self.sh.aborted() {
+                let _ = self.sh.tokens_tx.send(());
+                return Ok(claimed);
+            }
+            claimed += 1;
+            let (lo, hi) = (bounds[region_index], bounds[region_index + 1]);
+            if big_endian {
+                self.read_region::<BigEndian>(reader_file, region_index, lo, hi)?
+            } else {
+                self.read_region::<LittleEndian>(reader_file, region_index, lo, hi)?
+            }
+        }
+    }
+}
+
+/// How many buffers the pool needs: enough for every unit of every region that can be open at once.
+fn buffer_count(bounds: Option<&[u64]>, config: &Config) -> usize {
     let region_len_max = match bounds {
         Some(planned) => planned
             .windows(2)
@@ -533,128 +578,66 @@ pub fn run_ordered<C: Consumer>(
         None => config.region_bytes + config.block as u64 * 2, // a cut lands within one block past the target
     };
     let per_region = (region_len_max / (config.block as u64 * 3 / 4).max(1)) as usize + 4;
-    let buffers = config.in_flight * per_region;
+    config.in_flight * per_region
+}
 
-    let (free_tx, free_rx) = bounded::<Vec<u8>>(buffers);
-    for _ in 0..buffers {
-        free_tx.send(vec![0u8; config.block]).unwrap();
+impl<'c, C: Consumer> Shared<'c, C> {
+    fn new(
+        consumer: &'c C,
+        config: &Config,
+        progress: Option<std::sync::Arc<AtomicU64>>,
+        senders: (Sender<Task>, Sender<Vec<u8>>, Sender<()>),
+    ) -> Self {
+        let (tasks_tx, free_tx, tokens_tx) = senders;
+        Shared {
+            consumer,
+            lookahead: config.lookahead,
+            table: Mutex::new(Table {
+                regions: BTreeMap::new(),
+                next_commit: 0,
+                next_release: 0,
+                total_regions: None,
+                finished: false,
+                advancing: false,
+                completed: 0,
+                held_units: 0,
+                max_held_units: 0,
+            }),
+            done: Condvar::new(),
+            tasks_tx,
+            free_tx,
+            tokens_tx,
+            abort: AtomicBool::new(false),
+            error: Mutex::new(None),
+            units: AtomicU64::new(0),
+            bytes: AtomicU64::new(0),
+            progress,
+            ns: Default::default(),
+        }
     }
-    let (tokens_tx, tokens_rx) = bounded::<()>(config.in_flight);
-    for _ in 0..config.in_flight {
-        tokens_tx.send(()).unwrap();
+
+    /// Take tasks until told to stop, returning this worker's state.
+    fn run_worker(&self, tasks: &Receiver<Task>) -> C::Local {
+        let mut local = C::Local::default();
+        loop {
+            let started = Instant::now();
+            let Ok(task) = tasks.recv() else { break };
+            self.add_ns(NS_IDLE, started);
+            match task {
+                Task::Extract(unit) => self.do_extract(&mut local, unit),
+                Task::Process(unit) => self.do_process(&mut local, unit),
+                Task::Stop => break,
+            }
+        }
+        local
     }
-    let (tasks_tx, tasks_rx) = unbounded::<Task>();
-    let sh = Shared {
-        consumer,
-        lookahead: config.lookahead,
-        table: Mutex::new(Table {
-            regions: BTreeMap::new(),
-            next_commit: 0,
-            next_release: 0,
-            total_regions: None,
-            finished: false,
-            advancing: false,
-            completed: 0,
-            held_units: 0,
-            max_held_units: 0,
-        }),
-        done: Condvar::new(),
-        tasks_tx: tasks_tx.clone(),
-        free_tx: free_tx.clone(),
-        tokens_tx: tokens_tx.clone(),
-        abort: AtomicBool::new(false),
-        error: Mutex::new(None),
-        units: AtomicU64::new(0),
-        bytes: AtomicU64::new(0),
-        progress,
-        ns: Default::default(),
-    };
-    let next_region = AtomicUsize::new(0);
-    let regions_total = bounds.map_or(0, |planned| planned.len() - 1);
-    let nreaders = if bounds.is_some() && path.is_some() {
-        config.readers.clamp(1, regions_total.max(1))
-    } else {
-        1
-    };
 
-    let (locals, total_regions) = std::thread::scope(|scope| {
-        let workers: Vec<_> = (0..config.workers)
-            .map(|_| {
-                let receiver = tasks_rx.clone();
-                let sh = &sh;
-                scope.spawn(move || {
-                    let mut local = C::Local::default();
-                    loop {
-                        let started = Instant::now();
-                        let Ok(task) = receiver.recv() else { break };
-                        sh.add_ns(NS_IDLE, started);
-                        match task {
-                            Task::Extract(unit) => sh.do_extract(&mut local, unit),
-                            Task::Process(unit) => sh.do_process(&mut local, unit),
-                            Task::Stop => break,
-                        }
-                    }
-                    local
-                })
-            })
-            .collect();
-
-        let readers: Vec<_> = (0..nreaders)
-            .map(|_| {
-                let (sh, free_rx, tokens_rx, next_region) =
-                    (&sh, &free_rx, &tokens_rx, &next_region);
-                scope.spawn(move || -> Result<usize> {
-                    let rc = ReaderCtx {
-                        sh,
-                        section,
-                        free_rx,
-                        tokens_rx,
-                    };
-                    let own; // each reader opens the file itself: readahead state is per open file
-                    let reader_file: &File = match path {
-                        Some(source_path) if nreaders > 1 => {
-                            own = File::open(source_path)?;
-                            &own
-                        }
-                        _ => file,
-                    };
-                    let res = (|| -> Result<usize> {
-                        let Some(bounds) = bounds else {
-                            return if section.big_endian {
-                                rc.read_sequential::<BigEndian>(reader_file, config.region_bytes)
-                            } else {
-                                rc.read_sequential::<LittleEndian>(reader_file, config.region_bytes)
-                            };
-                        };
-                        let mut claimed = 0;
-                        loop {
-                            rc.take_token(); // before claiming: bounds the regions in flight
-                            let region_index = next_region.fetch_add(1, Ordering::Relaxed);
-                            if region_index >= regions_total || sh.aborted() {
-                                let _ = sh.tokens_tx.send(());
-                                return Ok(claimed);
-                            }
-                            claimed += 1;
-                            let (lo, hi) = (bounds[region_index], bounds[region_index + 1]);
-                            if section.big_endian {
-                                rc.read_region::<BigEndian>(reader_file, region_index, lo, hi)?
-                            } else {
-                                rc.read_region::<LittleEndian>(reader_file, region_index, lo, hi)?
-                            }
-                        }
-                    })();
-                    if res.is_err() {
-                        // The error itself is kept (with its type, so a mismatch is recognisable)
-                        // and recorded by the thread that joins the readers.
-                        sh.abort.store(true, Ordering::Relaxed);
-                        sh.done.notify_all();
-                    }
-                    res
-                })
-            })
-            .collect();
-
-        // Wait for the readers, keeping the first real error (a mismatch outranks others).
+    /// Wait for the readers, keeping the first real error (a mismatch outranks others); returns how
+    /// many regions they opened.
+    fn join_readers(
+        &self,
+        readers: Vec<std::thread::ScopedJoinHandle<'_, Result<usize>>>,
+    ) -> usize {
         let mut opened = 0usize;
         let mut first_err: Option<Box<dyn std::error::Error + Send + Sync>> = None;
         for reader_handle in readers {
@@ -668,31 +651,111 @@ pub fn run_ordered<C: Consumer>(
             }
         }
         if let Some(error) = first_err {
-            *sh.error.lock().unwrap() = Some(error);
-            sh.abort.store(true, Ordering::Relaxed);
+            *self.error.lock().unwrap() = Some(error);
+            self.abort.store(true, Ordering::Relaxed);
         }
+        opened
+    }
+
+    /// Release what lookahead holds back once the last region is read, then wait until every region
+    /// has been processed (or something failed).
+    fn drain(&self, total_regions: usize) {
+        if !self.aborted() {
+            self.table.lock().unwrap().total_regions = Some(total_regions);
+            self.advance();
+        }
+        let mut table = self.table.lock().unwrap();
+        while table.completed < total_regions && !self.aborted() {
+            table = self
+                .done
+                .wait_timeout(table, Duration::from_millis(100))
+                .unwrap()
+                .0;
+        }
+    }
+
+    fn metrics(&self, total_regions: usize) -> Metrics {
+        let ns = |i: usize| Duration::from_nanos(self.ns[i].load(Ordering::Relaxed));
+        Metrics {
+            units: self.units.load(Ordering::Relaxed),
+            bytes: self.bytes.load(Ordering::Relaxed),
+            regions: total_regions as u64,
+            reader_read: ns(NS_READ),
+            reader_wait_token: ns(NS_TOKEN),
+            reader_wait_buffer: ns(NS_BUF),
+            extract_busy: ns(NS_EXTRACT),
+            process_busy: ns(NS_PROCESS),
+            worker_idle: ns(NS_IDLE),
+            max_held_units: self.table.lock().unwrap().max_held_units,
+        }
+    }
+}
+
+/// Run the pipeline over `section`. With `bounds` (region starts/ends, strictly increasing from 0 to
+/// `section.len`) up to `config.readers` readers take regions in order; with `None` a single reader
+/// cuts regions as it goes. Returns the workers' states.
+pub fn run_ordered<C: Consumer>(
+    file: &File,
+    path: Option<&Path>,
+    section: &DataSection,
+    bounds: Option<&[u64]>,
+    config: Config,
+    progress: Option<std::sync::Arc<AtomicU64>>,
+    consumer: &C,
+) -> Result<(Vec<C::Local>, Metrics)> {
+    let buffers = buffer_count(bounds, &config);
+    let (free_tx, free_rx) = bounded::<Vec<u8>>(buffers);
+    for _ in 0..buffers {
+        free_tx.send(vec![0u8; config.block]).unwrap();
+    }
+    let (tokens_tx, tokens_rx) = bounded::<()>(config.in_flight);
+    for _ in 0..config.in_flight {
+        tokens_tx.send(()).unwrap();
+    }
+    let (tasks_tx, tasks_rx) = unbounded::<Task>();
+    let sh = Shared::new(consumer, &config, progress, (tasks_tx, free_tx, tokens_tx));
+    let next_region = AtomicUsize::new(0);
+    let regions_total = bounds.map_or(0, |planned| planned.len() - 1);
+    let reader_count = if bounds.is_some() && path.is_some() {
+        config.readers.clamp(1, regions_total.max(1))
+    } else {
+        1
+    };
+    let plan = ReaderPlan {
+        file,
+        own_path: path.filter(|_| reader_count > 1),
+        bounds,
+        next_region: &next_region,
+        region_bytes: config.region_bytes,
+    };
+
+    let (locals, total_regions) = std::thread::scope(|scope| {
+        let workers: Vec<_> = (0..config.workers)
+            .map(|_| {
+                let (sh, receiver) = (&sh, tasks_rx.clone());
+                scope.spawn(move || sh.run_worker(&receiver))
+            })
+            .collect();
+        let readers: Vec<_> = (0..reader_count)
+            .map(|_| {
+                let context = ReaderCtx {
+                    sh: &sh,
+                    section,
+                    free_rx: &free_rx,
+                    tokens_rx: &tokens_rx,
+                };
+                let plan = &plan;
+                scope.spawn(move || context.run(plan))
+            })
+            .collect();
+
+        let opened = sh.join_readers(readers);
         let total_regions = if bounds.is_some() {
             regions_total
         } else {
             opened
         };
-        if !sh.aborted() {
-            // Nothing more will be committed after the last region: release what lookahead holds back.
-            sh.table.lock().unwrap().total_regions = Some(total_regions);
-            sh.advance();
-        }
-
-        // Wait until every region has been processed (or something failed).
-        {
-            let mut table = sh.table.lock().unwrap();
-            while table.completed < total_regions && !sh.aborted() {
-                table = sh
-                    .done
-                    .wait_timeout(table, Duration::from_millis(100))
-                    .unwrap()
-                    .0;
-            }
-        }
+        sh.drain(total_regions);
         for _ in 0..config.workers {
             let _ = sh.tasks_tx.send(Task::Stop);
         }
@@ -706,21 +769,7 @@ pub fn run_ordered<C: Consumer>(
     if let Some(error) = sh.error.lock().unwrap().take() {
         return Err(error);
     }
-    let held = sh.table.lock().unwrap().max_held_units;
-    let ns = |i: usize| Duration::from_nanos(sh.ns[i].load(Ordering::Relaxed));
-    let metrics = Metrics {
-        units: sh.units.load(Ordering::Relaxed),
-        bytes: sh.bytes.load(Ordering::Relaxed),
-        regions: total_regions as u64,
-        reader_read: ns(NS_READ),
-        reader_wait_token: ns(NS_TOKEN),
-        reader_wait_buffer: ns(NS_BUF),
-        extract_busy: ns(NS_EXTRACT),
-        process_busy: ns(NS_PROCESS),
-        worker_idle: ns(NS_IDLE),
-        max_held_units: held,
-    };
-    Ok((locals, metrics))
+    Ok((locals, sh.metrics(total_regions)))
 }
 
 #[derive(Clone, Debug, Default)]

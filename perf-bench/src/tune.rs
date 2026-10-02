@@ -303,6 +303,58 @@ struct Probe {
     burst_gbps: f64,
 }
 
+/// Read regions round-robin, wrapping around the data section, until `stop` is set; each region is
+/// evicted right after it is read.
+fn probe_reader(
+    path: &Path,
+    section: &DataSection,
+    next: &AtomicU64,
+    bytes: &AtomicU64,
+    stop: &AtomicBool,
+) -> Result<()> {
+    let regions = section.len.div_ceil(PROBE_REGION).max(1);
+    let file = File::open(path)?; // own handle: readahead state is per open file
+    let mut buffer = vec![0u8; PROBE_BLOCK];
+    while !stop.load(Ordering::Relaxed) {
+        let region_index = next.fetch_add(1, Ordering::Relaxed) % regions;
+        let (lo, hi) = (
+            region_index * PROBE_REGION,
+            ((region_index + 1) * PROBE_REGION).min(section.len),
+        );
+        let mut pos = lo;
+        while pos < hi {
+            let read_len = PROBE_BLOCK.min((hi - pos) as usize);
+            file.read_exact_at(&mut buffer[..read_len], section.start + pos)?;
+            bytes.fetch_add(read_len as u64, Ordering::Relaxed);
+            pos += read_len as u64;
+        }
+        evict(&file, section.start + lo, hi - lo);
+    }
+    Ok(())
+}
+
+/// The speed over the second half of the samples, and over the first second.
+fn summarize_probe(samples: &[Sample]) -> Probe {
+    let end = *samples.last().unwrap();
+    let rate = |from: Sample, to: Sample| {
+        (to.bytes - from.bytes) as f64 / (to.secs - from.secs).max(1e-6) / 1e9
+    };
+    let mid = samples
+        .iter()
+        .find(|sample| sample.secs >= end.secs / 2.0)
+        .copied()
+        .unwrap_or_default();
+    let one = samples
+        .iter()
+        .find(|sample| sample.secs >= 1.0f64.min(end.secs))
+        .copied()
+        .unwrap_or(end);
+    Probe {
+        sustained_gbps: rate(mid, end),
+        burst_gbps: rate(Sample::default(), one),
+    }
+}
+
 /// Raw parallel reads for `secs` seconds over the data section, wrapping around it, each region
 /// evicted right after it is read. Reports the speed once a second.
 fn probe(
@@ -312,7 +364,6 @@ fn probe(
     cancel: &AtomicBool,
     on_event: &mut dyn FnMut(Event),
 ) -> Result<Probe> {
-    let regions = section.len.div_ceil(PROBE_REGION).max(1);
     let next = AtomicU64::new(0);
     let bytes = AtomicU64::new(0);
     let stop = AtomicBool::new(false);
@@ -321,28 +372,7 @@ fn probe(
     let mut samples: Vec<Sample> = vec![Sample::default()];
     let result: Result<()> = std::thread::scope(|scope| {
         let handles: Vec<_> = (0..PROBE_READERS)
-            .map(|_| {
-                scope.spawn(|| -> Result<()> {
-                    let file = File::open(path)?; // own handle: readahead state is per open file
-                    let mut buffer = vec![0u8; PROBE_BLOCK];
-                    while !stop.load(Ordering::Relaxed) {
-                        let region_index = next.fetch_add(1, Ordering::Relaxed) % regions;
-                        let (lo, hi) = (
-                            region_index * PROBE_REGION,
-                            ((region_index + 1) * PROBE_REGION).min(section.len),
-                        );
-                        let mut pos = lo;
-                        while pos < hi {
-                            let read_len = PROBE_BLOCK.min((hi - pos) as usize);
-                            file.read_exact_at(&mut buffer[..read_len], section.start + pos)?;
-                            bytes.fetch_add(read_len as u64, Ordering::Relaxed);
-                            pos += read_len as u64;
-                        }
-                        evict(&file, section.start + lo, hi - lo);
-                    }
-                    Ok(())
-                })
-            })
+            .map(|_| scope.spawn(|| probe_reader(path, section, &next, &bytes, &stop)))
             .collect();
         let mut last_report = 0.0;
         while t0.elapsed() < deadline && !cancel.load(Ordering::Relaxed) {
@@ -377,24 +407,7 @@ fn probe(
     if cancel.load(Ordering::Relaxed) {
         return Err("cancelled".into());
     }
-    let end = *samples.last().unwrap();
-    let rate = |from: Sample, to: Sample| {
-        (to.bytes - from.bytes) as f64 / (to.secs - from.secs).max(1e-6) / 1e9
-    };
-    let mid = samples
-        .iter()
-        .find(|sample| sample.secs >= end.secs / 2.0)
-        .copied()
-        .unwrap_or_default();
-    let one = samples
-        .iter()
-        .find(|sample| sample.secs >= 1.0f64.min(end.secs))
-        .copied()
-        .unwrap_or(end);
-    Ok(Probe {
-        sustained_gbps: rate(mid, end),
-        burst_gbps: rate(Sample::default(), one),
-    })
+    Ok(summarize_probe(&samples))
 }
 
 struct Trials<'a> {
@@ -486,16 +499,156 @@ impl Trials<'_> {
     }
 }
 
-/// Measure the disk and find good settings for reading `source`. `on_event` reports progress; set
-/// `cancel` to stop between trials.
-pub fn tune(
-    source: &Path,
-    options: &Options,
-    cancel: &AtomicBool,
-    on_event: &mut dyn FnMut(Event),
-) -> Result<Report> {
-    let mut notes = Vec::new();
-    let (file, section) = split::open(source)?;
+/// The trials run so far, and what is needed to run and report more.
+struct Sweep<'a> {
+    runner: Trials<'a>,
+    trials: Vec<Trial>,
+    max_memory_mb: u64,
+    cancel: &'a AtomicBool,
+    on_event: &'a mut dyn FnMut(Event),
+}
+
+impl Sweep<'_> {
+    fn say(&mut self, text: impl Into<String>) {
+        (self.on_event)(Event::Info(text.into()));
+    }
+
+    /// Run one trial unless it was run before, would hold too much memory, or fails (a failure is
+    /// reported and skipped; a cancellation is an error).
+    fn run(
+        &mut self,
+        what: &'static str,
+        settings: Settings,
+        bytes: u64,
+        long: bool,
+    ) -> Result<Option<f64>> {
+        if settings.memory_mb() > self.max_memory_mb {
+            return Ok(None);
+        }
+        if let Some(done) = self
+            .trials
+            .iter()
+            .find(|trial| trial.settings == settings && trial.long == long)
+        {
+            return Ok(Some(done.gbps));
+        }
+        if self.cancel.load(Ordering::Relaxed) {
+            return Err("cancelled".into());
+        }
+        match self.runner.run(settings, bytes) {
+            Ok(gbps) => {
+                (self.on_event)(Event::Trial {
+                    what,
+                    settings,
+                    gbps,
+                    long,
+                });
+                self.trials.push(Trial {
+                    settings,
+                    gbps,
+                    long,
+                });
+                Ok(Some(gbps))
+            }
+            Err(error) if error.to_string() == "cancelled" => Err(error),
+            Err(error) => {
+                self.say(format!("{what} {settings:?} failed: {error}"));
+                Ok(None)
+            }
+        }
+    }
+
+    /// Short trials of each candidate value of one setting.
+    fn try_values<T: Copy>(
+        &mut self,
+        what: &'static str,
+        candidates: &[T],
+        settings_with: impl Fn(T) -> Settings,
+        bytes: u64,
+    ) -> Result<Vec<Scored<T>>> {
+        let mut scored = Vec::new();
+        for &value in candidates {
+            if let Some(gbps) = self.run(what, settings_with(value), bytes, false)? {
+                scored.push(Scored { value, gbps });
+            }
+        }
+        Ok(scored)
+    }
+
+    /// Choose readers, then region size, then regions open, one setting at a time on short trials.
+    fn choose_settings(&mut self, bytes: u64) -> Result<Settings> {
+        let mut chosen = Settings::default();
+        self.say("Trying reader counts");
+        let scored = self.try_values(
+            "readers",
+            &[1usize, 2, 3, 4, 6, 8],
+            |readers| Settings { readers, ..chosen },
+            bytes,
+        )?;
+        chosen.readers = pick(&scored, |&readers| readers as u64).unwrap_or(chosen.readers);
+        self.say("Trying region sizes");
+        let scored = self.try_values(
+            "region_mb",
+            &[16u64, 32, 64, 128, 256],
+            |region_mb| Settings {
+                region_mb,
+                ..chosen
+            },
+            bytes,
+        )?;
+        // Larger regions are never slower in steady state and restart readahead less often, so they win ties.
+        chosen.region_mb =
+            pick(&scored, |&region_mb| u64::MAX - region_mb).unwrap_or(chosen.region_mb);
+        self.say("Trying how many regions to keep open");
+        let scored = self.try_values(
+            "in_flight",
+            &[2usize, 3, 4, 6, 8, 12],
+            |in_flight| Settings {
+                in_flight,
+                ..chosen
+            },
+            bytes,
+        )?;
+        chosen.in_flight = pick(&scored, |&in_flight| in_flight as u64).unwrap_or(chosen.in_flight);
+        Ok(chosen)
+    }
+
+    fn confirm(&mut self, finalists: &[Settings], bytes: u64) -> Result<Vec<Scored<Settings>>> {
+        let mut confirmed = Vec::new();
+        for &settings in finalists {
+            if let Some(gbps) = self.run("confirm", settings, bytes, true)? {
+                confirmed.push(Scored {
+                    value: settings,
+                    gbps,
+                });
+            }
+        }
+        Ok(confirmed)
+    }
+}
+
+/// The chosen settings, the fastest short trials, and the defaults, up to `count` plus the defaults.
+fn pick_finalists(chosen: Settings, trials: &[Trial], count: usize) -> Vec<Settings> {
+    let mut ranked: Vec<&Trial> = trials.iter().filter(|trial| !trial.long).collect();
+    ranked.sort_by(|a, b| b.gbps.total_cmp(&a.gbps));
+    let mut finalists = vec![chosen];
+    for trial in ranked {
+        if finalists.len() >= count {
+            break;
+        }
+        if !finalists.contains(&trial.settings) {
+            finalists.push(trial.settings);
+        }
+    }
+    let defaults = Settings::default();
+    if !finalists.contains(&defaults) {
+        finalists.push(defaults);
+    }
+    finalists
+}
+
+/// Reasons the speeds may not be what a real load sees, or an error if the file cannot be tuned on.
+fn check_source(source: &Path, section: &DataSection, notes: &mut Vec<String>) -> Result<()> {
     if section.big_endian {
         return Err("big-endian perf.data files are not supported by the tuner".into());
     }
@@ -508,6 +661,20 @@ pub fn tune(
     if is_ram_fs(source) {
         notes.push("the recording is on a RAM-backed file system, so the speeds are memory speeds, not a disk's".into());
     }
+    Ok(())
+}
+
+/// Measure the disk and find good settings for reading `source`. `on_event` reports progress; set
+/// `cancel` to stop between trials.
+pub fn tune(
+    source: &Path,
+    options: &Options,
+    cancel: &AtomicBool,
+    on_event: &mut dyn FnMut(Event),
+) -> Result<Report> {
+    let mut notes = Vec::new();
+    let (file, section) = split::open(source)?;
+    check_source(source, &section, &mut notes)?;
 
     on_event(Event::Info(format!(
         "Measuring sustained read speed ({:.0} s)",
@@ -538,186 +705,48 @@ pub fn tune(
         options.trial_secs,
         short as f64 / 1e9
     )));
+    if section.len < long {
+        notes.push(format!("the recording ({:.1} GB) is shorter than a trial, so each trial reads it more than once", section.len as f64 / 1e9));
+    }
     let regions = (section.len / PLAN_REGION).max(1) as usize;
     let bounds = anchor::plan_regions(&file, &section, regions)?;
-    let mut trial_runner = Trials {
-        path: source,
-        file,
-        section,
-        bounds,
-        workers: options.workers,
-        turn: 0,
+    let mut sweep = Sweep {
+        runner: Trials {
+            path: source,
+            file,
+            section,
+            bounds,
+            workers: options.workers,
+            turn: 0,
+        },
+        trials: Vec::new(),
+        max_memory_mb: options.max_memory_mb,
+        cancel,
+        on_event,
     };
-    if trial_runner.section.len < long {
-        notes.push(format!("the recording ({:.1} GB) is shorter than a trial, so each trial reads it more than once", trial_runner.section.len as f64 / 1e9));
-    }
 
-    let mut trials: Vec<Trial> = Vec::new();
-    let run = |runner: &mut Trials,
-               what: &'static str,
-               settings: Settings,
-               bytes: u64,
-               is_long: bool,
-               on_event: &mut dyn FnMut(Event),
-               trials: &mut Vec<Trial>|
-     -> Result<Option<f64>> {
-        if settings.memory_mb() > options.max_memory_mb {
-            return Ok(None);
-        }
-        if let Some(done) = trials
-            .iter()
-            .find(|x| x.settings == settings && x.long == is_long)
-        {
-            return Ok(Some(done.gbps));
-        }
-        if cancel.load(Ordering::Relaxed) {
-            return Err("cancelled".into());
-        }
-        match runner.run(settings, bytes) {
-            Ok(gbps) => {
-                on_event(Event::Trial {
-                    what,
-                    settings,
-                    gbps,
-                    long: is_long,
-                });
-                trials.push(Trial {
-                    settings,
-                    gbps,
-                    long: is_long,
-                });
-                Ok(Some(gbps))
-            }
-            Err(error) if error.to_string() == "cancelled" => Err(error),
-            Err(error) => {
-                on_event(Event::Info(format!("{what} {settings:?} failed: {error}")));
-                Ok(None)
-            }
-        }
-    };
-    let mut cur = Settings::default();
-    on_event(Event::Info("Trying reader counts".into()));
-    let mut scored = Vec::new();
-    for reader_count in [1usize, 2, 3, 4, 6, 8] {
-        if let Some(gbps) = run(
-            &mut trial_runner,
-            "readers",
-            Settings {
-                readers: reader_count,
-                ..cur
-            },
-            short,
-            false,
-            on_event,
-            &mut trials,
-        )? {
-            scored.push(Scored {
-                value: reader_count,
-                gbps,
-            });
-        }
-    }
-    cur.readers = pick(&scored, |&reader_count| reader_count as u64).unwrap_or(cur.readers);
-    on_event(Event::Info("Trying region sizes".into()));
-    let mut scored = Vec::new();
-    for region_mb in [16u64, 32, 64, 128, 256] {
-        if let Some(gbps) = run(
-            &mut trial_runner,
-            "region_mb",
-            Settings { region_mb, ..cur },
-            short,
-            false,
-            on_event,
-            &mut trials,
-        )? {
-            scored.push(Scored {
-                value: region_mb,
-                gbps,
-            });
-        }
-    }
-    // Larger regions are never slower in steady state and restart readahead less often, so they win ties.
-    cur.region_mb = pick(&scored, |&region_mb| u64::MAX - region_mb).unwrap_or(cur.region_mb);
-    on_event(Event::Info("Trying how many regions to keep open".into()));
-    let mut scored = Vec::new();
-    for in_flight in [2usize, 3, 4, 6, 8, 12] {
-        if let Some(gbps) = run(
-            &mut trial_runner,
-            "in_flight",
-            Settings { in_flight, ..cur },
-            short,
-            false,
-            on_event,
-            &mut trials,
-        )? {
-            scored.push(Scored {
-                value: in_flight,
-                gbps,
-            });
-        }
-    }
-    cur.in_flight = pick(&scored, |&in_flight| in_flight as u64).unwrap_or(cur.in_flight);
-
-    let mut ranked: Vec<Scored<Settings>> = trials
-        .iter()
-        .filter(|x| !x.long)
-        .map(|x| Scored {
-            value: x.settings,
-            gbps: x.gbps,
-        })
-        .collect();
-    ranked.sort_by(|a, b| b.gbps.total_cmp(&a.gbps));
-    let mut finalists: Vec<Settings> = vec![cur];
-    for entry in &ranked {
-        if finalists.len() >= options.finalists {
-            break;
-        }
-        if !finalists.contains(&entry.value) {
-            finalists.push(entry.value);
-        }
-    }
-    let defaults = Settings::default();
-    if !finalists.contains(&defaults) {
-        finalists.push(defaults);
-    }
-    on_event(Event::Info(format!(
+    let chosen = sweep.choose_settings(short)?;
+    let finalists = pick_finalists(chosen, &sweep.trials, options.finalists);
+    sweep.say(format!(
         "Confirming {} settings on full-length reads",
         finalists.len()
-    )));
-    let mut confirmed: Vec<Scored<Settings>> = Vec::new();
-    for settings in finalists {
-        if let Some(gbps) = run(
-            &mut trial_runner,
-            "confirm",
-            settings,
-            long,
-            true,
-            on_event,
-            &mut trials,
-        )? {
-            confirmed.push(Scored {
-                value: settings,
-                gbps,
-            });
-        }
-    }
+    ));
+    let confirmed = sweep.confirm(&finalists, long)?;
     let best = pick(&confirmed, tie_break).ok_or("no setting could be measured")?;
-    let best_gbps = confirmed
-        .iter()
-        .find(|confirmation| confirmation.value == best)
-        .map_or(0.0, |confirmation| confirmation.gbps);
-    let default_gbps = confirmed
-        .iter()
-        .find(|confirmation| confirmation.value == defaults)
-        .map(|confirmation| confirmation.gbps);
+    let gbps_of = |settings: Settings| {
+        confirmed
+            .iter()
+            .find(|confirmation| confirmation.value == settings)
+            .map(|confirmation| confirmation.gbps)
+    };
     Ok(Report {
         sustained_gbps: probe_result.sustained_gbps,
         burst_gbps: probe_result.burst_gbps,
         best,
-        best_gbps,
-        default_gbps,
+        best_gbps: gbps_of(best).unwrap_or(0.0),
+        default_gbps: gbps_of(Settings::default()),
         trial_bytes: long,
-        trials,
+        trials: sweep.trials,
         notes,
     })
 }

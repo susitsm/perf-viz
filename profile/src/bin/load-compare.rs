@@ -12,27 +12,45 @@ use std::{
 
 use perf_profile::{
     load, load_replay,
-    model::{Profile, ROOT, Trie},
+    model::{LoadStats, Profile, ROOT, Trie},
 };
 
-/// hash of the root-to-node path (frame name, module name, suspect) -> (total, self, node)
-fn canon(profile: &Profile, trie: &Trie) -> HashMap<u64, (u32, u32, u32)> {
+struct CanonNode {
+    total: u32,
+    self_count: u32,
+    node: u32,
+}
+
+fn extend_path_hash(path_hash: u64, profile: &Profile, child_frame: u32) -> u64 {
+    let frame = &profile.frames[child_frame as usize];
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    (
+        path_hash,
+        &frame.name,
+        profile.module_path(frame.module),
+        frame.suspect,
+    )
+        .hash(&mut hasher);
+    hasher.finish()
+}
+
+/// Hash of the root-to-node path (frame name, module path, suspect) -> the node reached.
+fn canon(profile: &Profile, trie: &Trie) -> HashMap<u64, CanonNode> {
     let mut out = HashMap::new();
     let mut stack = vec![(ROOT, 0u64)];
     while let Some((node_id, hash)) = stack.pop() {
         let node = trie.nodes[node_id as usize];
-        out.insert(hash, (node.total, node.self_count, node_id));
+        out.insert(
+            hash,
+            CanonNode {
+                total: node.total,
+                self_count: node.self_count,
+                node: node_id,
+            },
+        );
         for &child in trie.children(node_id) {
-            let frame = &profile.frames[trie.nodes[child as usize].frame as usize];
-            let mut hasher = std::collections::hash_map::DefaultHasher::new();
-            (
-                hash,
-                &frame.name,
-                profile.module_path(frame.module),
-                frame.suspect,
-            )
-                .hash(&mut hasher);
-            stack.push((child, hasher.finish()));
+            let child_frame = trie.nodes[child as usize].frame;
+            stack.push((child, extend_path_hash(hash, profile, child_frame)));
         }
     }
     out
@@ -84,20 +102,84 @@ struct Cli {
     load: LoadArgs,
 }
 
-fn main() {
-    let cli = Cli::parse();
-    let path = cli.path;
-    let options = cli.load.options();
-    let started = Instant::now();
-    let new = load::load(&path, options, &mut |phase| eprintln!("  new: {phase}")).unwrap();
-    let t_new = started.elapsed().as_secs_f64();
-    let started = Instant::now();
-    let old = load_replay::load_replay(&path, Default::default(), &mut |_| {}).unwrap();
-    let t_old = started.elapsed().as_secs_f64();
+fn hash_of_node_path(profile: &Profile, trie: &Trie, node: u32) -> u64 {
+    let mut chain = Vec::new();
+    let mut current = node;
+    while current != ROOT {
+        chain.push(current);
+        current = trie.nodes[current as usize].parent;
+    }
+    chain.iter().rev().fold(0u64, |hash, &step| {
+        extend_path_hash(hash, profile, trie.nodes[step as usize].frame)
+    })
+}
 
-    let (new_stats, old_stats) = (&new.stats, &old.stats);
+/// Shows the parent's children on both sides, to see which frames diverge.
+fn show_divergence(
+    name: &str,
+    streaming: (&Profile, &Trie),
+    replay: (&Profile, &Trie),
+    replay_nodes: &HashMap<u64, CanonNode>,
+    differing: &CanonNode,
+    replay_match: Option<&CanonNode>,
+) {
+    let (new, new_trie) = streaming;
+    let (old, old_trie) = replay;
     println!(
-        "single-pass loader {t_new:.2}s (stream {:.2}, plan {:.2}, merge {:.2}, symbolize {:.2}, build {:.2}; {} regions, <= {} MiB held){} | replay loader {t_old:.2}s",
+        "  {name}: node differs: streaming (total {}, self {}) vs replay {:?}\n     {}",
+        differing.total,
+        differing.self_count,
+        replay_match.map(|node| (node.total, node.self_count)),
+        path_of(new, new_trie, differing.node)
+    );
+    let parent = new_trie.nodes[differing.node as usize].parent;
+    println!(
+        "       streaming children of parent: {:?}",
+        children_of(new, new_trie, parent)
+    );
+    let parent_hash = hash_of_node_path(new, new_trie, parent);
+    if let Some(old_parent) = replay_nodes.get(&parent_hash) {
+        println!(
+            "       replay    children of parent: {:?}",
+            children_of(old, old_trie, old_parent.node)
+        );
+    }
+}
+
+fn compare_tries(name: &str, streaming: (&Profile, &Trie), replay: (&Profile, &Trie)) -> bool {
+    let streaming_nodes = canon(streaming.0, streaming.1);
+    let replay_nodes = canon(replay.0, replay.1);
+    let mut same = 0usize;
+    let mut shown = 0;
+    for (hash, node) in &streaming_nodes {
+        let counterpart = replay_nodes.get(hash);
+        match counterpart {
+            Some(other) if other.total == node.total && other.self_count == node.self_count => {
+                same += 1
+            }
+            _ if shown < 5 => {
+                shown += 1;
+                show_divergence(name, streaming, replay, &replay_nodes, node, counterpart);
+            }
+            _ => {}
+        }
+    }
+    let only_replay = replay_nodes
+        .keys()
+        .filter(|hash| !streaming_nodes.contains_key(hash))
+        .count();
+    let identical = same == streaming_nodes.len() && only_replay == 0;
+    println!(
+        "  {name} trie: {same} of {} paths identical, {only_replay} only in replay -> {}",
+        streaming_nodes.len(),
+        if identical { "IDENTICAL" } else { "DIFFERENT" }
+    );
+    identical
+}
+
+fn print_loader_timings(new_stats: &LoadStats, streaming_secs: f64, replay_secs: f64) {
+    println!(
+        "single-pass loader {streaming_secs:.2}s (stream {:.2}, plan {:.2}, merge {:.2}, symbolize {:.2}, build {:.2}; {} regions, <= {} MiB held){} | replay loader {replay_secs:.2}s",
         new_stats.secs_stream,
         new_stats.secs_plan,
         new_stats.secs_merge,
@@ -111,12 +193,16 @@ fn main() {
             ""
         }
     );
+}
+
+fn compare_counts(new: &Profile, old: &Profile) -> bool {
+    let (new_stats, old_stats) = (&new.stats, &old.stats);
     let mut ok = true;
-    let mut check = |name: &str, x: u64, y: u64| {
-        let same = x == y;
+    let mut check = |name: &str, streaming: u64, replay: u64| {
+        let same = streaming == replay;
         ok &= same;
         println!(
-            "  {name:<24} streaming {x:>9}  replay {y:>9}  {}",
+            "  {name:<24} streaming {streaming:>9}  replay {replay:>9}  {}",
             if same { "ok" } else { "DIFFERENT" }
         );
     };
@@ -161,70 +247,25 @@ fn main() {
         new.samples.len() as u64,
         new_stats.samples - new_stats.samples_without_stack,
     );
+    ok
+}
 
-    for (name, tn, to) in [
-        ("full", &new.full, &old.full),
-        ("truncated", &new.truncated, &old.truncated),
-    ] {
-        let (cn, co) = (canon(&new, tn), canon(&old, to));
-        let mut same = 0usize;
-        let mut shown = 0;
-        for (hash, &(tot, slf, node)) in &cn {
-            match co.get(hash) {
-                Some(&(t2, s2, _)) if t2 == tot && s2 == slf => same += 1,
-                other => {
-                    if shown < 5 {
-                        shown += 1;
-                        println!(
-                            "  {name}: node differs: streaming (total {tot}, self {slf}) vs replay {other:?}\n     {}",
-                            path_of(&new, tn, node)
-                        );
-                        // Show the parent's children on both sides, to see which frames diverge.
-                        let parent = tn.nodes[node as usize].parent;
-                        let mut ph = 0u64;
-                        let mut chain = Vec::new();
-                        let mut x = parent;
-                        while x != ROOT {
-                            chain.push(x);
-                            x = tn.nodes[x as usize].parent;
-                        }
-                        for &child in chain.iter().rev() {
-                            let frame = &new.frames[tn.nodes[child as usize].frame as usize];
-                            let mut hasher = std::collections::hash_map::DefaultHasher::new();
-                            (
-                                ph,
-                                &frame.name,
-                                new.module_path(frame.module),
-                                frame.suspect,
-                            )
-                                .hash(&mut hasher);
-                            ph = hasher.finish();
-                        }
-                        println!(
-                            "       streaming children of parent: {:?}",
-                            children_of(&new, tn, parent)
-                        );
-                        if let Some(&(_, _, on)) = co.get(&ph) {
-                            println!(
-                                "       replay    children of parent: {:?}",
-                                children_of(&old, to, on)
-                            );
-                        }
-                    }
-                }
-            }
-        }
-        let only_old = co.keys().filter(|hash| !cn.contains_key(hash)).count();
-        let all = same == cn.len() && only_old == 0;
-        ok &= all;
-        println!(
-            "  {name} trie: {same} of {} paths identical, {} only in replay -> {}",
-            cn.len(),
-            only_old,
-            if all { "IDENTICAL" } else { "DIFFERENT" }
-        );
-    }
-    // Sample refs must point at nodes whose totals include them, and be time-sorted.
+fn main() {
+    let cli = Cli::parse();
+    let path = cli.path;
+    let options = cli.load.options();
+    let started = Instant::now();
+    let new = load::load(&path, options, &mut |phase| eprintln!("  new: {phase}")).unwrap();
+    let streaming_secs = started.elapsed().as_secs_f64();
+    let started = Instant::now();
+    let old = load_replay::load_replay(&path, Default::default(), &mut |_| {}).unwrap();
+    let replay_secs = started.elapsed().as_secs_f64();
+
+    print_loader_timings(&new.stats, streaming_secs, replay_secs);
+    let mut ok = compare_counts(&new, &old);
+    ok &= compare_tries("full", (&new, &new.full), (&old, &old.full));
+    ok &= compare_tries("truncated", (&new, &new.truncated), (&old, &old.truncated));
+    // Sample refs must be time-sorted.
     assert!(
         new.samples
             .windows(2)

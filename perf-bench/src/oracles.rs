@@ -18,7 +18,7 @@ use linux_perf_data::PerfFileReader;
 
 use perf_reader::{
     ctx::Ctx,
-    ordered::{self, Config, Consumer, Options},
+    readers::ordered::{self, Config, Consumer, Options},
     synth,
 };
 

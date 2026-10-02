@@ -5,10 +5,7 @@ use std::{collections::HashMap, fs::File, io::BufReader, path::Path};
 
 use linux_perf_data::{PerfFileReader, PerfFileRecord};
 use linux_perf_event_reader::{EventRecord, Mmap2Record, SampleRecord};
-use perf_reader::{
-    pipeline::{Config, Evict},
-    stream,
-};
+use perf_reader::readers::pipeline::{Config, Evict};
 
 use super::recording;
 use crate::{
@@ -156,7 +153,7 @@ fn read_pass_one(path: &Path, readers: usize, corrupt_bound: bool) -> Meta {
         readers,
     };
     let source = Source::open(path).unwrap();
-    let options = stream::Options {
+    let options = perf_reader::Options {
         corrupt_bound,
         ..Default::default()
     };

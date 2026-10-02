@@ -32,7 +32,7 @@ use byteorder::LittleEndian;
 
 use crate::{
     Result, anchor,
-    ordered::{self, Config, Consumer},
+    readers::ordered::{self, Config, Consumer},
     records, split,
     split::DataSection,
 };

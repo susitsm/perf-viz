@@ -7,12 +7,7 @@ use std::path::Path;
 use byteorder::{BigEndian, LittleEndian};
 use linux_perf_data::PerfFileReader;
 use linux_perf_event_reader::EventRecord;
-use perf_reader::{
-    ctx::Ctx,
-    pipeline::Config,
-    records::for_each_record,
-    stream::{self, Report},
-};
+use perf_reader::{Report, ctx::Ctx, readers::pipeline::Config, records::for_each_record};
 
 use crate::Result;
 
@@ -204,9 +199,9 @@ pub fn read_meta(
     src: &Source,
     path: &Path,
     config: Config,
-    options: stream::Options,
+    options: perf_reader::Options,
 ) -> Result<(Meta, Report)> {
-    let (states, report) = stream::stream_open::<Meta, _>(
+    let (states, report) = perf_reader::stream_open::<Meta, _>(
         &src.file,
         &src.section,
         path,

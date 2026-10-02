@@ -4,7 +4,7 @@ use clap::Parser;
 
 use perf_bench::{baseline, fast, piped, stats::Stats};
 use perf_reader::{
-    pipeline::{Config, Evict},
+    readers::pipeline::{Config, Evict},
     split,
 };
 

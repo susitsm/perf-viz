@@ -45,7 +45,7 @@ use crossbeam_channel::{Receiver, RecvTimeoutError, Sender, bounded, unbounded};
 
 use crate::{
     Result, anchor,
-    pipeline::{BoundaryMismatch, Whole, whole_records},
+    readers::pipeline::{BoundaryMismatch, Whole, whole_records},
     split::{self, DataSection},
 };
 

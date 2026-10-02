@@ -5,7 +5,7 @@ use std::{path::PathBuf, time::Instant};
 use clap::{Parser, ValueEnum};
 
 use perf_reader::{
-    pipeline::{self, Evict},
+    readers::pipeline::{self, Evict},
     split,
 };
 

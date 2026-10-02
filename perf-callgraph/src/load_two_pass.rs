@@ -24,9 +24,8 @@ use std::{
 use byteorder::{BigEndian, ByteOrder, LittleEndian};
 use linux_perf_event_reader::EventRecord;
 use perf_reader::{
-    pipeline::{Config, Evict},
+    readers::pipeline::{Config, Evict},
     records::for_each_record,
-    stream,
 };
 
 use crate::{
@@ -53,7 +52,7 @@ pub struct Options {
     pub workers: usize,
     /// Drop the file from the page cache before each pass.
     pub cold: bool,
-    /// Testing only: see [`stream::Options::corrupt_bound`].
+    /// Testing only: see [`perf_reader::Options::corrupt_bound`].
     pub corrupt_bound: bool,
 }
 
@@ -247,7 +246,7 @@ fn read_address_spaces(
     src: &Source,
     path: &Path,
     config: Config,
-    sopts: stream::Options,
+    sopts: perf_reader::Options,
     stats: &mut LoadStats,
 ) -> Result<AddressSpaces> {
     let started = Instant::now();
@@ -266,12 +265,12 @@ fn unwind_samples(
     src: &Source,
     path: &Path,
     config: Config,
-    sopts: stream::Options,
+    sopts: perf_reader::Options,
     shared: &Shared<'_>,
     stats: &mut LoadStats,
 ) -> Result<Vec<Pass2State>> {
     let started = Instant::now();
-    let (states, report) = stream::stream_open::<Pass2State, _>(
+    let (states, report) = perf_reader::stream_open::<Pass2State, _>(
         &src.file,
         &src.section,
         path,
@@ -317,7 +316,7 @@ pub fn load_two_pass(
         evict: Evict::Off,
         readers: options.readers,
     };
-    let sopts = stream::Options {
+    let sopts = perf_reader::Options {
         cold: options.cold,
         corrupt_bound: options.corrupt_bound,
         ..Default::default()

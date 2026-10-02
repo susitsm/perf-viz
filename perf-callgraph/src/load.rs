@@ -2,7 +2,7 @@
 //!
 //! Unwinding a sample needs the address space of its process, which is defined by mmap/fork/exec
 //! events scattered through the file. Instead of reading the file twice, this uses the ordered
-//! pipeline ([`perf_reader::ordered`]): the file is read once, in regions claimed in file order;
+//! pipeline ([`perf_reader::readers::ordered`]): the file is read once, in regions claimed in file order;
 //! each unit is scanned for its events (*extract*), regions are committed in order (*commit*),
 //! and only then are their samples unwound (*process*) against the address spaces as they stand.
 //! Workers unwind samples while later regions are still being read and committed.
@@ -30,7 +30,7 @@ use byteorder::{BigEndian, ByteOrder, LittleEndian};
 use linux_perf_event_reader::EventRecord;
 use perf_reader::{
     ctx::Ctx,
-    ordered::{self, Consumer},
+    readers::ordered::{self, Consumer},
     records::for_each_record,
 };
 use rustc_hash::FxHashMap;

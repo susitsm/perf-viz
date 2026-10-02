@@ -29,13 +29,7 @@ mod disabled {
             Harness
         }
         pub fn configure(&self, _ctx: &egui::Context) {}
-        pub fn raw_input_hook(
-            &mut self,
-            _raw: &mut egui::RawInput,
-            _screen_ready: bool,
-            _frames: u32,
-        ) {
-        }
+        pub fn raw_input_hook(&mut self, _raw: &mut egui::RawInput, _screen_ready: bool) {}
         pub fn take_open(&mut self) -> Option<PathBuf> {
             None
         }
@@ -48,7 +42,7 @@ mod disabled {
         pub fn after_open(&mut self) -> Harness {
             Harness
         }
-        pub fn poll_screen(&mut self, _ctx: &egui::Context, _frames: u32) {}
+        pub fn poll_screen(&mut self, _ctx: &egui::Context) {}
         pub fn poll_loading(&mut self, _ctx: &egui::Context, _elapsed_secs: f32) {}
     }
 }
@@ -161,6 +155,8 @@ mod scripted {
         injected_open: Option<PathBuf>,
         tune_window: bool,
         requested: bool,
+        /// Settled-screen frames drawn since the file was opened (see [`Harness::poll_screen`]).
+        frames: u32,
         /// The screenshot is saved and the app is quitting: nothing may ask questions now.
         finished: bool,
     }
@@ -199,6 +195,7 @@ mod scripted {
                 injected_open: None,
                 tune_window: false,
                 requested: false,
+                frames: 0,
                 finished: false,
             }
         }
@@ -212,13 +209,8 @@ mod scripted {
         }
 
         /// Inject the next scripted pointer event, once the screen has been drawn a few times.
-        pub fn raw_input_hook(
-            &mut self,
-            raw: &mut egui::RawInput,
-            screen_ready: bool,
-            frames: u32,
-        ) {
-            if !screen_ready || frames < 5 {
+        pub fn raw_input_hook(&mut self, raw: &mut egui::RawInput, screen_ready: bool) {
+            if !screen_ready || self.frames < 5 {
                 return;
             }
             let Some(sc) = &mut self.script else { return };
@@ -274,14 +266,16 @@ mod scripted {
             }
         }
 
-        /// On a settled screen (loaded, welcome, or the tuning question): once the script has run (and
-        /// the tooltip delay passed), or after a few frames without a script, save the screenshot and quit.
-        pub fn poll_screen(&mut self, ctx: &egui::Context, frames: u32) {
+        /// Called once per frame on a settled screen (loaded, welcome, or the tuning question): once
+        /// the script has run (and the tooltip delay passed), or after a few frames without a script,
+        /// save the screenshot and quit.
+        pub fn poll_screen(&mut self, ctx: &egui::Context) {
+            self.frames += 1;
             let Some(path) = self.screenshot.clone() else {
                 return;
             };
             let ready = match &self.script {
-                None => frames == 8,
+                None => self.frames == 8,
                 Some(sc) => sc
                     .finished
                     .is_some_and(|finished_at| finished_at.elapsed() > Duration::from_millis(900)),

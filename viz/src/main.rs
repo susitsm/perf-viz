@@ -256,7 +256,6 @@ struct App {
     flame_scroll_key: Option<ScrollKey>,
 
     harness: Harness,
-    frames_since_load: u32,
 }
 
 impl App {
@@ -374,7 +373,6 @@ impl App {
             items_key: None,
             flame_scroll_key: None,
             harness: args.harness,
-            frames_since_load: 0,
         };
         if app.path.is_some() && !app.pending_load {
             app.start_load(ctx);
@@ -410,8 +408,7 @@ impl App {
 
     /// Shown instead of loading, the first time a file is opened: offer to tune the reader first.
     fn tune_prompt_screen(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
-        self.frames_since_load += 1;
-        self.harness.poll_screen(ctx, self.frames_since_load);
+        self.harness.poll_screen(ctx);
         ui.add_space(((ui.available_height() - 220.0) / 2.0).max(30.0));
         ui.vertical_centered(|ui| {
             ui.heading("Tune the reader for this machine?");
@@ -527,8 +524,7 @@ impl App {
 
     /// The start screen: a button for the file dialog, and a hint that files can be dropped.
     fn welcome_screen(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
-        self.frames_since_load += 1;
-        self.harness.poll_screen(ctx, self.frames_since_load);
+        self.harness.poll_screen(ctx);
         ui.add_space(((ui.available_height() - 200.0) / 2.0).max(30.0));
         ui.vertical_centered(|ui| {
             ui.heading("perf-viz");
@@ -672,8 +668,7 @@ impl eframe::App for App {
 
     fn raw_input_hook(&mut self, _ctx: &egui::Context, raw: &mut egui::RawInput) {
         let screen_ready = self.profile.is_some() || self.path.is_none() || self.pending_load;
-        self.harness
-            .raw_input_hook(raw, screen_ready, self.frames_since_load);
+        self.harness.raw_input_hook(raw, screen_ready);
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
@@ -701,8 +696,7 @@ impl eframe::App for App {
             return;
         };
         let profile: &Profile = &shared_profile;
-        self.frames_since_load += 1;
-        self.harness.poll_screen(&ctx, self.frames_since_load);
+        self.harness.poll_screen(&ctx);
 
         if self.draw_top_bar(ui, &ctx, profile) {
             self.totals_key = None;

@@ -1,17 +1,16 @@
-//! The epoch-based address spaces built from the task and mmap records of one multi-reader pass
-//! must put every sample's leaf ip in the mapping an exact, time-ordered replay of the file finds.
+//! The epoch-based address spaces built from the task and mmap events of a recording must put every
+//! sample's leaf ip in the mapping an exact, time-ordered replay of the file finds.
 
 use std::{collections::HashMap, fs::File, io::BufReader, path::Path};
 
 use linux_perf_data::{PerfFileReader, PerfFileRecord};
 use linux_perf_event_reader::{EventRecord, Mmap2Record, SampleRecord};
-use perf_reader::readers::pipeline::{Config, Evict};
 
 use super::recording;
 use crate::{
     Result,
     addrspace::{AddressSpaces, is_file_backed},
-    meta::{Meta, SampleRow, Source, read_meta},
+    meta::{Event, event_of},
 };
 
 /// Identity of the mapping an address landed in.
@@ -25,6 +24,7 @@ struct MappingId {
 /// A sample with the mapping the exact replay put its leaf ip in (`None`: unmapped).
 struct ReferenceSample {
     time: u64,
+    pid: i32,
     tid: i32,
     ip: u64,
     mapping: Option<MappingId>,
@@ -39,7 +39,7 @@ struct LiveMapping {
     path: Option<String>,
 }
 
-fn model_mapping(spaces: &AddressSpaces, sample: &SampleRow) -> Option<MappingId> {
+fn model_mapping(spaces: &AddressSpaces, sample: &ReferenceSample) -> Option<MappingId> {
     spaces
         .lookup(sample.pid, sample.time, sample.ip)
         .map(|mapping| MappingId {
@@ -84,16 +84,27 @@ fn reference_sample(
         });
     ReferenceSample {
         time: sample.timestamp.unwrap_or(0),
+        pid,
         tid: sample.tid.unwrap_or(-1),
         ip,
         mapping,
     }
 }
 
+/// What the exact replay of a recording produced.
+struct Replay {
+    /// The task and mmap events, in time order, for building the address spaces under test.
+    events: Vec<Event>,
+    samples: Vec<ReferenceSample>,
+}
+
 /// Replays the file in time order, keeping exact time-versioned maps.
-fn replay_reference(path: &Path) -> Result<Vec<ReferenceSample>> {
+fn replay_reference(path: &Path) -> Result<Replay> {
     let mut live: HashMap<i32, Vec<LiveMapping>> = HashMap::new();
-    let mut reference = Vec::new();
+    let mut replay = Replay {
+        events: Vec::new(),
+        samples: Vec::new(),
+    };
     let PerfFileReader {
         mut perf_file,
         mut record_iter,
@@ -102,7 +113,10 @@ fn replay_reference(path: &Path) -> Result<Vec<ReferenceSample>> {
         let PerfFileRecord::EventRecord { record, .. } = record else {
             continue;
         };
-        match record.parse()? {
+        let time = record.timestamp().unwrap_or(0);
+        let parsed = record.parse()?;
+        replay.events.extend(event_of(&parsed, time));
+        match parsed {
             EventRecord::Mmap2(mmap) if mmap.protection & 4 != 0 => apply_mmap(&mut live, &mmap),
             EventRecord::Fork(fork) if fork.pid != fork.ppid => {
                 let parent = live.get(&fork.ppid).cloned().unwrap_or_default();
@@ -111,85 +125,45 @@ fn replay_reference(path: &Path) -> Result<Vec<ReferenceSample>> {
             EventRecord::Comm(comm) if comm.is_execve => {
                 live.insert(comm.pid, Vec::new());
             }
-            EventRecord::Sample(sample) => reference.push(reference_sample(&live, &sample)),
+            EventRecord::Sample(sample) => replay.samples.push(reference_sample(&live, &sample)),
             _ => {}
         }
     }
-    reference.sort_by_key(|entry| (entry.time, entry.tid, entry.ip));
-    Ok(reference)
+    replay
+        .events
+        .sort_by(|left, right| left.sort_key().cmp(&right.sort_key()));
+    Ok(replay)
 }
 
 /// Samples whose leaf ip the epoch model places differently from the replay.
-fn disagreements(
-    meta: &Meta,
-    spaces: &AddressSpaces,
-    reference: &[ReferenceSample],
-) -> Vec<String> {
-    let mut differing = Vec::new();
-    for (sample, expected) in meta.samples.iter().zip(reference) {
-        assert_eq!(
-            (sample.time, sample.tid, sample.ip),
-            (expected.time, expected.tid, expected.ip),
-            "sample order differs"
-        );
-        let modeled = model_mapping(spaces, sample);
-        if modeled != expected.mapping {
-            differing.push(format!(
-                "pid {} tid {} t={} ip={:#x}: epoch model {modeled:?}, exact replay {:?}",
-                sample.pid, sample.tid, sample.time, sample.ip, expected.mapping
-            ));
-        }
-    }
-    differing
+fn disagreements(spaces: &AddressSpaces, samples: &[ReferenceSample]) -> Vec<String> {
+    samples
+        .iter()
+        .filter_map(|sample| {
+            let modeled = model_mapping(spaces, sample);
+            (modeled != sample.mapping).then(|| {
+                format!(
+                    "pid {} tid {} t={} ip={:#x}: epoch model {modeled:?}, exact replay {:?}",
+                    sample.pid, sample.tid, sample.time, sample.ip, sample.mapping
+                )
+            })
+        })
+        .collect()
 }
 
-fn read_pass_one(path: &Path, readers: usize, corrupt_bound: bool) -> Meta {
-    let workers = 8;
-    let config = Config {
-        block: 1 << 20,
-        workers,
-        buffers: workers * 2 + 2 + readers * 2,
-        evict: Evict::Off,
-        readers,
-    };
-    let source = Source::open(path).unwrap();
-    let options = perf_reader::Options {
-        corrupt_bound,
-        ..Default::default()
-    };
-    read_meta(&source, path, config, options).unwrap().0
-}
-
-fn assert_address_spaces_match_the_replay(readers: usize, corrupt_bound: bool) {
+#[test]
+fn address_spaces_match_the_replay() {
     let Some(path) = recording() else { return };
-    let meta = read_pass_one(&path, readers, corrupt_bound);
-    assert!(
-        meta.events
-            .windows(2)
-            .all(|pair| pair[0].time <= pair[1].time),
-        "events must be time-sorted"
-    );
-    let spaces = AddressSpaces::build(&meta.events);
-    let reference = replay_reference(&path).unwrap();
-    assert_eq!(meta.samples.len(), reference.len(), "sample count");
+    let replay = replay_reference(&path).unwrap();
+    let spaces = AddressSpaces::build(&replay.events);
 
-    let differing = disagreements(&meta, &spaces, &reference);
-    let agreeing = 1.0 - differing.len() as f64 / meta.samples.len().max(1) as f64;
+    let differing = disagreements(&spaces, &replay.samples);
+    let agreeing = 1.0 - differing.len() as f64 / replay.samples.len().max(1) as f64;
     assert!(
         agreeing >= 0.99,
         "{} of {} samples differ, for example:\n{}",
         differing.len(),
-        meta.samples.len(),
+        replay.samples.len(),
         differing[..differing.len().min(5)].join("\n")
     );
-}
-
-#[test]
-fn address_spaces_from_three_readers_match_the_replay() {
-    assert_address_spaces_match_the_replay(3, false);
-}
-
-#[test]
-fn address_spaces_after_a_fallback_match_the_replay() {
-    assert_address_spaces_match_the_replay(3, true);
 }

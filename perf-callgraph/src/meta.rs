@@ -1,13 +1,10 @@
-//! Pass 1: stream the file once and keep only what the address-space model needs: the small
-//! task/mmap records and one compact row per sample. Runs on the multi-reader pipeline, so
-//! records arrive out of time order; [`Meta::finish`] sorts them.
+//! The task and mmap records the address-space model is built from, and the opened recording.
 
 use std::path::Path;
 
-use byteorder::{BigEndian, LittleEndian};
 use linux_perf_data::PerfFileReader;
 use linux_perf_event_reader::EventRecord;
-use perf_reader::{Ctx, Report, for_each_record, readers::pipeline::Config};
+use perf_reader::Ctx;
 
 use crate::Result;
 
@@ -117,109 +114,6 @@ pub fn event_of(ev: &EventRecord<'_>, time: u64) -> Option<Event> {
         }
         _ => return None,
     })
-}
-
-/// One sample, without its (large) stack copy.
-#[derive(Clone, Copy, Debug)]
-pub struct SampleRow {
-    pub time: u64,
-    pub pid: i32,
-    pub tid: i32,
-    /// Leaf instruction pointer, 0 if the sample has none.
-    pub ip: u64,
-    /// The sample carries user registers and a stack dump, so it can be unwound.
-    pub has_stack: bool,
-}
-
-#[derive(Default)]
-pub struct Meta {
-    pub events: Vec<Event>,
-    pub samples: Vec<SampleRow>,
-    /// Sum of `lost` over LOST records (events the kernel dropped).
-    pub lost_events: u64,
-    pub lost_records: u64,
-    pub records: u64,
-}
-
-impl Meta {
-    fn merge(&mut self, mut other: Meta) {
-        self.events.append(&mut other.events);
-        self.samples.append(&mut other.samples);
-        self.lost_events += other.lost_events;
-        self.lost_records += other.lost_records;
-        self.records += other.records;
-    }
-
-    /// Put events and samples in time order (deterministic for equal timestamps).
-    pub fn finish(mut self) -> Meta {
-        self.events.sort_by(|a, b| a.sort_key().cmp(&b.sort_key()));
-        self.samples
-            .sort_by_key(|sample| (sample.time, sample.tid, sample.ip));
-        self
-    }
-}
-
-fn collect<T: byteorder::ByteOrder>(meta: &mut Meta, ctx: &Ctx, buffer: &[u8]) -> Result<()> {
-    for_each_record::<T>(buffer, |record| {
-        meta.records += 1;
-        // Only kernel event records matter here; perf's synthesized user records are skipped.
-        if record.ty >= 64 {
-            return Ok(());
-        }
-        let raw = ctx.raw_event::<T>(record.ty, record.misc, record.body);
-        let time = raw.timestamp().unwrap_or(0);
-        let ev = raw.parse()?;
-        if let Some(event) = event_of(&ev, time) {
-            meta.events.push(event);
-            return Ok(());
-        }
-        match ev {
-            EventRecord::Sample(sample) => {
-                let has_stack = sample.user_regs.is_some() && sample.user_stack.is_some();
-                meta.samples.push(SampleRow {
-                    time: sample.timestamp.unwrap_or(time),
-                    pid: sample.pid.unwrap_or(-1),
-                    tid: sample.tid.unwrap_or(-1),
-                    ip: sample.ip.unwrap_or(0),
-                    has_stack,
-                });
-            }
-            EventRecord::Lost(lost) => {
-                meta.lost_records += 1;
-                meta.lost_events += lost.count;
-            }
-            _ => {}
-        }
-        Ok(())
-    })
-}
-
-/// Run pass 1 over `path`.
-pub fn read_meta(
-    src: &Source,
-    path: &Path,
-    config: Config,
-    options: perf_reader::Options,
-) -> Result<(Meta, Report)> {
-    let (states, report) = perf_reader::stream_open::<Meta, _>(
-        &src.file,
-        &src.section,
-        path,
-        config,
-        options,
-        |meta, buffer| {
-            if src.section.big_endian {
-                collect::<BigEndian>(meta, &src.ctx, buffer)
-            } else {
-                collect::<LittleEndian>(meta, &src.ctx, buffer)
-            }
-        },
-    )?;
-    let mut total = Meta::default();
-    for state in states {
-        total.merge(state);
-    }
-    Ok((total.finish(), report))
 }
 
 /// An opened file with its parse ctx, shared by the passes.

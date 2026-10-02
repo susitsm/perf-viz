@@ -5,7 +5,6 @@ pub mod cli;
 pub mod load;
 #[cfg(test)]
 mod load_replay;
-pub mod load_two_pass;
 pub mod meta;
 pub mod model;
 pub mod phys;

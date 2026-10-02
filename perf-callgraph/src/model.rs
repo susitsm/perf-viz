@@ -168,10 +168,6 @@ pub struct LoadStats {
     pub secs_replay_unwind: f64,
     pub secs_symbolize: f64,
     pub secs_build: f64,
-    // Streaming loader only:
-    pub secs_pass1: f64,
-    pub secs_open_binaries: f64,
-    pub secs_pass2: f64,
     pub secs_merge: f64,
     pub lost_records: u64,
     pub lost_events: u64,

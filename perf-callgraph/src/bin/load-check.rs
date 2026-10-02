@@ -1,7 +1,7 @@
 use clap::Parser;
 use perf_callgraph::{
     cli::LoadArgs,
-    load::{self, load},
+    load::load,
     model::{LoadStats, Profile, ROOT, Trie},
 };
 
@@ -13,56 +13,24 @@ struct Cli {
     path: String,
     #[command(flatten)]
     load: LoadArgs,
-    /// Use the older two-pass loader.
-    #[arg(long)]
-    two_pass: bool,
 }
 
-fn load_profile(path: &str, two_pass: bool, options: load::Options) -> Profile {
-    let mut progress = |phase: &str| eprintln!("  {phase}...");
-    if two_pass {
-        let two_pass_options = perf_callgraph::load_two_pass::Options {
-            dwarf: options.dwarf,
-            readers: options.readers,
-            workers: options.workers,
-            cold: options.cold,
-            corrupt_bound: false,
-        };
-        perf_callgraph::load_two_pass::load_two_pass(path.as_ref(), two_pass_options, &mut progress)
-            .unwrap()
-    } else {
-        load(path.as_ref(), options, &mut progress).unwrap()
-    }
-}
-
-fn print_timings(stats: &LoadStats, total_secs: f64, two_pass: bool) {
-    if two_pass {
-        println!(
-            "loaded in {total_secs:.2}s (pass 1 {:.2}s, open binaries {:.2}s, pass 2 {:.2}s, merge {:.2}s, symbolize {:.2}s, build {:.2}s)",
-            stats.secs_pass1,
-            stats.secs_open_binaries,
-            stats.secs_pass2,
-            stats.secs_merge,
-            stats.secs_symbolize,
-            stats.secs_build
-        );
-    } else {
-        println!(
-            "loaded in {total_secs:.2}s (read+unwind one pass {:.2}s [plan {:.2}s, {} regions, up to {} MiB held], merge {:.2}s, symbolize {:.2}s, build {:.2}s){}",
-            stats.secs_stream,
-            stats.secs_plan,
-            stats.stream_regions,
-            stats.stream_max_held_units,
-            stats.secs_merge,
-            stats.secs_symbolize,
-            stats.secs_build,
-            if stats.fell_back {
-                " [fell back to 1 reader]"
-            } else {
-                ""
-            }
-        );
-    }
+fn print_timings(stats: &LoadStats, total_secs: f64) {
+    println!(
+        "loaded in {total_secs:.2}s (read+unwind one pass {:.2}s [plan {:.2}s, {} regions, up to {} MiB held], merge {:.2}s, symbolize {:.2}s, build {:.2}s){}",
+        stats.secs_stream,
+        stats.secs_plan,
+        stats.stream_regions,
+        stats.stream_max_held_units,
+        stats.secs_merge,
+        stats.secs_symbolize,
+        stats.secs_build,
+        if stats.fell_back {
+            " [fell back to 1 reader]"
+        } else {
+            ""
+        }
+    );
 }
 
 fn print_counts(stats: &LoadStats) {
@@ -131,22 +99,17 @@ fn print_heaviest_root_children(profile: &Profile, name: &str, trie: &Trie) {
 
 fn main() {
     let cli = Cli::parse();
-    let (path, two_pass) = (cli.path, cli.two_pass);
     let options = cli.load.options();
     println!(
-        "workers {}, readers {}, cold {}, {}",
-        options.workers,
-        options.readers,
-        options.cold,
-        if two_pass {
-            "TWO-PASS loader"
-        } else {
-            "single-pass loader"
-        }
+        "workers {}, readers {}, cold {}",
+        options.workers, options.readers, options.cold
     );
     let started = std::time::Instant::now();
-    let profile = load_profile(&path, two_pass, options);
-    print_timings(&profile.stats, started.elapsed().as_secs_f64(), two_pass);
+    let profile = load(cli.path.as_ref(), options, &mut |phase| {
+        eprintln!("  {phase}...")
+    })
+    .unwrap();
+    print_timings(&profile.stats, started.elapsed().as_secs_f64());
     print_counts(&profile.stats);
     print_periods(&profile);
     println!(

@@ -3,7 +3,7 @@
 use eframe::egui::{
     self, Align2, Color32, FontId, Key, Rect, Sense, Stroke, StrokeKind, pos2, vec2,
 };
-use perf_profile::model::{FrameInfo, Profile, ROOT};
+use perf_callgraph::model::{FrameInfo, Profile, ROOT};
 
 use super::{ViewContext, flame_layout, flame_layout::Item};
 use crate::{

@@ -1,5 +1,5 @@
 use clap::Parser;
-use perf_profile::{
+use perf_callgraph::{
     cli::LoadArgs,
     load::{self, load},
     model::{LoadStats, Profile, ROOT, Trie},
@@ -21,14 +21,14 @@ struct Cli {
 fn load_profile(path: &str, two_pass: bool, options: load::Options) -> Profile {
     let mut progress = |phase: &str| eprintln!("  {phase}...");
     if two_pass {
-        let two_pass_options = perf_profile::load_two_pass::Options {
+        let two_pass_options = perf_callgraph::load_two_pass::Options {
             dwarf: options.dwarf,
             readers: options.readers,
             workers: options.workers,
             cold: options.cold,
             corrupt_bound: false,
         };
-        perf_profile::load_two_pass::load_two_pass(path.as_ref(), two_pass_options, &mut progress)
+        perf_callgraph::load_two_pass::load_two_pass(path.as_ref(), two_pass_options, &mut progress)
             .unwrap()
     } else {
         load(path.as_ref(), options, &mut progress).unwrap()

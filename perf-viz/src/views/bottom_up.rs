@@ -3,7 +3,7 @@
 use std::collections::HashSet;
 
 use eframe::egui::{self};
-use perf_profile::model::{Profile, ROOT, Trie};
+use perf_callgraph::model::{Profile, ROOT, Trie};
 
 use super::{
     BuRow, Functions, RowsKey, noun,

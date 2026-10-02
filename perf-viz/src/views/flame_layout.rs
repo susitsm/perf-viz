@@ -6,7 +6,7 @@
 //! `min_w` pixels are culled together with their whole subtree, so the work is bounded by what
 //! can be seen.
 
-use perf_profile::model::Trie;
+use perf_callgraph::model::Trie;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Item {
@@ -80,7 +80,7 @@ pub fn hit(items: &[Item], x: f32, depth: u32) -> Option<&Item> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use perf_profile::model::{ROOT, TrieBuilder};
+    use perf_callgraph::model::{ROOT, TrieBuilder};
 
     fn trie() -> Trie {
         // root -> a(3) -> b(2), a -> c(1) ; root -> d(1)

@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 
-use perf_profile::model::{Profile, ROOT, SampleRef, Trie};
+use perf_callgraph::model::{Profile, ROOT, SampleRef, Trie};
 
 use crate::{fmt::Cost, timeline::TimeRange};
 
@@ -175,7 +175,7 @@ pub fn has_samples(totals: &[u64], node: u32) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use perf_profile::model::{FrameInfo, LoadStats, SampleRef, TrieBuilder};
+    use perf_callgraph::model::{FrameInfo, LoadStats, SampleRef, TrieBuilder};
 
     fn frame(name: &str) -> FrameInfo {
         FrameInfo {

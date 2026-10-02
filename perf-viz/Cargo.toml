@@ -18,7 +18,7 @@ doc = false
 workspace = true
 
 [dependencies]
-perf-profile = { path = "../profile" }
+perf-callgraph = { path = "../perf-callgraph" }
 eframe = { version = "=0.36.1", default-features = false, features = ["accesskit", "default_fonts", "glow", "wayland", "x11"] }
 image = { version = "0.25", default-features = false, features = ["png"], optional = true }
 rustc-hash = "2.1"

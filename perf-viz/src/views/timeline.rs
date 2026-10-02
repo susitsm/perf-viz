@@ -5,7 +5,7 @@
 use std::{collections::HashMap, ops::Range};
 
 use eframe::egui::{self, Align2, Color32, FontId, Rect, Sense, Stroke, pos2, vec2};
-use perf_profile::model::{Profile, ROOT};
+use perf_callgraph::model::{Profile, ROOT};
 
 use super::ViewContext;
 use crate::{
@@ -734,7 +734,7 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use perf_profile::model::{LoadStats, SampleRef, Trie};
+    use perf_callgraph::model::{LoadStats, SampleRef, Trie};
 
     fn profile(samples: &[(u64, i32, i32)]) -> Profile {
         Profile {

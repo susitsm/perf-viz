@@ -1,7 +1,7 @@
 //! How fast is flame layout? On a synthetic trie of ~1M nodes and on a real profile.
 use std::time::Instant;
 
-use perf_profile::model::{ROOT, Trie, TrieBuilder};
+use perf_callgraph::model::{ROOT, Trie, TrieBuilder};
 // The layout code is part of the viewer binary; the benchmark compiles the same file.
 #[path = "../views/flame_layout.rs"]
 #[allow(dead_code)] // the benchmark uses only part of it
@@ -71,7 +71,7 @@ fn main() {
     time("synthetic ~1M nodes", &trie, ROOT);
     if let Some(path) = cli.path {
         let profile =
-            perf_profile::load::load(path.as_ref(), Default::default(), &mut |_| {}).unwrap();
+            perf_callgraph::load::load(path.as_ref(), Default::default(), &mut |_| {}).unwrap();
         println!(
             "\nreal profile: {} full nodes, {} truncated nodes",
             profile.full.nodes.len(),

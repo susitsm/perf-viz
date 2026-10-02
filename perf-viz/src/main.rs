@@ -40,7 +40,7 @@ use crate::{
     },
 };
 use eframe::egui::{self, Align2, Color32, FontId, RichText, Sense, Stroke, StrokeKind, vec2};
-use perf_profile::{
+use perf_callgraph::{
     load,
     model::{Profile, ROOT, Trie},
 };
@@ -483,16 +483,16 @@ impl App {
             ))
             .weak(),
         );
-        let mut dwarf = options.dwarf == perf_profile::symbolize::DwarfMode::Auto;
+        let mut dwarf = options.dwarf == perf_callgraph::symbolize::DwarfMode::Auto;
         if ui
             .checkbox(&mut dwarf, "Use DWARF (inlined frames, file:line)")
             .on_hover_text("Off: function names only, but faster to load")
             .changed()
         {
             options.dwarf = if dwarf {
-                perf_profile::symbolize::DwarfMode::Auto
+                perf_callgraph::symbolize::DwarfMode::Auto
             } else {
-                perf_profile::symbolize::DwarfMode::Never
+                perf_callgraph::symbolize::DwarfMode::Never
             };
             reader.dwarf = Some(if dwarf { Dwarf::Auto } else { Dwarf::Never });
             changed = true;

@@ -10,7 +10,7 @@ use std::{
     collections::{HashMap, HashSet},
 };
 
-use perf_profile::model::{Profile, ROOT, Trie};
+use perf_callgraph::model::{Profile, ROOT, Trie};
 
 use crate::{fmt::Cost, theme::Pal};
 use table::{Arrow, RowData};
@@ -454,7 +454,7 @@ pub(crate) fn func_row<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use perf_profile::model::{FrameInfo, LoadStats, TrieBuilder};
+    use perf_callgraph::model::{FrameInfo, LoadStats, TrieBuilder};
 
     fn w(id: u32, cost: u64) -> Weighted {
         Weighted { id, cost }

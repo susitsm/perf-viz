@@ -3,7 +3,7 @@
 use std::collections::HashSet;
 
 use eframe::egui::{self, RichText, vec2};
-use perf_profile::model::{Profile, ROOT};
+use perf_callgraph::model::{Profile, ROOT};
 
 use super::{
     Functions, ViewContext, Weighted, func_row, noun,

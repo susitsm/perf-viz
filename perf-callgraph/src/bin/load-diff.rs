@@ -5,7 +5,7 @@
 use clap::Parser;
 use std::collections::HashMap;
 
-use perf_profile::{
+use perf_callgraph::{
     load,
     model::{Profile, ROOT},
 };

@@ -1,7 +1,7 @@
 //! The caller/callee tab: every function with its costs; the selected one lists its callers and callees.
 
 use eframe::egui::{self};
-use perf_profile::model::{Profile, ROOT, Trie};
+use perf_callgraph::model::{Profile, ROOT, Trie};
 
 use super::{
     Functions, Weighted, func_row, noun,

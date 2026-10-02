@@ -8,7 +8,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 BIG=${1:-perf-large.data}
-OUT=viz/docs/images
+OUT=perf-viz/docs/images
 RAW=$(mktemp -d)
 CFGDIR=$(mktemp -d)
 CFG=$CFGDIR/config.toml
@@ -62,4 +62,4 @@ PY
 rm -rf "$RAW"
 
 # Inline the images into the markdown that main.rs includes as its documentation.
-python3 viz/docs/embed.py
+python3 perf-viz/docs/embed.py

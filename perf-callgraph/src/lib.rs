@@ -1,6 +1,7 @@
 //! Loading a recording into a [`model::Profile`]: address spaces, unwinding, symbolization and the
 //! call-tree model. [`load::load`] is the entry point; everything else is internal.
 
+pub mod index;
 pub mod load;
 pub mod model;
 mod symbolizing;

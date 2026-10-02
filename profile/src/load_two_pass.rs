@@ -13,7 +13,6 @@
 //! its own registers and stack plus the (already complete) address spaces.
 
 use std::{
-    collections::{BTreeMap, BTreeSet},
     path::{Path, PathBuf},
     sync::{
         OnceLock,
@@ -29,16 +28,16 @@ use perf_bench::{
     records::for_each_record,
     stream,
 };
-use rustc_hash::FxHashMap;
 
 use crate::{
     Result,
     addrspace::AddressSpaces,
     binary::BinaryCache,
+    load::{build_tries, module_addresses, symbolize_modules},
     meta::{self, Source},
-    model::{FrameInfo, FrameKey, LoadStats, NO_MODULE, Profile, ROOT, SampleRef, TrieBuilder},
+    model::{LoadStats, Profile, SampleRef},
     phys::PhysTrie,
-    symbolize::{DwarfMode, Level, LogicalFrame, ModuleAddrs, symbolize_many},
+    symbolize::DwarfMode,
     unwind::{EpochUnwind, Phys, Scratch, UnwCache, unwind_sample},
 };
 
@@ -197,6 +196,53 @@ fn pass2_collect<T: ByteOrder>(
     })
 }
 
+/// What pass 2's workers extracted, merged into one trie and one time-ordered list of samples.
+struct Merged {
+    phys: PhysTrie,
+    rows: Vec<Row>,
+    counters: Counters,
+}
+
+fn merge_states(states: Vec<Pass2State>) -> Merged {
+    let mut merged = Merged {
+        phys: PhysTrie::default(),
+        rows: Vec::new(),
+        counters: Counters::default(),
+    };
+    for state in states {
+        let map = merged.phys.merge(&state.trie);
+        merged.rows.extend(state.rows.iter().map(|row| Row {
+            node: map[row.node as usize],
+            ..*row
+        }));
+        let counters = &mut merged.counters;
+        counters.samples += state.counters.samples;
+        counters.without_stack += state.counters.without_stack;
+        counters.frames += state.counters.frames;
+        counters.suspect_samples += state.counters.suspect_samples;
+        counters.suspect_frames += state.counters.suspect_frames;
+    }
+    merged.rows.sort_by_key(|row| (row.time, row.tid, row.node));
+    merged
+}
+
+/// Open every module's binary on a few threads; failures are remembered in the cache and just
+/// leave the module without unwind info.
+fn open_binaries(module_paths: &[PathBuf], workers: usize) -> BinaryCache {
+    let bins = BinaryCache::default();
+    let next = AtomicUsize::new(0);
+    std::thread::scope(|scope| {
+        for _ in 0..workers.min(module_paths.len().max(1)) {
+            scope.spawn(|| {
+                while let Some(path) = module_paths.get(next.fetch_add(1, Ordering::Relaxed)) {
+                    let _ = bins.get(path);
+                }
+            });
+        }
+    });
+    bins
+}
+
 pub fn load_two_pass(
     path: &Path,
     options: Options,
@@ -236,19 +282,7 @@ pub fn load_two_pass(
         .iter()
         .map(|path| PathBuf::from(&**path))
         .collect();
-    let bins = BinaryCache::default();
-    {
-        let next = AtomicUsize::new(0);
-        std::thread::scope(|scope| {
-            for _ in 0..options.workers.min(module_paths.len().max(1)) {
-                scope.spawn(|| {
-                    while let Some(path) = module_paths.get(next.fetch_add(1, Ordering::Relaxed)) {
-                        let _ = bins.get(path); // failures are remembered and just leave the module without unwind info
-                    }
-                });
-            }
-        });
-    }
+    let bins = open_binaries(&module_paths, options.workers);
     stats.secs_open_binaries = started.elapsed().as_secs_f64();
 
     progress("pass 2: unwinding samples");
@@ -279,22 +313,11 @@ pub fn load_two_pass(
 
     progress("merging");
     let started = Instant::now();
-    let mut phys = PhysTrie::default();
-    let mut rows: Vec<Row> = Vec::new();
-    let mut counters = Counters::default();
-    for state in states {
-        let map = phys.merge(&state.trie);
-        rows.extend(state.rows.iter().map(|row| Row {
-            node: map[row.node as usize],
-            ..*row
-        }));
-        counters.samples += state.counters.samples;
-        counters.without_stack += state.counters.without_stack;
-        counters.frames += state.counters.frames;
-        counters.suspect_samples += state.counters.suspect_samples;
-        counters.suspect_frames += state.counters.suspect_frames;
-    }
-    rows.sort_by_key(|row| (row.time, row.tid, row.node));
+    let Merged {
+        phys,
+        rows,
+        counters,
+    } = merge_states(states);
     stats.secs_merge = started.elapsed().as_secs_f64();
     stats.samples = counters.samples;
     stats.samples_without_stack = counters.without_stack;
@@ -304,118 +327,38 @@ pub fn load_two_pass(
 
     progress("symbolizing");
     let started = Instant::now();
-    let mut per_module: BTreeMap<u32, BTreeSet<u64>> = BTreeMap::new();
-    for node in &phys.nodes[1..] {
-        if node.frame.module != NO_MODULE {
-            per_module
-                .entry(node.frame.module)
-                .or_default()
-                .insert(node.frame.svma);
-        }
-    }
-    let tasks: Vec<ModuleAddrs> = per_module
-        .into_iter()
-        .map(|(module, addresses)| ModuleAddrs {
-            module,
-            addrs: addresses.into_iter().collect(),
-        })
-        .collect();
-    stats.unique_addresses = tasks.iter().map(|task| task.addrs.len()).sum();
-    let results = symbolize_many(&module_paths, tasks, options.dwarf);
-    for syms in results.values() {
-        let result = &syms.result;
-        match result.level {
-            Level::Full => stats.modules_full += 1,
-            Level::SymbolsOnly => stats.modules_symbols_only += 1,
-            Level::Raw => stats.modules_raw += 1,
-        }
-        stats.unresolved_addresses += result.unresolved;
-    }
+    let tasks = module_addresses(
+        phys.nodes[1..]
+            .iter()
+            .map(|node| (node.frame.module, node.frame.svma)),
+    );
+    let results = symbolize_modules(&module_paths, tasks, options.dwarf, &mut stats);
     stats.secs_symbolize = started.elapsed().as_secs_f64();
 
     progress("building call trees");
     let started = Instant::now();
-    let mut frames: Vec<FrameInfo> = Vec::new();
-    let mut frame_ids: FxHashMap<FrameKey, u32> = FxHashMap::default();
-    let mut intern = |lf: &LogicalFrame, module: u32, suspect: bool| -> u32 {
-        *frame_ids
-            .entry(FrameKey {
-                name: lf.name.clone(),
-                module,
-                suspect,
-            })
-            .or_insert_with(|| {
-                frames.push(FrameInfo {
-                    name: lf.name.clone(),
-                    module,
-                    file: lf.file.clone(),
-                    line: lf.line,
-                    suspect,
-                    raw: lf.raw,
-                });
-                frames.len() as u32 - 1
-            })
-    };
-    let unmapped = LogicalFrame {
-        name: "[unmapped]".into(),
-        file: None,
-        line: None,
-        raw: true,
-    };
-    let (mut full, mut truncated) = (TrieBuilder::default(), TrieBuilder::default());
-    // Where each physical node ends up: the innermost logical frame of its chain.
-    let mut full_of = vec![ROOT; phys.nodes.len()];
-    let mut trunc_of = vec![ROOT; phys.nodes.len()];
-    for (i, node) in phys.nodes.iter().enumerate().skip(1) {
-        let chain: Vec<u32> = if node.frame.module == NO_MODULE {
-            vec![intern(&unmapped, NO_MODULE, node.frame.suspect)]
-        } else {
-            results[&node.frame.module]
-                .frames_of(node.frame.svma)
-                .iter()
-                .map(|lf| intern(lf, node.frame.module, node.frame.suspect))
-                .collect()
-        };
-        // The chain is innermost-first; a path is root-first, so walk it backwards.
-        let mut cur = full_of[node.parent as usize];
-        for &frame in chain.iter().rev() {
-            cur = full.child(cur, frame);
-        }
-        full_of[i] = cur;
-        full.add_self(cur, node.self_count);
-        // The truncated view drops suspect frames: their node collapses into the parent's.
-        let mut cur = trunc_of[node.parent as usize];
-        if !node.frame.suspect {
-            for &frame in chain.iter().rev() {
-                cur = truncated.child(cur, frame);
-            }
-        }
-        trunc_of[i] = cur;
-        truncated.add_self(cur, node.self_count);
-    }
-    let (full, truncated) = (full.finish(), truncated.finish());
-    let samples: Vec<SampleRef> = rows
+    let tries = build_tries(&phys, &results);
+    let samples = rows
         .iter()
         .map(|row| SampleRef {
             time: row.time,
             period: 1,
             pid: -1,
             tid: row.tid,
-            full: full_of[row.node as usize],
-            truncated: trunc_of[row.node as usize],
+            full: tries.full_of[row.node as usize],
+            truncated: tries.truncated_of[row.node as usize],
         })
         .collect();
     stats.secs_build = started.elapsed().as_secs_f64();
 
-    let modules = module_paths
-        .iter()
-        .map(|path| path.to_string_lossy().to_string())
-        .collect();
     Ok(Profile {
-        modules,
-        frames,
-        full,
-        truncated,
+        modules: module_paths
+            .iter()
+            .map(|path| path.to_string_lossy().to_string())
+            .collect(),
+        frames: tries.frames,
+        full: tries.full,
+        truncated: tries.truncated,
         samples,
         comm: spaces.comm.clone(),
         stats,

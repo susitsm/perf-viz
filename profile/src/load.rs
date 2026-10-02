@@ -40,9 +40,11 @@ use crate::{
     addrspace::{AddressSpaces, EpochSnap},
     binary::BinaryCache,
     meta::{Event, Source, event_of},
-    model::{FrameInfo, FrameKey, LoadStats, NO_MODULE, Profile, ROOT, SampleRef, TrieBuilder},
+    model::{
+        FrameInfo, FrameKey, LoadStats, NO_MODULE, Profile, ROOT, SampleRef, Trie, TrieBuilder,
+    },
     phys::PhysTrie,
-    symbolize::{DwarfMode, Level, LogicalFrame, ModuleAddrs, symbolize_many},
+    symbolize::{DwarfMode, Level, LogicalFrame, ModuleAddrs, ModuleSymbols, symbolize_many},
     unwind::{EpochUnwind, Phys, Scratch, UnwCache, unwind_sample},
 };
 
@@ -365,10 +367,178 @@ impl Consumer for Loader {
     }
 }
 
-pub fn load(path: &Path, options: Options, progress: &mut dyn FnMut(&str)) -> Result<Profile> {
-    let mut stats = LoadStats::default();
-    let src = Source::open(path)?;
-    let big_endian = src.section.big_endian;
+/// Logical frames seen so far, each stored once.
+#[derive(Default)]
+pub(crate) struct FrameTable {
+    frames: Vec<FrameInfo>,
+    ids: FxHashMap<FrameKey, u32>,
+}
+
+impl FrameTable {
+    pub(crate) fn intern(&mut self, frame: &LogicalFrame, module: u32, suspect: bool) -> u32 {
+        let key = FrameKey {
+            name: frame.name.clone(),
+            module,
+            suspect,
+        };
+        *self.ids.entry(key).or_insert_with(|| {
+            self.frames.push(FrameInfo {
+                name: frame.name.clone(),
+                module,
+                file: frame.file.clone(),
+                line: frame.line,
+                suspect,
+                raw: frame.raw,
+            });
+            self.frames.len() as u32 - 1
+        })
+    }
+
+    pub(crate) fn into_frames(self) -> Vec<FrameInfo> {
+        self.frames
+    }
+}
+
+pub(crate) fn unmapped_frame() -> LogicalFrame {
+    LogicalFrame {
+        name: "[unmapped]".into(),
+        file: None,
+        line: None,
+        raw: true,
+    }
+}
+
+/// The unique addresses of each module, in module order.
+pub(crate) fn module_addresses(frames: impl Iterator<Item = (u32, u64)>) -> Vec<ModuleAddrs> {
+    let mut per_module: BTreeMap<u32, BTreeSet<u64>> = BTreeMap::new();
+    for (module, svma) in frames {
+        if module != NO_MODULE {
+            per_module.entry(module).or_default().insert(svma);
+        }
+    }
+    per_module
+        .into_iter()
+        .map(|(module, addresses)| ModuleAddrs {
+            module,
+            addrs: addresses.into_iter().collect(),
+        })
+        .collect()
+}
+
+/// Symbolize every module's addresses and count what was found into `stats`.
+pub(crate) fn symbolize_modules(
+    module_paths: &[PathBuf],
+    tasks: Vec<ModuleAddrs>,
+    dwarf: DwarfMode,
+    stats: &mut LoadStats,
+) -> HashMap<u32, ModuleSymbols> {
+    stats.unique_addresses = tasks.iter().map(|task| task.addrs.len()).sum();
+    let results = symbolize_many(module_paths, tasks, dwarf);
+    for symbols in results.values() {
+        let result = &symbols.result;
+        match result.level {
+            Level::Full => stats.modules_full += 1,
+            Level::SymbolsOnly => stats.modules_symbols_only += 1,
+            Level::Raw => stats.modules_raw += 1,
+        }
+        stats.unresolved_addresses += result.unresolved;
+    }
+    results
+}
+
+/// The call tries built from a physical trie, and where each physical node ended up in them.
+pub(crate) struct Tries {
+    pub frames: Vec<FrameInfo>,
+    pub full: Trie,
+    pub truncated: Trie,
+    /// The innermost logical frame of each physical node's chain, in the full trie.
+    pub full_of: Vec<u32>,
+    pub truncated_of: Vec<u32>,
+}
+
+/// Expand each physical node into its chain of logical (inlined) frames. The truncated trie drops
+/// suspect frames: their node collapses into the parent's.
+pub(crate) fn build_tries(phys: &PhysTrie, results: &HashMap<u32, ModuleSymbols>) -> Tries {
+    let mut table = FrameTable::default();
+    let unmapped = unmapped_frame();
+    let (mut full, mut truncated) = (TrieBuilder::default(), TrieBuilder::default());
+    let mut full_of = vec![ROOT; phys.nodes.len()];
+    let mut truncated_of = vec![ROOT; phys.nodes.len()];
+    for (index, node) in phys.nodes.iter().enumerate().skip(1) {
+        let chain: Vec<u32> = if node.frame.module == NO_MODULE {
+            vec![table.intern(&unmapped, NO_MODULE, node.frame.suspect)]
+        } else {
+            results[&node.frame.module]
+                .frames_of(node.frame.svma)
+                .iter()
+                .map(|frame| table.intern(frame, node.frame.module, node.frame.suspect))
+                .collect()
+        };
+        // The chain is innermost-first; a path is root-first, so walk it backwards.
+        let mut current = full_of[node.parent as usize];
+        for &frame in chain.iter().rev() {
+            current = full.child(current, frame);
+        }
+        full_of[index] = current;
+        full.add_self(current, node.self_count);
+        let mut current = truncated_of[node.parent as usize];
+        if !node.frame.suspect {
+            for &frame in chain.iter().rev() {
+                current = truncated.child(current, frame);
+            }
+        }
+        truncated_of[index] = current;
+        truncated.add_self(current, node.self_count);
+    }
+    Tries {
+        frames: table.into_frames(),
+        full: full.finish(),
+        truncated: truncated.finish(),
+        full_of,
+        truncated_of,
+    }
+}
+
+/// What the readers extracted, merged into one trie and one time-ordered list of samples.
+struct Merged {
+    phys: PhysTrie,
+    rows: Vec<Row>,
+    counters: Counters,
+}
+
+fn merge_states(states: Vec<Local>) -> Merged {
+    let mut merged = Merged {
+        phys: PhysTrie::default(),
+        rows: Vec::new(),
+        counters: Counters::default(),
+    };
+    for state in states {
+        let map = merged.phys.merge(&state.trie);
+        merged.rows.extend(state.rows.iter().map(|row| Row {
+            node: map[row.node as usize],
+            ..*row
+        }));
+        let counters = &mut merged.counters;
+        counters.samples += state.counters.samples;
+        counters.without_stack += state.counters.without_stack;
+        counters.frames += state.counters.frames;
+        counters.suspect_samples += state.counters.suspect_samples;
+        counters.suspect_frames += state.counters.suspect_frames;
+        counters.lost_records += state.counters.lost_records;
+        counters.lost_events += state.counters.lost_events;
+        counters.with_period += state.counters.with_period;
+    }
+    merged.rows.sort_by_key(|row| (row.time, row.tid, row.node));
+    merged
+}
+
+/// Read the file once: extract events, commit them in order, and unwind every sample.
+fn read_and_unwind(
+    path: &Path,
+    source: &Source,
+    options: &Options,
+    stats: &mut LoadStats,
+) -> Result<(Loader, Vec<Local>)> {
     let config = ordered::Config {
         block: 1 << 20,
         workers: options.workers,
@@ -377,23 +547,31 @@ pub fn load(path: &Path, options: Options, progress: &mut dyn FnMut(&str)) -> Re
         in_flight: options.in_flight,
         lookahead: options.lookahead.max(1), /* required: see the module docs */
     };
-    let sopts = ordered::Options {
+    let stream_options = ordered::Options {
         progress: options.progress.clone(),
         cold: options.cold,
         corrupt_bound: options.corrupt_bound,
         force_sequential: options.force_sequential,
     };
-
-    progress("reading and unwinding");
     let started = Instant::now();
-    let (loader, states, rep) = ordered::stream_ordered(path, config, sopts, || {
-        Loader::new(src.ctx.clone(), big_endian)
+    let big_endian = source.section.big_endian;
+    let (loader, states, report) = ordered::stream_ordered(path, config, stream_options, || {
+        Loader::new(source.ctx.clone(), big_endian)
     })?;
     stats.secs_stream = started.elapsed().as_secs_f64();
-    stats.secs_plan = rep.plan_time.as_secs_f64();
-    stats.stream_regions = rep.metrics.regions;
-    stats.stream_max_held_units = rep.metrics.max_held_units;
-    stats.fell_back = rep.fell_back;
+    stats.secs_plan = report.plan_time.as_secs_f64();
+    stats.stream_regions = report.metrics.regions;
+    stats.stream_max_held_units = report.metrics.max_held_units;
+    stats.fell_back = report.fell_back;
+    Ok((loader, states))
+}
+
+pub fn load(path: &Path, options: Options, progress: &mut dyn FnMut(&str)) -> Result<Profile> {
+    let mut stats = LoadStats::default();
+    let source = Source::open(path)?;
+
+    progress("reading and unwinding");
+    let (loader, states) = read_and_unwind(path, &source, &options, &mut stats)?;
     let spaces = loader.spaces.into_inner().unwrap();
     let module_paths: Vec<PathBuf> = spaces
         .module_paths()
@@ -405,25 +583,11 @@ pub fn load(path: &Path, options: Options, progress: &mut dyn FnMut(&str)) -> Re
 
     progress("merging");
     let started = Instant::now();
-    let mut phys = PhysTrie::default();
-    let mut rows: Vec<Row> = Vec::new();
-    let mut counters = Counters::default();
-    for state in states {
-        let map = phys.merge(&state.trie);
-        rows.extend(state.rows.iter().map(|row| Row {
-            node: map[row.node as usize],
-            ..*row
-        }));
-        counters.samples += state.counters.samples;
-        counters.without_stack += state.counters.without_stack;
-        counters.frames += state.counters.frames;
-        counters.suspect_samples += state.counters.suspect_samples;
-        counters.suspect_frames += state.counters.suspect_frames;
-        counters.lost_records += state.counters.lost_records;
-        counters.lost_events += state.counters.lost_events;
-        counters.with_period += state.counters.with_period;
-    }
-    rows.sort_by_key(|row| (row.time, row.tid, row.node));
+    let Merged {
+        phys,
+        rows,
+        counters,
+    } = merge_states(states);
     stats.secs_merge = started.elapsed().as_secs_f64();
     stats.samples = counters.samples;
     stats.samples_without_stack = counters.without_stack;
@@ -433,100 +597,21 @@ pub fn load(path: &Path, options: Options, progress: &mut dyn FnMut(&str)) -> Re
     stats.lost_records = counters.lost_records;
     stats.lost_events = counters.lost_events;
     stats.samples_with_period = counters.with_period;
-    stats.period_unit = src.period_unit.to_string();
+    stats.period_unit = source.period_unit.to_string();
 
     progress("symbolizing");
     let started = Instant::now();
-    let mut per_module: BTreeMap<u32, BTreeSet<u64>> = BTreeMap::new();
-    for node in &phys.nodes[1..] {
-        if node.frame.module != NO_MODULE {
-            per_module
-                .entry(node.frame.module)
-                .or_default()
-                .insert(node.frame.svma);
-        }
-    }
-    let tasks: Vec<ModuleAddrs> = per_module
-        .into_iter()
-        .map(|(module, addresses)| ModuleAddrs {
-            module,
-            addrs: addresses.into_iter().collect(),
-        })
-        .collect();
-    stats.unique_addresses = tasks.iter().map(|task| task.addrs.len()).sum();
-    let results = symbolize_many(&module_paths, tasks, options.dwarf);
-    for syms in results.values() {
-        let result = &syms.result;
-        match result.level {
-            Level::Full => stats.modules_full += 1,
-            Level::SymbolsOnly => stats.modules_symbols_only += 1,
-            Level::Raw => stats.modules_raw += 1,
-        }
-        stats.unresolved_addresses += result.unresolved;
-    }
+    let tasks = module_addresses(
+        phys.nodes[1..]
+            .iter()
+            .map(|node| (node.frame.module, node.frame.svma)),
+    );
+    let results = symbolize_modules(&module_paths, tasks, options.dwarf, &mut stats);
     stats.secs_symbolize = started.elapsed().as_secs_f64();
 
     progress("building call trees");
     let started = Instant::now();
-    let mut frames: Vec<FrameInfo> = Vec::new();
-    let mut frame_ids: FxHashMap<FrameKey, u32> = FxHashMap::default();
-    let mut intern = |lf: &LogicalFrame, module: u32, suspect: bool| -> u32 {
-        *frame_ids
-            .entry(FrameKey {
-                name: lf.name.clone(),
-                module,
-                suspect,
-            })
-            .or_insert_with(|| {
-                frames.push(FrameInfo {
-                    name: lf.name.clone(),
-                    module,
-                    file: lf.file.clone(),
-                    line: lf.line,
-                    suspect,
-                    raw: lf.raw,
-                });
-                frames.len() as u32 - 1
-            })
-    };
-    let unmapped = LogicalFrame {
-        name: "[unmapped]".into(),
-        file: None,
-        line: None,
-        raw: true,
-    };
-    let (mut full, mut truncated) = (TrieBuilder::default(), TrieBuilder::default());
-    // Where each physical node ends up: the innermost logical frame of its chain.
-    let mut full_of = vec![ROOT; phys.nodes.len()];
-    let mut trunc_of = vec![ROOT; phys.nodes.len()];
-    for (i, node) in phys.nodes.iter().enumerate().skip(1) {
-        let chain: Vec<u32> = if node.frame.module == NO_MODULE {
-            vec![intern(&unmapped, NO_MODULE, node.frame.suspect)]
-        } else {
-            results[&node.frame.module]
-                .frames_of(node.frame.svma)
-                .iter()
-                .map(|lf| intern(lf, node.frame.module, node.frame.suspect))
-                .collect()
-        };
-        // The chain is innermost-first; a path is root-first, so walk it backwards.
-        let mut cur = full_of[node.parent as usize];
-        for &frame in chain.iter().rev() {
-            cur = full.child(cur, frame);
-        }
-        full_of[i] = cur;
-        full.add_self(cur, node.self_count);
-        // The truncated view drops suspect frames: their node collapses into the parent's.
-        let mut cur = trunc_of[node.parent as usize];
-        if !node.frame.suspect {
-            for &frame in chain.iter().rev() {
-                cur = truncated.child(cur, frame);
-            }
-        }
-        trunc_of[i] = cur;
-        truncated.add_self(cur, node.self_count);
-    }
-    let (full, truncated) = (full.finish(), truncated.finish());
+    let tries = build_tries(&phys, &results);
     let samples = rows
         .iter()
         .map(|row| SampleRef {
@@ -534,21 +619,20 @@ pub fn load(path: &Path, options: Options, progress: &mut dyn FnMut(&str)) -> Re
             period: row.period,
             pid: row.pid,
             tid: row.tid,
-            full: full_of[row.node as usize],
-            truncated: trunc_of[row.node as usize],
+            full: tries.full_of[row.node as usize],
+            truncated: tries.truncated_of[row.node as usize],
         })
         .collect();
     stats.secs_build = started.elapsed().as_secs_f64();
 
-    let modules = module_paths
-        .iter()
-        .map(|path| path.to_string_lossy().to_string())
-        .collect();
     Ok(Profile {
-        modules,
-        frames,
-        full,
-        truncated,
+        modules: module_paths
+            .iter()
+            .map(|path| path.to_string_lossy().to_string())
+            .collect(),
+        frames: tries.frames,
+        full: tries.full,
+        truncated: tries.truncated,
         samples,
         comm: spaces.comm,
         stats,

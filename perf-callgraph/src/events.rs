@@ -1,12 +1,6 @@
-//! The task and mmap records the address-space model is built from, and the opened recording.
+//! The task and mmap records the address-space model is built from.
 
-use std::path::Path;
-
-use linux_perf_data::PerfFileReader;
 use linux_perf_event_reader::EventRecord;
-use perf_reader::Ctx;
-
-use crate::Result;
 
 #[derive(Clone, Debug)]
 pub enum EventKind {
@@ -114,47 +108,4 @@ pub fn event_of(ev: &EventRecord<'_>, time: u64) -> Option<Event> {
         }
         _ => return None,
     })
-}
-
-/// An opened file with its parse ctx, shared by the passes.
-pub struct Source {
-    pub file: std::fs::File,
-    pub section: perf_reader::split::DataSection,
-    pub ctx: Ctx,
-    /// What the first event's sample period counts: "cycles", "ns" or "events".
-    pub period_unit: &'static str,
-}
-
-impl Source {
-    pub fn open(path: &Path) -> Result<Source> {
-        let (file, section) = perf_reader::split::open(path)?;
-        let reader = PerfFileReader::parse_file(&file)?;
-        let ctx = Ctx::new(
-            reader.perf_file.event_attributes(),
-            reader.perf_file.endian(),
-        )?;
-        use linux_perf_event_reader::{HardwareEventId, PerfEventType, SoftwareCounterType};
-        let period_unit = match reader
-            .perf_file
-            .event_attributes()
-            .first()
-            .map(|attribute| &attribute.attr.type_)
-        {
-            Some(PerfEventType::Hardware(
-                HardwareEventId::CpuCycles | HardwareEventId::RefCpuCycles,
-                _,
-            )) => "cycles",
-            Some(PerfEventType::Software(
-                SoftwareCounterType::CpuClock | SoftwareCounterType::TaskClock,
-            )) => "ns",
-            _ => "events",
-        };
-        drop(reader);
-        Ok(Source {
-            file,
-            section,
-            ctx,
-            period_unit,
-        })
-    }
 }

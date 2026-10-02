@@ -27,6 +27,7 @@ use std::{
 };
 
 use byteorder::{BigEndian, ByteOrder, LittleEndian};
+use linux_perf_data::PerfFileReader;
 use linux_perf_event_reader::EventRecord;
 use perf_reader::{
     Ctx, for_each_record,
@@ -38,7 +39,7 @@ use crate::{
     Result,
     addrspace::{AddressSpaces, EpochSnap},
     binary::BinaryCache,
-    meta::{Event, Source, event_of},
+    events::{Event, event_of},
     model::{
         FrameInfo, FrameKey, LoadStats, NO_MODULE, Profile, ROOT, SampleRef, Trie, TrieBuilder,
     },
@@ -90,6 +91,47 @@ impl Default for Options {
             corrupt_bound: false,
             force_sequential: false,
         }
+    }
+}
+
+/// An opened recording with its parse ctx.
+struct Source {
+    section: perf_reader::split::DataSection,
+    ctx: Ctx,
+    /// What the first event's sample period counts: "cycles", "ns" or "events".
+    period_unit: &'static str,
+}
+
+impl Source {
+    fn open(path: &Path) -> Result<Source> {
+        let (file, section) = perf_reader::split::open(path)?;
+        let reader = PerfFileReader::parse_file(&file)?;
+        let ctx = Ctx::new(
+            reader.perf_file.event_attributes(),
+            reader.perf_file.endian(),
+        )?;
+        use linux_perf_event_reader::{HardwareEventId, PerfEventType, SoftwareCounterType};
+        let period_unit = match reader
+            .perf_file
+            .event_attributes()
+            .first()
+            .map(|attribute| &attribute.attr.type_)
+        {
+            Some(PerfEventType::Hardware(
+                HardwareEventId::CpuCycles | HardwareEventId::RefCpuCycles,
+                _,
+            )) => "cycles",
+            Some(PerfEventType::Software(
+                SoftwareCounterType::CpuClock | SoftwareCounterType::TaskClock,
+            )) => "ns",
+            _ => "events",
+        };
+        drop(reader);
+        Ok(Source {
+            section,
+            ctx,
+            period_unit,
+        })
     }
 }
 

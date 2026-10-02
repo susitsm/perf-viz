@@ -14,7 +14,7 @@
 use std::{collections::HashMap, sync::Arc};
 
 use crate::{
-    meta::{Event, EventKind},
+    events::{Event, EventKind},
     model::NO_MODULE,
 };
 

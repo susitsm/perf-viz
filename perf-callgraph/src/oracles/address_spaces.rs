@@ -10,7 +10,7 @@ use super::recording;
 use crate::{
     Result,
     addrspace::{AddressSpaces, is_file_backed},
-    meta::{Event, event_of},
+    events::{Event, event_of},
 };
 
 /// Identity of the mapping an address landed in.

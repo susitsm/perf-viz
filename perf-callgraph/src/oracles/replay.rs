@@ -24,11 +24,11 @@ use rustc_hash::FxHashMap;
 
 use crate::{
     Result,
-    binary::{Binary, BinaryCache, SectionData},
     model::{FrameInfo, LoadStats, NO_MODULE, Profile, Trie, TrieBuilder},
-    symbolize::{DwarfMode, ModuleSymbols},
-    tries::{FrameTable, module_addresses, symbolize_modules, unmapped_frame},
-    unwind::{PERF_REG_X86_BP, PERF_REG_X86_IP, PERF_REG_X86_SP, follows_call},
+    symbolizing::tries::{FrameTable, module_addresses, symbolize_modules, unmapped_frame},
+    symbolizing::{DwarfMode, ModuleSymbols},
+    unwinding::binary::{Binary, BinaryCache, SectionData},
+    unwinding::{PERF_REG_X86_BP, PERF_REG_X86_IP, PERF_REG_X86_SP, follows_call},
 };
 
 type Unw = UnwinderX86_64<SectionData>;
@@ -220,7 +220,7 @@ impl Replayer {
             return;
         };
         let path = path.trim_end_matches('\0');
-        if !crate::addrspace::is_file_backed(path) {
+        if !crate::unwinding::addrspace::is_file_backed(path) {
             return; // [vdso], //anon, [stack]...
         }
         let Some(bin) = self.binaries.get(Path::new(path)) else {

@@ -13,6 +13,8 @@
 //! the chosen level cannot resolve falls back to a raw name individually, so every input
 //! address always gets at least one frame.
 
+pub mod tries;
+
 use std::{
     fs::File,
     path::{Path, PathBuf},

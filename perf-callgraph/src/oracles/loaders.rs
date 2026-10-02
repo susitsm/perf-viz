@@ -6,10 +6,9 @@ use std::{
     hash::{Hash, Hasher},
 };
 
-use super::recording;
+use super::{recording, replay};
 use crate::{
     load::{self, Options},
-    load_replay,
     model::{Profile, ROOT, Trie},
 };
 
@@ -196,7 +195,7 @@ fn assert_same_counts(streaming: &Profile, replay: &Profile) {
 fn assert_matches_replay(options: Options) {
     let Some(path) = recording() else { return };
     let streaming = load::load(&path, options, &mut |_| {}).unwrap();
-    let replay = load_replay::load_replay(&path, Default::default(), &mut |_| {}).unwrap();
+    let replay = replay::load_replay(&path, Default::default(), &mut |_| {}).unwrap();
 
     assert_same_counts(&streaming, &replay);
     for (name, streaming_trie, replay_trie) in [

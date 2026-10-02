@@ -3,7 +3,7 @@
 
 use rustc_hash::FxHashMap;
 
-use crate::{model::NO_MODULE, unwind::Phys};
+use crate::{model::NO_MODULE, unwinding::Phys};
 
 pub const ROOT: u32 = 0;
 

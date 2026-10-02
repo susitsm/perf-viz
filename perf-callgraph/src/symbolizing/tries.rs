@@ -11,8 +11,8 @@ use rustc_hash::FxHashMap;
 
 use crate::{
     model::{FrameInfo, FrameKey, LoadStats, NO_MODULE, ROOT, Trie, TrieBuilder},
-    phys::PhysTrie,
-    symbolize::{DwarfMode, Level, LogicalFrame, ModuleAddrs, ModuleSymbols, symbolize_many},
+    symbolizing::{DwarfMode, Level, LogicalFrame, ModuleAddrs, ModuleSymbols, symbolize_many},
+    unwinding::phys::PhysTrie,
 };
 
 /// Logical frames seen so far, each stored once.

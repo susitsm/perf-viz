@@ -1,4 +1,10 @@
-//! Unwinding one sample against an address-space epoch, and validating the result.
+//! From samples to physical stacks: per-process address spaces built from the task and mmap events,
+//! the binaries they map, and unwinding one sample against the address space of its epoch.
+
+pub mod addrspace;
+pub mod binary;
+pub mod events;
+pub mod phys;
 
 use std::{path::Path, sync::Arc};
 
@@ -8,9 +14,9 @@ use framehop::{
 };
 
 use crate::{
-    addrspace::Mapping,
-    binary::{Binary, BinaryCache, SectionData},
     model::NO_MODULE,
+    unwinding::addrspace::Mapping,
+    unwinding::binary::{Binary, BinaryCache, SectionData},
 };
 
 pub type Unw = UnwinderX86_64<SectionData>;

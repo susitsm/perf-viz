@@ -14,8 +14,8 @@
 use std::{collections::HashMap, sync::Arc};
 
 use crate::{
-    events::{Event, EventKind},
     model::NO_MODULE,
+    unwinding::events::{Event, EventKind},
 };
 
 /// Is this mapping name a real file on disk? perf names anonymous mappings `//anon`, and

@@ -9,8 +9,8 @@ use linux_perf_event_reader::{EventRecord, Mmap2Record, SampleRecord};
 use super::recording;
 use crate::{
     Result,
-    addrspace::{AddressSpaces, is_file_backed},
-    events::{Event, event_of},
+    unwinding::addrspace::{AddressSpaces, is_file_backed},
+    unwinding::events::{Event, event_of},
 };
 
 /// Identity of the mapping an address landed in.

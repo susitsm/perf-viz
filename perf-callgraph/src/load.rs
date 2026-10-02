@@ -36,14 +36,14 @@ use perf_reader::{
 
 use crate::{
     Result,
-    addrspace::{AddressSpaces, EpochSnap},
-    binary::BinaryCache,
-    events::{Event, event_of},
     model::{LoadStats, Profile, SampleRef},
-    phys::PhysTrie,
-    symbolize::DwarfMode,
-    tries::{build_tries, module_addresses, symbolize_modules},
-    unwind::{
+    symbolizing::DwarfMode,
+    symbolizing::tries::{build_tries, module_addresses, symbolize_modules},
+    unwinding::addrspace::{AddressSpaces, EpochSnap},
+    unwinding::binary::BinaryCache,
+    unwinding::events::{Event, event_of},
+    unwinding::phys::PhysTrie,
+    unwinding::{
         EpochUnwind, PERF_REG_X86_BP, PERF_REG_X86_IP, PERF_REG_X86_SP, Phys, Scratch, UnwCache,
         unwind_sample,
     },

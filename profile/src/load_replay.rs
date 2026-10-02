@@ -3,7 +3,7 @@
 //! validate return addresses, symbolize, and build the call tries.
 //!
 //! Kept as an independent oracle for the streaming loader in [`crate::load`], which must
-//! produce the same profile (`load-compare` checks this).
+//! produce the same profile (the tests in `oracles::loaders` check this).
 
 use std::{
     collections::HashMap,

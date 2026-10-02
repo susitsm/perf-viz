@@ -14,7 +14,7 @@
 //! previous region are applied (sorted). Region r is processed after region r+1 is committed
 //! (lookahead 1), by which time every event up to r's newest sample time has been applied.
 //! This assumes records are out of order by less than a region, which holds when a region spans
-//! many rounds (the default 128 MiB does; see `load-compare` and the region sweep in the notes).
+//! many rounds (the default 128 MiB does; see the many-regions test in `oracles::loaders`).
 //!
 //! Afterwards the workers' physical tries are merged, the unique (module, address) pairs are
 //! symbolized, and the physical trie is expanded into the final logical tries.

@@ -4,7 +4,7 @@
 //!   symbolize-spike ADDRS.tsv [--engine blazesym|addr2line] [--threads N,N,..] [--only SUBSTR] [--limit N]
 //!   symbolize-spike --synthetic ELF --count N [same flags]   (N pseudo-random addresses across the ELF's .text)
 //!
-//! ADDRS.tsv comes from `unwind-check --dump-addrs`: `path<TAB>svma-hex` per line.
+//! ADDRS.tsv has one `path<TAB>svma-hex` per line.
 //! Each thread builds its own symbolizer/loader over its slice of the sorted addresses
 //! (addr2line contexts are not `Sync`), so the setup cost is paid per thread; that is
 //! the trade-off being measured.

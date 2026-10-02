@@ -6,8 +6,11 @@
 //! parses each unit into `Stats` and the merged result must equal the baseline reader's.
 
 use std::{
-    path::PathBuf,
-    sync::atomic::{AtomicUsize, Ordering},
+    path::{Path, PathBuf},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
+    },
     time::Instant,
 };
 
@@ -126,6 +129,103 @@ impl std::fmt::Display for Mode {
     }
 }
 
+fn build_check(path: &Path) -> perf_bench::Result<impl Fn() -> Check> {
+    let header_file = std::fs::File::open(path)?;
+    let reader = PerfFileReader::parse_file(&header_file)?;
+    let endian = reader.perf_file.endian();
+    let attrs = reader.perf_file.event_attributes().to_vec();
+    Ok(move || Check {
+        ctx: Ctx::new(&attrs, endian).unwrap(),
+        big_endian: endian == linux_perf_event_reader::Endianness::BigEndian,
+        committed: AtomicUsize::new(0),
+        violations: AtomicUsize::new(0),
+        units_extracted: AtomicUsize::new(0),
+        seen: Default::default(),
+    })
+}
+
+fn spawn_monitor(progress: Arc<AtomicU64>, done: Arc<AtomicBool>) -> std::thread::JoinHandle<()> {
+    std::thread::spawn(move || {
+        let (started, mut last) = (Instant::now(), 0u64);
+        while !done.load(Ordering::Relaxed) {
+            std::thread::sleep(std::time::Duration::from_millis(500));
+            let now = progress.load(Ordering::Relaxed);
+            println!(
+                "  t={:5.1}s {:5.2} GB/s  (total {:.1} GB)",
+                started.elapsed().as_secs_f32(),
+                (now - last) as f64 / 0.5e9,
+                now as f64 / 1e9
+            );
+            last = now;
+        }
+    })
+}
+
+fn print_run_summary(
+    mode: Mode,
+    secs: f64,
+    size: f64,
+    config: &ordered::Config,
+    report: &ordered::Report,
+) {
+    let metrics = &report.metrics;
+    let ms = |duration: std::time::Duration| duration.as_secs_f64() * 1e3;
+    println!(
+        "{mode:<10}: {secs:.3}s ({:.2} GB/s) | {} regions ({} planned), plan {:.0}ms{} | {} units, {} MiB | max held units {} ({} MiB) | reader: read {:.0}ms wait-token {:.0}ms wait-buffer {:.0}ms | workers: extract {:.0}ms process {:.0}ms idle {:.0}ms",
+        size / secs / 1e9,
+        metrics.regions,
+        report.regions,
+        ms(report.plan_time),
+        if report.fell_back { ", FELL BACK" } else { "" },
+        metrics.units,
+        metrics.bytes >> 20,
+        metrics.max_held_units,
+        metrics.max_held_units * (config.block as u64 >> 20),
+        ms(metrics.reader_read),
+        ms(metrics.reader_wait_token),
+        ms(metrics.reader_wait_buffer),
+        ms(metrics.extract_busy),
+        ms(metrics.process_busy),
+        ms(metrics.worker_idle)
+    );
+}
+
+/// Prints each violated invariant; returns whether there were none.
+fn check_ordering(check: &Check, config: &ordered::Config, regions: u64) -> bool {
+    let mut ok = true;
+    let violations = check.violations.load(Ordering::SeqCst);
+    if violations != 0 {
+        println!("ORDERING VIOLATIONS: {violations}");
+        ok = false;
+    }
+    if check.committed.load(Ordering::SeqCst) as u64 != regions {
+        println!(
+            "committed {} regions but the run had {regions}",
+            check.committed.load(Ordering::SeqCst)
+        );
+        ok = false;
+    }
+    // The lookahead rule: a unit of region r runs once regions up to r + lookahead are committed,
+    // or all of them are (the last regions have nothing further to wait for).
+    let bad_lookahead = check
+        .seen
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|&&(region, committed)| {
+            committed < (region + 1 + config.lookahead).min(regions as usize)
+        })
+        .count();
+    if bad_lookahead != 0 {
+        println!(
+            "LOOKAHEAD VIOLATIONS: {bad_lookahead} units ran before regions up to r + {} were committed",
+            config.lookahead
+        );
+        ok = false;
+    }
+    ok
+}
+
 fn main() -> perf_bench::Result<()> {
     let cli = Cli::parse();
     let (path, trace, cold, verify, mode) =
@@ -138,49 +238,19 @@ fn main() -> perf_bench::Result<()> {
         lookahead: cli.lookahead,
         ..Default::default()
     };
-    let header_file = std::fs::File::open(&path)?;
-    let reader = PerfFileReader::parse_file(&header_file)?;
-    let (endian, attrs) = (
-        reader.perf_file.endian(),
-        reader.perf_file.event_attributes().to_vec(),
-    );
-    drop(reader);
-    let make = || Check {
-        ctx: Ctx::new(&attrs, endian).unwrap(),
-        big_endian: endian == linux_perf_event_reader::Endianness::BigEndian,
-        committed: AtomicUsize::new(0),
-        violations: AtomicUsize::new(0),
-        units_extracted: AtomicUsize::new(0),
-        seen: Default::default(),
-    };
-    let progress = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let make = build_check(&path)?;
+    let progress = Arc::new(AtomicU64::new(0));
     let options = ordered::Options {
         cold,
         corrupt_bound: mode == Mode::Corrupt,
         force_sequential: mode == Mode::Sequential,
         progress: trace.then(|| progress.clone()),
     };
-    let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let monitor = trace.then(|| {
-        let (progress, done) = (progress.clone(), done.clone());
-        std::thread::spawn(move || {
-            let (t0, mut last) = (Instant::now(), 0u64);
-            while !done.load(Ordering::Relaxed) {
-                std::thread::sleep(std::time::Duration::from_millis(500));
-                let now = progress.load(Ordering::Relaxed);
-                println!(
-                    "  t={:5.1}s {:5.2} GB/s  (total {:.1} GB)",
-                    t0.elapsed().as_secs_f32(),
-                    (now - last) as f64 / 0.5e9,
-                    now as f64 / 1e9
-                );
-                last = now;
-            }
-        })
-    });
+    let done = Arc::new(AtomicBool::new(false));
+    let monitor = trace.then(|| spawn_monitor(progress.clone(), done.clone()));
 
     let started = Instant::now();
-    let (check, locals, rep) = ordered::stream_ordered(&path, config, options, make)?;
+    let (check, locals, report) = ordered::stream_ordered(&path, config, options, make)?;
     let secs = started.elapsed().as_secs_f64();
     done.store(true, Ordering::Relaxed);
     if let Some(monitor_thread) = monitor {
@@ -190,64 +260,18 @@ fn main() -> perf_bench::Result<()> {
     for local in &locals {
         got.merge(local);
     }
-    let metrics = rep.metrics;
     let size = std::fs::metadata(&path)?.len() as f64;
-    let ms = |duration: std::time::Duration| duration.as_secs_f64() * 1e3;
-    println!(
-        "{mode:<10}: {secs:.3}s ({:.2} GB/s) | {} regions ({} planned), plan {:.0}ms{} | {} units, {} MiB | max held units {} ({} MiB) | reader: read {:.0}ms wait-token {:.0}ms wait-buffer {:.0}ms | workers: extract {:.0}ms process {:.0}ms idle {:.0}ms",
-        size / secs / 1e9,
-        metrics.regions,
-        rep.regions,
-        ms(rep.plan_time),
-        if rep.fell_back { ", FELL BACK" } else { "" },
-        metrics.units,
-        metrics.bytes >> 20,
-        metrics.max_held_units,
-        metrics.max_held_units * (config.block as u64 >> 20),
-        ms(metrics.reader_read),
-        ms(metrics.reader_wait_token),
-        ms(metrics.reader_wait_buffer),
-        ms(metrics.extract_busy),
-        ms(metrics.process_busy),
-        ms(metrics.worker_idle)
-    );
+    print_run_summary(mode, secs, size, &config, &report);
 
-    let mut ok = true;
-    let violations = check.violations.load(Ordering::SeqCst);
-    if violations != 0 {
-        println!("ORDERING VIOLATIONS: {violations}");
-        ok = false;
-    }
-    if check.committed.load(Ordering::SeqCst) as u64 != metrics.regions {
-        println!(
-            "committed {} regions but the run had {}",
-            check.committed.load(Ordering::SeqCst),
-            metrics.regions
-        );
-        ok = false;
-    }
-    // The lookahead rule: a unit of region r runs once regions up to r + lookahead are committed,
-    // or all of them are (the last regions have nothing further to wait for).
-    let bad_lookahead = check
-        .seen
-        .lock()
-        .unwrap()
-        .iter()
-        .filter(|&&(region, committed)| {
-            committed < (region + 1 + config.lookahead).min(metrics.regions as usize)
-        })
-        .count();
-    if bad_lookahead != 0 {
-        println!(
-            "LOOKAHEAD VIOLATIONS: {bad_lookahead} units ran before regions up to r + {} were committed",
-            config.lookahead
-        );
-        ok = false;
-    }
-    if verify && got != baseline::read_all(&path, false)? {
+    let mut ok = check_ordering(&check, &config, report.metrics.regions);
+    if verify {
         let want = baseline::read_all(&path, false)?;
-        println!("STATS DIFFER from the baseline reader:\n  ordered {got:?}\n  baseline {want:?}");
-        ok = false;
+        if got != want {
+            println!(
+                "STATS DIFFER from the baseline reader:\n  ordered {got:?}\n  baseline {want:?}"
+            );
+            ok = false;
+        }
     }
     println!(
         "{}",

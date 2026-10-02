@@ -55,6 +55,64 @@ enum Work {
     Noop,
 }
 
+/// A plain sequential read of the section, as the reference for the pipeline's checksum.
+fn reference_checksum(file: &std::fs::File, section: &split::DataSection) -> u64 {
+    use std::os::unix::fs::FileExt;
+    let mut buffer = vec![0u8; 1 << 24];
+    let (mut position, mut sum) = (0u64, 0u64);
+    while position < section.len {
+        let read_len = buffer.len().min((section.len - position) as usize);
+        file.read_exact_at(&mut buffer[..read_len], section.start + position)
+            .unwrap();
+        sum = sum.wrapping_add(pipeline::touch_all(&buffer[..read_len]));
+        position += read_len as u64;
+    }
+    sum
+}
+
+fn run_once(
+    file: &std::fs::File,
+    section: &split::DataSection,
+    config: pipeline::Config,
+    noop: bool,
+) -> perf_bench::Result<(u64, pipeline::Metrics)> {
+    let (states, metrics) = pipeline::run::<u64, _>(file, section, config, |state, buffer| {
+        *state = state.wrapping_add(if noop {
+            buffer.len() as u64
+        } else {
+            pipeline::touch_all(buffer)
+        });
+        Ok(())
+    })?;
+    let sum = states
+        .iter()
+        .fold(0u64, |total, &value| total.wrapping_add(value));
+    Ok((sum, metrics))
+}
+
+fn print_run(
+    config: &pipeline::Config,
+    iteration: usize,
+    secs: f64,
+    gb: f64,
+    metrics: &pipeline::Metrics,
+) {
+    let ms = |duration: std::time::Duration| duration.as_secs_f64() * 1e3;
+    println!(
+        "block {:>2}MiB evict {:?} workers {:>2} bufs {:>3} #{iteration}: {secs:7.3}s {:5.2} GB/s | reader: read {:7.0}ms, waiting-for-buffer {:7.0}ms | workers(sum): busy {:8.0}ms, waiting-for-data {:8.0}ms | {} units",
+        config.block >> 20,
+        config.evict,
+        config.workers,
+        config.buffers,
+        gb / secs,
+        ms(metrics.reader_read),
+        ms(metrics.reader_wait),
+        ms(metrics.worker_busy),
+        ms(metrics.worker_wait),
+        metrics.units
+    );
+}
+
 fn main() -> perf_bench::Result<()> {
     let Cli {
         path,
@@ -79,24 +137,12 @@ fn main() -> perf_bench::Result<()> {
     let gb = section.len as f64 / 1e9;
     println!("data section: {gb:.2} GB, cold={cold}");
 
-    let reference = verify.then(|| {
-        let mut buffer = vec![0u8; 1 << 24];
-        let (mut pos, mut sum) = (0u64, 0u64);
-        use std::os::unix::fs::FileExt;
-        while pos < section.len {
-            let read_len = buffer.len().min((section.len - pos) as usize);
-            file.read_exact_at(&mut buffer[..read_len], section.start + pos)
-                .unwrap();
-            sum = sum.wrapping_add(pipeline::touch_all(&buffer[..read_len]));
-            pos += read_len as u64;
-        }
-        sum
-    });
+    let reference = verify.then(|| reference_checksum(&file, &section));
 
     for &mb in &blocks {
         for &worker_count in &workers {
             for &ev in &evict {
-                for i in 0..iters {
+                for iteration in 0..iters {
                     if cold {
                         split::drop_cache(&file);
                     }
@@ -112,35 +158,9 @@ fn main() -> perf_bench::Result<()> {
                         readers: 1,
                     };
                     let started = Instant::now();
-                    let (sum, metrics) = {
-                        let (states, metrics) =
-                            pipeline::run::<u64, _>(&file, &section, config, |state, buffer| {
-                                *state = state.wrapping_add(if noop {
-                                    buffer.len() as u64
-                                } else {
-                                    pipeline::touch_all(buffer)
-                                });
-                                Ok(())
-                            })?;
-                        (
-                            states
-                                .iter()
-                                .fold(0u64, |total, &value| total.wrapping_add(value)),
-                            metrics,
-                        )
-                    };
+                    let (sum, metrics) = run_once(&file, &section, config, noop)?;
                     let secs = started.elapsed().as_secs_f64();
-                    let ms = |duration: std::time::Duration| duration.as_secs_f64() * 1e3;
-                    println!(
-                        "block {mb:>2}MiB evict {ev:?} workers {worker_count:>2} bufs {:>3} #{i}: {secs:7.3}s {:5.2} GB/s | reader: read {:7.0}ms, waiting-for-buffer {:7.0}ms | workers(sum): busy {:8.0}ms, waiting-for-data {:8.0}ms | {} units",
-                        config.buffers,
-                        gb / secs,
-                        ms(metrics.reader_read),
-                        ms(metrics.reader_wait),
-                        ms(metrics.worker_busy),
-                        ms(metrics.worker_wait),
-                        metrics.units
-                    );
+                    print_run(&config, iteration, secs, gb, &metrics);
                     assert_eq!(metrics.bytes, section.len, "not every byte was delivered");
                     if let (Some(reference_sum), false) = (reference, noop) {
                         assert_eq!(

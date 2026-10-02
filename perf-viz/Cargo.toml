@@ -25,7 +25,7 @@ rustc-hash = "2.1"
 toml = "1.1.6"
 serde = { version = "1.0.229", features = ["derive"] }
 rfd = "0.17.2"
-perf-bench = { version = "0.1.0", path = "../perf-bench" }
+perf-reader = { version = "0.1.0", path = "../perf-reader" }
 clap = { version = "4.6.7", features = ["derive"] }
 
 [features]

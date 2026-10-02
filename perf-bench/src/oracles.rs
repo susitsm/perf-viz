@@ -16,13 +16,13 @@ use std::{
 use byteorder::{BigEndian, LittleEndian};
 use linux_perf_data::PerfFileReader;
 
-use crate::{
-    Result, baseline,
-    fast::{Ctx, parse_chunk},
+use perf_reader::{
+    ctx::Ctx,
     ordered::{self, Config, Consumer, Options},
-    stats::Stats,
     synth,
 };
+
+use crate::{Result, baseline, fast::parse_chunk, stats::Stats};
 
 /// What `process` additionally does when the file is a real recording.
 struct Parser {

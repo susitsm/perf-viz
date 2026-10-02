@@ -16,5 +16,5 @@ linux-perf-data = "0.13"
 linux-perf-event-reader = "0.10.2"
 memmap2 = "0.9.11"
 object = "0.40.0"
-perf-bench = { path = "../perf-bench" }
+perf-reader = { path = "../perf-reader" }
 rustc-hash = "2.1.3"

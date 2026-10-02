@@ -2,11 +2,10 @@ use std::{path::PathBuf, time::Instant};
 
 use clap::Parser;
 
-use perf_bench::{
-    baseline, fast, piped,
+use perf_bench::{baseline, fast, piped, stats::Stats};
+use perf_reader::{
     pipeline::{Config, Evict},
     split,
-    stats::Stats,
 };
 
 /// Benchmark reading every record of a perf.data file with different readers; all of them must

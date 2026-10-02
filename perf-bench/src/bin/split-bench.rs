@@ -6,7 +6,8 @@ use std::{path::PathBuf, time::Instant};
 
 use clap::Parser;
 
-use perf_bench::{fast, split};
+use perf_bench::fast;
+use perf_reader::split;
 
 /// Benchmarks single-threaded exact chunking against a plain sequential read (or, with `--readers`,
 /// multi-stream read-only).

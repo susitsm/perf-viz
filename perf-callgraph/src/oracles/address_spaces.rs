@@ -5,7 +5,7 @@ use std::{collections::HashMap, fs::File, io::BufReader, path::Path};
 
 use linux_perf_data::{PerfFileReader, PerfFileRecord};
 use linux_perf_event_reader::{EventRecord, Mmap2Record, SampleRecord};
-use perf_bench::{
+use perf_reader::{
     pipeline::{Config, Evict},
     stream,
 };

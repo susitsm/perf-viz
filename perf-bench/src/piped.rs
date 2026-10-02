@@ -5,16 +5,11 @@ use std::path::Path;
 use byteorder::{BigEndian, LittleEndian};
 use linux_perf_data::PerfFileReader;
 
-use crate::{
-    Result,
-    fast::{Ctx, parse_chunk},
-    pipeline::Config,
-    split,
-    stats::Stats,
-    stream,
-};
+use perf_reader::{ctx::Ctx, pipeline::Config, split, stream};
 
-pub use crate::stream::Report;
+use crate::{Result, fast::parse_chunk, stats::Stats};
+
+pub use perf_reader::stream::Report;
 
 #[derive(Clone, Copy, Debug)]
 pub struct Options {

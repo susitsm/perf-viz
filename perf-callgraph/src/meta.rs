@@ -7,8 +7,8 @@ use std::path::Path;
 use byteorder::{BigEndian, LittleEndian};
 use linux_perf_data::PerfFileReader;
 use linux_perf_event_reader::EventRecord;
-use perf_bench::{
-    fast::Ctx,
+use perf_reader::{
+    ctx::Ctx,
     pipeline::Config,
     records::for_each_record,
     stream::{self, Report},
@@ -230,7 +230,7 @@ pub fn read_meta(
 /// An opened file with its parse ctx, shared by the passes.
 pub struct Source {
     pub file: std::fs::File,
-    pub section: perf_bench::split::DataSection,
+    pub section: perf_reader::split::DataSection,
     pub ctx: Ctx,
     /// What the first event's sample period counts: "cycles", "ns" or "events".
     pub period_unit: &'static str,
@@ -238,7 +238,7 @@ pub struct Source {
 
 impl Source {
     pub fn open(path: &Path) -> Result<Source> {
-        let (file, section) = perf_bench::split::open(path)?;
+        let (file, section) = perf_reader::split::open(path)?;
         let reader = PerfFileReader::parse_file(&file)?;
         let ctx = Ctx::new(
             reader.perf_file.event_attributes(),

@@ -1,6 +1,6 @@
 //! Measure the disk and find good reader settings. Only reads the file it is given.
 //!
-//! With `--synthetic` there is no recording to read: a synthetic one (see [`perf_bench::synth`]) is
+//! With `--synthetic` there is no recording to read: a synthetic one (see [`perf_reader::synth`]) is
 //! written first, tuned on, and deleted afterwards.
 //!
 //! Prints a `[reader]` table for the perf-viz config.
@@ -8,7 +8,7 @@
 use std::{path::PathBuf, sync::atomic::AtomicBool, time::Instant};
 
 use clap::Parser;
-use perf_bench::{
+use perf_reader::{
     synth,
     tune::{self, Event, Options},
 };
@@ -36,7 +36,7 @@ struct Cli {
     max_memory_mb: Option<u64>,
 }
 
-fn main() -> perf_bench::Result<()> {
+fn main() -> perf_reader::Result<()> {
     let cli = Cli::parse();
     // Kept alive until the end of main, which deletes a generated file.
     let _generated;

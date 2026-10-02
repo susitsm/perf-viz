@@ -1,5 +1,5 @@
 //! The reader tuner window: measures the disk, tries reader settings, and offers the best ones.
-//! The measuring itself is `perf_bench::tune`; this is the window around it.
+//! The measuring itself is `perf_reader::tune`; this is the window around it.
 
 use std::{
     path::{Path, PathBuf},
@@ -11,7 +11,7 @@ use std::{
 };
 
 use eframe::egui::{self, RichText, vec2};
-use perf_bench::{
+use perf_reader::{
     synth,
     tune::{self, Event, Report, Settings},
 };

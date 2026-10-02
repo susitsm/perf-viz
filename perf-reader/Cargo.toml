@@ -1,0 +1,16 @@
+[package]
+name = "perf-reader"
+version = "0.1.0"
+edition = "2024"
+
+[lints]
+workspace = true
+
+[dependencies]
+byteorder = "1.5.0"
+clap = { version = "4.6.7", features = ["derive"] }
+crossbeam-channel = "0.5.17"
+libc = "0.2.189"
+linux-perf-data = "0.13.0"
+linux-perf-event-reader = "0.10.2"
+rustc-hash = "2.1.3"

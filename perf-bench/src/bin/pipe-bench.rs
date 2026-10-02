@@ -4,7 +4,7 @@ use std::{path::PathBuf, time::Instant};
 
 use clap::{Parser, ValueEnum};
 
-use perf_bench::{
+use perf_reader::{
     pipeline::{self, Evict},
     split,
 };

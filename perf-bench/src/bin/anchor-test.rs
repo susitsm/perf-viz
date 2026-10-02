@@ -7,7 +7,7 @@ use std::{path::PathBuf, time::Instant};
 
 use clap::Parser;
 
-use perf_bench::{
+use perf_reader::{
     anchor::{self, Kind},
     split,
 };

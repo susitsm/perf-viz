@@ -3,13 +3,13 @@
 use std::collections::HashSet;
 
 use eframe::egui::{self};
-use perf_callgraph::model::{Profile, ROOT, Trie};
+use perf_callgraph::model::ROOT;
 
 use super::{
-    BuRow, FuncId, Functions, NodeCounts, RowsKey, noun,
+    BuRow, FuncId, RowsKey, ViewContext, ViewData, noun,
     table::{self, Arrow, Click, Columns, RowData},
 };
-use crate::{fmt::Cost, views};
+use crate::views;
 
 /// State of the bottom-up tree. Rows are identified by the function path from the first level.
 #[derive(Default)]
@@ -22,20 +22,27 @@ pub(crate) struct BuState {
 }
 
 /// The bottom-up tree: functions ranked by self cost; expanding one shows who called it.
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn draw_bottom_up(
     ui: &mut egui::Ui,
-    profile: &Profile,
-    funcs: &Functions,
-    trie: &Trie,
-    totals: &NodeCounts,
-    selfs: &NodeCounts,
-    cost: Cost,
-    query: &str,
+    context: &ViewContext<'_>,
+    data: &ViewData<'_>,
     state: &mut BuState,
-    view: usize,
-    version: u64,
 ) {
+    let ViewContext {
+        profile,
+        trie,
+        view,
+        cost,
+        ..
+    } = *context;
+    let ViewData {
+        funcs,
+        totals,
+        selfs,
+        query,
+        version,
+        ..
+    } = *data;
     ui.horizontal(|ui| {
         if ui.button("Collapse all").clicked() {
             state.expanded.clear();

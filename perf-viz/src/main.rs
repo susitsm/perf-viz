@@ -28,7 +28,7 @@ use crate::{
     theme::Pal,
     tuner::Tuner,
     views::{
-        Functions, NodeCounts, ViewContext,
+        Functions, NodeCounts, ViewContext, ViewData,
         bottom_up::BuState,
         caller_callee::CcState,
         flame::{ItemsKey, ScrollKey},
@@ -1321,55 +1321,24 @@ impl App {
         view_context: &ViewContext<'_>,
         timeline_actions: &mut Vec<timeline::Action>,
     ) {
-        let ViewContext {
-            profile,
-            trie,
-            view,
-            cost,
-            searching,
-            ..
-        } = *view_context;
         let query = self.search.to_lowercase();
-        let funcs = self.funcs.as_ref().expect("set when the profile arrived");
+        let data = ViewData {
+            funcs: self.funcs.as_ref().expect("set when the profile arrived"),
+            totals: &self.totals,
+            selfs: &self.selfs,
+            costs: &self.costs,
+            matches: &self.matches,
+            query: &query,
+            version: self.totals_version,
+        };
         match self.tab {
-            Tab::TopDown => views::top_down::draw_top_down(
-                ui,
-                profile,
-                trie,
-                &self.totals,
-                &self.selfs,
-                cost,
-                &self.matches,
-                searching,
-                &mut self.td,
-                view,
-                self.totals_version,
-            ),
-            Tab::BottomUp => views::bottom_up::draw_bottom_up(
-                ui,
-                profile,
-                funcs,
-                trie,
-                &self.totals,
-                &self.selfs,
-                cost,
-                &query,
-                &mut self.bu,
-                view,
-                self.totals_version,
-            ),
-            Tab::CallerCallee => views::caller_callee::draw_caller_callee(
-                ui,
-                profile,
-                funcs,
-                trie,
-                &self.totals,
-                &self.costs,
-                cost,
-                &query,
-                &mut self.cc,
-                self.totals_version,
-            ),
+            Tab::TopDown => views::top_down::draw_top_down(ui, view_context, &data, &mut self.td),
+            Tab::BottomUp => {
+                views::bottom_up::draw_bottom_up(ui, view_context, &data, &mut self.bu)
+            }
+            Tab::CallerCallee => {
+                views::caller_callee::draw_caller_callee(ui, view_context, &data, &mut self.cc)
+            }
             Tab::Timeline => self.draw_timeline_tab(ui, view_context, timeline_actions),
             Tab::Summary => self.draw_summary_tab(ui, view_context),
             Tab::FlameGraph => self.draw_flame_graph(ui, view_context),

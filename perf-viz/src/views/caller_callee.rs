@@ -4,7 +4,7 @@ use eframe::egui::{self};
 use perf_callgraph::model::{Profile, ROOT, Trie};
 
 use super::{
-    FuncId, Functions, NodeCounts, Weighted, func_row, noun,
+    FuncId, Functions, NodeCounts, ViewContext, ViewData, Weighted, func_row, noun,
     table::{self, Click, Columns},
 };
 use crate::{fmt::Cost, views};
@@ -156,19 +156,26 @@ pub(crate) fn draw_call_lists_panel(
 }
 
 /// Every function with its inclusive and self cost; selecting one lists its callers and callees below.
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn draw_caller_callee(
     ui: &mut egui::Ui,
-    profile: &Profile,
-    funcs: &Functions,
-    trie: &Trie,
-    totals: &NodeCounts,
-    costs: &views::Costs,
-    cost: Cost,
-    query: &str,
+    context: &ViewContext<'_>,
+    data: &ViewData<'_>,
     state: &mut CcState,
-    version: u64,
 ) {
+    let ViewContext {
+        profile,
+        trie,
+        cost,
+        ..
+    } = *context;
+    let ViewData {
+        funcs,
+        totals,
+        costs,
+        query,
+        version,
+        ..
+    } = *data;
     refresh_call_lists(state, trie, totals, funcs, version);
     let mut next = draw_call_lists_panel(ui, profile, funcs, costs, cost, state);
 

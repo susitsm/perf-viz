@@ -455,6 +455,19 @@ pub(crate) struct ViewContext<'a> {
     pub(crate) pal: Pal,
 }
 
+/// The loaded functions and per-node counts the views read this frame.
+pub(crate) struct ViewData<'a> {
+    pub(crate) funcs: &'a Functions,
+    pub(crate) totals: &'a NodeCounts,
+    pub(crate) selfs: &'a NodeCounts,
+    pub(crate) costs: &'a Costs,
+    pub(crate) matches: &'a IndexVec<FrameId, bool>,
+    /// The search text, lower-case.
+    pub(crate) query: &'a str,
+    /// Bumped whenever `totals` changes, so a view can tell its cached rows are stale.
+    pub(crate) version: u64,
+}
+
 /// The name of what a cost counts: samples, or the profile's event unit (cycles, ns, ...).
 pub(crate) fn noun(profile: &Profile, cost: Cost) -> &str {
     match cost {

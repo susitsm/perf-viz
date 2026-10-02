@@ -3,16 +3,13 @@
 use std::collections::HashSet;
 
 use eframe::egui::{self};
-use perf_callgraph::{
-    index::IndexVec,
-    model::{FrameId, NodeId, Profile, ROOT, Trie},
-};
+use perf_callgraph::model::{NodeId, ROOT};
 
 use super::{
-    NodeCounts, RowsKey, TdRow,
+    RowsKey, TdRow, ViewContext, ViewData,
     table::{self, Arrow, Click, Columns, RowData},
 };
-use crate::{fmt::Cost, views};
+use crate::views;
 
 /// State of the top-down tree. Node ids differ between the full and truncated tries, so per view.
 #[derive(Default)]
@@ -27,27 +24,14 @@ pub(crate) struct TdState {
     selected: [Option<NodeId>; 2],
 }
 
-/// The top-down call tree: every frame with inclusive and self cost, heaviest first.
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn draw_top_down(
+/// The buttons that set which nodes are expanded.
+fn draw_toolbar(
     ui: &mut egui::Ui,
-    profile: &Profile,
-    trie: &Trie,
-    totals: &NodeCounts,
-    selfs: &NodeCounts,
-    cost: Cost,
-    matches: &IndexVec<FrameId, bool>,
-    searching: bool,
+    context: &ViewContext<'_>,
+    data: &ViewData<'_>,
     state: &mut TdState,
-    view: usize,
-    version: u64,
 ) {
-    // Until the user has chosen, show the hottest path expanded, as a useful starting point.
-    if !state.touched[view] {
-        state.expanded[view] = views::hottest_path(trie, totals, 0.3).into_iter().collect();
-        state.touched[view] = true;
-        state.version += 1;
-    }
+    let (trie, view, totals) = (context.trie, context.view, data.totals);
     ui.horizontal(|ui| {
         if ui.button("Collapse all").clicked() {
             state.expanded[view].clear();
@@ -66,6 +50,37 @@ pub(crate) fn draw_top_down(
             state.rows.len()
         ));
     });
+}
+
+/// The top-down call tree: every frame with inclusive and self cost, heaviest first.
+pub(crate) fn draw_top_down(
+    ui: &mut egui::Ui,
+    context: &ViewContext<'_>,
+    data: &ViewData<'_>,
+    state: &mut TdState,
+) {
+    let ViewContext {
+        profile,
+        trie,
+        view,
+        cost,
+        searching,
+        ..
+    } = *context;
+    let ViewData {
+        totals,
+        selfs,
+        matches,
+        version,
+        ..
+    } = *data;
+    // Until the user has chosen, show the hottest path expanded, as a useful starting point.
+    if !state.touched[view] {
+        state.expanded[view] = views::hottest_path(trie, totals, 0.3).into_iter().collect();
+        state.touched[view] = true;
+        state.version += 1;
+    }
+    draw_toolbar(ui, context, data, state);
     let key = RowsKey {
         view,
         data_version: version,

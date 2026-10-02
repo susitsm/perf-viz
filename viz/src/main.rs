@@ -1766,18 +1766,11 @@ fn func_row<'a>(
     }
 }
 
-/// Every function with its inclusive and self cost; selecting one lists its callers and callees below.
-#[allow(clippy::too_many_arguments)]
-fn draw_caller_callee(
-    ui: &mut egui::Ui,
-    profile: &Profile,
-    funcs: &Functions,
+fn refresh_call_lists(
+    state: &mut CcState,
     trie: &Trie,
     totals: &[u64],
-    costs: &views::Costs,
-    cost: Cost,
-    query: &str,
-    state: &mut CcState,
+    funcs: &Functions,
     version: u64,
 ) {
     if let Some(func) = state.selected
@@ -1793,74 +1786,116 @@ fn draw_caller_callee(
             callees: views::callees_of(trie, totals, funcs, func),
         });
     }
-    let mut next: Option<u32> = None;
+}
 
+/// One side of the call lists: a table of related functions; returns the one clicked.
+fn draw_related_functions(
+    ui: &mut egui::Ui,
+    profile: &Profile,
+    funcs: &Functions,
+    (title, name): (&str, &str),
+    related: &[Weighted],
+    (cost, inclusive): (Cost, u64),
+) -> Option<u32> {
+    ui.strong(title);
+    let click = table::draw(
+        ui,
+        &Columns {
+            unit: cost,
+            name,
+            cost: "Cost",
+            self_cost: None,
+            sort: None,
+        },
+        related.len(),
+        inclusive,
+        |i| func_row(profile, funcs, related[i].id, related[i].cost, None, false),
+    );
+    match click {
+        Some(Click::Select(i) | Click::Toggle(i)) => Some(related[i].id),
+        _ => None,
+    }
+}
+
+/// The callers and callees of the selected function, in a panel below the function list.
+/// Returns the function clicked in either list.
+fn draw_call_lists_panel(
+    ui: &mut egui::Ui,
+    profile: &Profile,
+    funcs: &Functions,
+    costs: &views::Costs,
+    cost: Cost,
+    state: &CcState,
+) -> Option<u32> {
+    let mut next = None;
     egui::Panel::bottom("cc_lists")
         .resizable(true)
         .default_size(250.0)
         .min_size(100.0)
-        .show(ui, |ui| match (&state.selected, &state.lists) {
-            (
-                Some(func),
-                Some(CallLists {
-                    callers, callees, ..
-                }),
-            ) => {
-                let (name, incl) = (
-                    &funcs.funcs[*func as usize].name,
-                    costs.inclusive[*func as usize],
-                );
-                ui.horizontal(|ui| {
-                    ui.strong(name.chars().take(90).collect::<String>());
-                    ui.weak(format!(
-                        "inclusive {}, self {} {}; percentages are of the inclusive cost",
-                        cost.format(incl),
-                        cost.format(costs.self_[*func as usize]),
-                        noun(profile, cost)
-                    ));
-                });
-                ui.columns(2, |cols| {
-                    cols[0].strong("Callers (click to select)");
-                    let click = table::draw(
-                        &mut cols[0],
-                        &Columns {
-                            unit: cost,
-                            name: "Caller",
-                            cost: "Cost",
-                            self_cost: None,
-                            sort: None,
-                        },
-                        callers.len(),
-                        incl,
-                        |i| func_row(profile, funcs, callers[i].id, callers[i].cost, None, false),
-                    );
-                    if let Some(Click::Select(i) | Click::Toggle(i)) = click {
-                        next = Some(callers[i].id);
-                    }
-                    cols[1].strong("Callees (click to select)");
-                    let click = table::draw(
-                        &mut cols[1],
-                        &Columns {
-                            unit: cost,
-                            name: "Callee",
-                            cost: "Cost",
-                            self_cost: None,
-                            sort: None,
-                        },
-                        callees.len(),
-                        incl,
-                        |i| func_row(profile, funcs, callees[i].id, callees[i].cost, None, false),
-                    );
-                    if let Some(Click::Select(i) | Click::Toggle(i)) = click {
-                        next = Some(callees[i].id);
-                    }
-                });
-            }
-            _ => {
+        .show(ui, |ui| {
+            let (Some(func), Some(lists)) = (&state.selected, &state.lists) else {
                 ui.add_space(8.0);
                 ui.weak("Select a function above to see who calls it and what it calls.");
-            }
+                return;
+            };
+            let inclusive = costs.inclusive[*func as usize];
+            ui.horizontal(|ui| {
+                ui.strong(
+                    funcs.funcs[*func as usize]
+                        .name
+                        .chars()
+                        .take(90)
+                        .collect::<String>(),
+                );
+                ui.weak(format!(
+                    "inclusive {}, self {} {}; percentages are of the inclusive cost",
+                    cost.format(inclusive),
+                    cost.format(costs.self_[*func as usize]),
+                    noun(profile, cost)
+                ));
+            });
+            ui.columns(2, |columns| {
+                let scale = (cost, inclusive);
+                let callers = ("Callers (click to select)", "Caller");
+                let callees = ("Callees (click to select)", "Callee");
+                let clicked_caller = draw_related_functions(
+                    &mut columns[0],
+                    profile,
+                    funcs,
+                    callers,
+                    &lists.callers,
+                    scale,
+                );
+                let clicked_callee = draw_related_functions(
+                    &mut columns[1],
+                    profile,
+                    funcs,
+                    callees,
+                    &lists.callees,
+                    scale,
+                );
+                next = clicked_callee.or(clicked_caller);
+            });
         });
+    next
+}
+
+/// Every function with its inclusive and self cost; selecting one lists its callers and callees below.
+#[allow(clippy::too_many_arguments)]
+fn draw_caller_callee(
+    ui: &mut egui::Ui,
+    profile: &Profile,
+    funcs: &Functions,
+    trie: &Trie,
+    totals: &[u64],
+    costs: &views::Costs,
+    cost: Cost,
+    query: &str,
+    state: &mut CcState,
+    version: u64,
+) {
+    refresh_call_lists(state, trie, totals, funcs, version);
+    let mut next = draw_call_lists_panel(ui, profile, funcs, costs, cost, state);
 
     ui.horizontal(|ui| {
         ui.weak(format!("{} functions; click the Inclusive or Self header to sort; the search box filters by name", state.list.len()));

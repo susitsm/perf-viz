@@ -12,9 +12,17 @@ use std::{
 
 use perf_profile::model::{Profile, ROOT, Trie};
 
+use crate::{fmt::Cost, theme::Pal};
+use table::{Arrow, RowData};
+
+pub mod bottom_up;
+pub mod caller_callee;
+pub mod flame;
 pub mod flame_layout;
+pub mod summary;
 pub mod table;
 pub mod timeline;
+pub mod top_down;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Func {
@@ -388,6 +396,59 @@ pub fn module_self_costs(funcs: &Functions, costs: &Costs) -> Vec<Weighted> {
         }
     }
     ranked(cost_by_module)
+}
+
+/// What a tree's visible rows were built for: the view (full or truncated tree), the data version
+/// and the expansion version.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) struct RowsKey {
+    view: usize,
+    data_version: u64,
+    expansion_version: u64,
+}
+
+/// What the views drawn in one frame share.
+pub(crate) struct ViewContext<'a> {
+    pub(crate) profile: &'a Profile,
+    pub(crate) trie: &'a Trie,
+    pub(crate) view: usize,
+    pub(crate) cost: Cost,
+    /// What the cost counts, for captions.
+    pub(crate) unit: &'a str,
+    pub(crate) filtered: bool,
+    pub(crate) searching: bool,
+    pub(crate) pal: Pal,
+}
+
+/// The name of what a cost counts: samples, or the profile's event unit (cycles, ns, ...).
+pub(crate) fn noun(profile: &Profile, cost: Cost) -> &str {
+    match cost {
+        Cost::Samples => "samples",
+        Cost::Cycles => &profile.stats.period_unit,
+    }
+}
+
+/// A table row for a function with a cost, with no tree structure.
+pub(crate) fn func_row<'a>(
+    profile: &'a Profile,
+    funcs: &'a Functions,
+    func: u32,
+    cost: u64,
+    self_cost: Option<u64>,
+    selected: bool,
+) -> RowData<'a> {
+    let func = &funcs.funcs[func as usize];
+    RowData {
+        depth: 0,
+        arrow: Arrow::None,
+        name: &func.name,
+        module: profile.module_name(func.module),
+        cost,
+        self_cost,
+        highlight: false,
+        suspect: false,
+        selected,
+    }
 }
 
 #[cfg(test)]

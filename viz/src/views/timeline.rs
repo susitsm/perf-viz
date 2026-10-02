@@ -5,9 +5,11 @@
 use std::{collections::HashMap, ops::Range};
 
 use eframe::egui::{self, Align2, Color32, FontId, Rect, Sense, Stroke, pos2, vec2};
-use perf_profile::model::Profile;
+use perf_profile::model::{Profile, ROOT};
 
+use super::ViewContext;
 use crate::{
+    App,
     filter::{Filter, weight},
     fmt::{self, Cost},
     theme::Pal,
@@ -599,6 +601,134 @@ pub fn draw(ui: &mut egui::Ui, options: &Options<'_>, drag: &mut Option<XDrag>) 
         draw_lanes(ui, &frame, bin_ns, drag, &mut actions);
     }
     actions
+}
+
+/// Width of the label column left of the timeline's plot, shared by the strip and the lanes.
+pub(crate) const TL_LABEL_W: f32 = 200.0;
+
+/// The timeline's data, for the filter, bin count and cost it was built for.
+pub(crate) struct TimelineCache {
+    filter: Filter,
+    bins: usize,
+    cost: Cost,
+    timeline: Timeline,
+}
+
+/// What the timeline shows as selected: the time range and the thread.
+pub(crate) struct TimelineSelection {
+    range: Option<TimeRange>,
+    /// The cost inside the range, for the caption.
+    shown_total: u64,
+    selected_tid: Option<i32>,
+}
+
+pub(crate) fn timeline_options<'a>(
+    cache: &'a TimelineCache,
+    selection: TimelineSelection,
+    view_context: &ViewContext<'a>,
+    strip_h: f32,
+    show_lanes: bool,
+) -> Options<'a> {
+    let TimelineSelection {
+        range,
+        shown_total,
+        selected_tid,
+    } = selection;
+    Options {
+        timeline_data: &cache.timeline,
+        range,
+        samples_in_range: range.map(|_| shown_total),
+        cost: view_context.cost,
+        noun: view_context.unit,
+        strip_h,
+        show_lanes,
+        comm: &view_context.profile.comm,
+        selected_tid,
+        label_w: TL_LABEL_W,
+    }
+}
+
+impl App {
+    pub(crate) fn refresh_timeline(
+        &mut self,
+        ui: &egui::Ui,
+        view_context: &ViewContext<'_>,
+        filter: Filter,
+    ) {
+        let bins = (((ui.available_width() - TL_LABEL_W - 10.0) / 2.0).max(60.0)) as usize;
+        let cost = view_context.cost;
+        let current = self.timeline_data.as_ref().is_some_and(|cache| {
+            cache.filter == filter && cache.bins == bins && cache.cost == cost
+        });
+        if !current {
+            self.timeline_data = Some(TimelineCache {
+                filter,
+                bins,
+                cost,
+                timeline: build(view_context.profile, filter, bins, 12, cost),
+            });
+        }
+    }
+
+    pub(crate) fn draw_timeline_strip(
+        &mut self,
+        ui: &mut egui::Ui,
+        view_context: &ViewContext<'_>,
+    ) -> Vec<Action> {
+        egui::Panel::top("timeline_strip")
+            .show(ui, |ui| {
+                let options = timeline_options(
+                    self.timeline_data.as_ref().unwrap(),
+                    TimelineSelection {
+                        range: self.range,
+                        shown_total: self.totals[ROOT as usize],
+                        selected_tid: self.sel_tid,
+                    },
+                    view_context,
+                    44.0,
+                    false,
+                );
+                draw(ui, &options, &mut self.drag)
+            })
+            .inner
+    }
+
+    pub(crate) fn apply_timeline_actions(&mut self, actions: Vec<Action>) {
+        for action in actions {
+            match action {
+                Action::SetRange(range) => self.range = Some(range),
+                Action::ClearRange => self.range = None,
+                Action::SelectThread { pid, tid } => {
+                    self.sel_pid = Some(pid);
+                    self.sel_tid = Some(tid);
+                }
+            }
+        }
+    }
+
+    pub(crate) fn draw_timeline_tab(
+        &mut self,
+        ui: &mut egui::Ui,
+        view_context: &ViewContext<'_>,
+        timeline_actions: &mut Vec<Action>,
+    ) {
+        let options = timeline_options(
+            self.timeline_data.as_ref().unwrap(),
+            TimelineSelection {
+                range: self.range,
+                shown_total: self.totals[ROOT as usize],
+                selected_tid: self.sel_tid,
+            },
+            view_context,
+            96.0,
+            true,
+        );
+        let actions = egui::ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .show(ui, |ui| draw(ui, &options, &mut self.drag))
+            .inner;
+        timeline_actions.extend(actions);
+    }
 }
 
 #[cfg(test)]

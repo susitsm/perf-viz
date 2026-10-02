@@ -3,6 +3,7 @@
 
 mod address_spaces;
 mod loaders;
+mod unwinding;
 
 use std::path::{Path, PathBuf};
 

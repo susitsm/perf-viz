@@ -33,7 +33,7 @@ use byteorder::LittleEndian;
 use crate::{
     Result, anchor,
     readers::ordered::{self, Config, Consumer},
-    records, split,
+    split,
     split::DataSection,
 };
 
@@ -289,7 +289,7 @@ impl Consumer for Walk {
     type Events = ();
 
     fn extract(&self, _region: usize, local: &mut u64, buffer: &[u8]) -> Result<()> {
-        records::for_each_record::<LittleEndian>(buffer, |_| {
+        crate::for_each_record::<LittleEndian>(buffer, |_| {
             *local += 1;
             Ok(())
         })

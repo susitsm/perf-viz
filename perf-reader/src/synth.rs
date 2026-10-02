@@ -163,7 +163,7 @@ impl Drop for Temp {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{records, split};
+    use crate::split;
 
     fn temp(tag: &str) -> Temp {
         Temp(std::env::temp_dir().join(format!("synth-{tag}-{}.data", std::process::id())))
@@ -179,7 +179,7 @@ mod tests {
         let mut buffer = vec![0u8; section.len as usize];
         std::os::unix::fs::FileExt::read_exact_at(&file, &mut buffer, section.start).unwrap();
         let (mut samples, mut other) = (0, 0);
-        records::for_each_record::<LittleEndian>(&buffer, |record| {
+        crate::for_each_record::<LittleEndian>(&buffer, |record| {
             if record.ty == PERF_RECORD_SAMPLE {
                 samples += 1
             } else {

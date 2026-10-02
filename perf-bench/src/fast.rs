@@ -16,7 +16,7 @@ use linux_perf_data::PerfFileReader;
 use linux_perf_event_reader::{Endianness, RecordType};
 use memmap2::Mmap;
 
-use perf_reader::{Ctx, records::for_each_record};
+use perf_reader::{Ctx, for_each_record};
 
 use crate::{Result, stats::Stats};
 

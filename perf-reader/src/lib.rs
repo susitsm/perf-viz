@@ -10,11 +10,10 @@
 //!   mmap records goes through here, so the guessing/verification/fallback logic exists once.
 //! - [`tune`] and [`synth`]: measure the disk and pick reader settings, on the recording or on a
 //!   generated one.
-//! - [`records`] and [`Ctx`]: walk records and parse kernel events.
+//! - [`for_each_record`] and [`Ctx`]: walk records and parse kernel events.
 
 pub mod anchor;
 pub mod readers;
-pub mod records;
 pub mod split;
 pub mod synth;
 pub mod tune;
@@ -196,4 +195,47 @@ impl Ctx {
         };
         RawEventRecord::new(record_type, misc, data, self.parse_infos[attr_index])
     }
+}
+
+const HEADER_LEN: usize = 8;
+const PERF_RECORD_FINISHED_ROUND: u32 = 68;
+const PERF_RECORD_AUXTRACE: u32 = 71;
+
+/// One record: its header fields and the bytes after the 8-byte header.
+pub struct Record<'a> {
+    pub ty: u32,
+    pub misc: u16,
+    /// Total size including the header.
+    pub size: usize,
+    pub body: &'a [u8],
+}
+
+/// Call `f` for every record in `chunk` (which must be made of whole records).
+/// `PERF_RECORD_FINISHED_ROUND` markers are skipped, as the stock reader does, and the payload
+/// that follows an `AUXTRACE` record is stepped over.
+pub fn for_each_record<T: ByteOrder>(
+    chunk: &[u8],
+    mut on_record: impl FnMut(Record<'_>) -> Result<()>,
+) -> Result<()> {
+    let mut off = 0;
+    while off < chunk.len() {
+        let ty = T::read_u32(&chunk[off..]);
+        let misc = T::read_u16(&chunk[off + 4..]);
+        let size = T::read_u16(&chunk[off + 6..]) as usize;
+        let body = &chunk[off + HEADER_LEN..off + size];
+        off += size;
+        if ty == PERF_RECORD_AUXTRACE {
+            off += T::read_u64(body) as usize;
+        }
+        if ty == PERF_RECORD_FINISHED_ROUND {
+            continue;
+        }
+        on_record(Record {
+            ty,
+            misc,
+            size,
+            body,
+        })?;
+    }
+    Ok(())
 }

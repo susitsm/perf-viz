@@ -24,8 +24,8 @@ use std::{
 use byteorder::{BigEndian, ByteOrder, LittleEndian};
 use linux_perf_event_reader::EventRecord;
 use perf_reader::{
+    for_each_record,
     readers::pipeline::{Config, Evict},
-    records::for_each_record,
 };
 
 use crate::{

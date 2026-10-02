@@ -29,9 +29,8 @@ use std::{
 use byteorder::{BigEndian, ByteOrder, LittleEndian};
 use linux_perf_event_reader::EventRecord;
 use perf_reader::{
-    Ctx,
+    Ctx, for_each_record,
     readers::ordered::{self, Consumer},
-    records::for_each_record,
 };
 use rustc_hash::FxHashMap;
 

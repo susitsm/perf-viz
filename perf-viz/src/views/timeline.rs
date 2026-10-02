@@ -724,6 +724,7 @@ impl App {
             true,
         );
         let actions = egui::ScrollArea::vertical()
+            .id_salt("timeline_scroll")
             .auto_shrink([false, false])
             .show(ui, |ui| draw(ui, &options, &mut self.drag))
             .inner;

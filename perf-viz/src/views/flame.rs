@@ -20,6 +20,26 @@ pub(crate) struct ItemsKey {
     totals_version: u64,
 }
 
+/// Where the flame graph is scrolled to. The app keeps it, because egui drops the scroll state of a
+/// tab that is not drawn, which sent the graph back to its start after a visit to another tab.
+pub(crate) struct FlameScroll {
+    /// The view the position belongs to; another view starts scrolled down to the root.
+    pub(crate) key: Option<ScrollKey>,
+    pub(crate) offset: f32,
+    /// Set the offset on the next draw (a new view, or coming back from another tab).
+    pub(crate) restore: bool,
+}
+
+impl Default for FlameScroll {
+    fn default() -> Self {
+        Self {
+            key: None,
+            offset: 0.0,
+            restore: true,
+        }
+    }
+}
+
 /// The view the flame graph's scroll position was last set for.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) struct ScrollKey {
@@ -113,6 +133,7 @@ impl App {
         // must start scrolled down to the root. `stick_to_bottom` only keeps an offset that is already at
         // the bottom, so the offset is set whenever the view changes (a new file, zoom, filter, tree).
         let mut area = egui::ScrollArea::vertical()
+            .id_salt("flame_scroll")
             .stick_to_bottom(true)
             .auto_shrink([false, false]);
         let scroll_key = ScrollKey {
@@ -120,15 +141,22 @@ impl App {
             focus,
             totals_version: self.totals_version,
         };
-        if self.flame_scroll_key != Some(scroll_key) {
-            area = area.vertical_scroll_offset((content_height - available.y).max(0.0));
-            self.flame_scroll_key = Some(scroll_key);
+        if self.flame_scroll.key != Some(scroll_key) {
+            self.flame_scroll = FlameScroll {
+                key: Some(scroll_key),
+                offset: (content_height - available.y).max(0.0),
+                restore: true,
+            };
         }
-        let clicked_node = area
-            .show(ui, |ui| {
-                self.draw_flame_boxes(ui, view_context, width, content_height)
-            })
-            .inner;
+        if self.flame_scroll.restore {
+            area = area.vertical_scroll_offset(self.flame_scroll.offset);
+            self.flame_scroll.restore = false;
+        }
+        let output = area.show(ui, |ui| {
+            self.draw_flame_boxes(ui, view_context, width, content_height)
+        });
+        self.flame_scroll.offset = output.state.offset.y;
+        let clicked_node = output.inner;
         if let Some(node) = clicked_node {
             self.focus[view] = node;
         }

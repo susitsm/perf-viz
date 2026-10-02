@@ -76,7 +76,7 @@ pub(crate) fn draw_summary(
     } = scope;
     let mut nav = None;
     let state = &profile.stats;
-    egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+    egui::ScrollArea::vertical().id_salt("summary_scroll").auto_shrink([false, false]).show(ui, |ui| {
         ui.add_space(6.0);
         ui.heading("Summary");
         ui.add_space(4.0);
@@ -109,7 +109,7 @@ pub(crate) fn draw_summary(
         let top: Vec<FuncId> = views::ranked_functions(costs, funcs, views::SortBy::Self_, "").into_iter().take(12).collect();
         let height = (top.len() + 1) as f32 * table::ROW_H + 6.0;
         let click = ui
-            .allocate_ui(vec2(ui.available_width(), height), |ui| table::draw(ui, &Columns { unit: cost, name: "Function", cost: "Self", self_cost: Some("Inclusive"), sort: None }, top.len(), total, |i| func_row(profile, funcs, top[i], costs.self_[top[i]], Some(costs.inclusive[top[i]]), false)))
+            .allocate_ui(vec2(ui.available_width(), height), |ui| table::draw(ui, &Columns { id: "hotspots_table", unit: cost, name: "Function", cost: "Self", self_cost: Some("Inclusive"), sort: None }, top.len(), total, |i| func_row(profile, funcs, top[i], costs.self_[top[i]], Some(costs.inclusive[top[i]]), false)))
             .inner;
         if let Some(Click::Select(i) | Click::Toggle(i)) = click {
             nav = Some(top[i]);
@@ -119,7 +119,7 @@ pub(crate) fn draw_summary(
         let mods: Vec<Weighted<Option<ModuleId>>> = views::module_self_costs(funcs, costs).into_iter().take(10).collect();
         let height = (mods.len() + 1) as f32 * table::ROW_H + 6.0;
         ui.allocate_ui(vec2(ui.available_width(), height), |ui| {
-            table::draw(ui, &Columns { unit: cost, name: "Module", cost: "Self", self_cost: None, sort: None }, mods.len(), total, |i| RowData {
+            table::draw(ui, &Columns { id: "modules_table", unit: cost, name: "Module", cost: "Self", self_cost: None, sort: None }, mods.len(), total, |i| RowData {
                 depth: 0,
                 arrow: Arrow::None,
                 name: profile.module_name(mods[i].id),

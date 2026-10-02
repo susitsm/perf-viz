@@ -95,6 +95,7 @@ pub(crate) fn draw_top_down(
     let action = table::draw(
         ui,
         &Columns {
+            id: "top_down_table",
             unit: cost,
             name: "Function",
             cost: "Inclusive",

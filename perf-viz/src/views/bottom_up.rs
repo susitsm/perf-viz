@@ -64,6 +64,7 @@ pub(crate) fn draw_bottom_up(
     let action = table::draw(
         ui,
         &Columns {
+            id: "bottom_up_table",
             unit: cost,
             name: "Function",
             cost: "Cost",

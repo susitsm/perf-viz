@@ -36,6 +36,8 @@ pub struct RowData<'a> {
 }
 
 pub struct Columns<'a> {
+    /// Names the table's scroll area, so tables of different tabs keep their own scroll positions.
+    pub id: &'a str,
     /// How the numbers are shown (exact sample counts, or cycles with an SI suffix).
     pub unit: Cost,
     pub name: &'a str,
@@ -360,6 +362,7 @@ pub fn draw<'a>(
 
     ui.spacing_mut().item_spacing.y = 0.0;
     egui::ScrollArea::vertical()
+        .id_salt(cols.id)
         .auto_shrink([false, false])
         .show_rows(ui, ROW_H, n_rows, |ui, range| {
             for index in range {

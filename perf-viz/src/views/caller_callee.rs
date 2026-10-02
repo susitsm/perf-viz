@@ -82,6 +82,7 @@ pub(crate) fn draw_related_functions(
     let click = table::draw(
         ui,
         &Columns {
+            id: "related_functions_table",
             unit: cost,
             name,
             cost: "Cost",
@@ -195,6 +196,7 @@ pub(crate) fn draw_caller_callee(
     let click = table::draw(
         ui,
         &Columns {
+            id: "function_list_table",
             unit: cost,
             name: "Function",
             cost: "Inclusive",

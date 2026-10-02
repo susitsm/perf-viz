@@ -40,7 +40,7 @@ use crate::{
         Functions, NodeCounts, ViewContext, ViewData,
         bottom_up::BuState,
         caller_callee::CcState,
-        flame::{ItemsKey, ScrollKey},
+        flame::{FlameScroll, ItemsKey},
         flame_layout::Item,
         noun,
         summary::{LoadInfo, SummaryInfo},
@@ -262,8 +262,8 @@ struct App {
 
     items: Vec<Item>,
     items_key: Option<ItemsKey>,
-    /// The view the flame graph's scroll position was last set for.
-    flame_scroll_key: Option<ScrollKey>,
+    /// Where the flame graph is scrolled to.
+    flame_scroll: FlameScroll,
 
     harness: Harness,
 }
@@ -381,7 +381,7 @@ impl App {
             coverage: Coverage::default(),
             items: Vec::new(),
             items_key: None,
-            flame_scroll_key: None,
+            flame_scroll: FlameScroll::default(),
             harness: args.harness,
         };
         if app.path.is_some() && !app.pending_load {
@@ -1330,6 +1330,9 @@ impl App {
         view_context: &ViewContext<'_>,
         timeline_actions: &mut Vec<timeline::Action>,
     ) {
+        if self.tab != Tab::FlameGraph {
+            self.flame_scroll.restore = true;
+        }
         let query = self.search.to_lowercase();
         let data = ViewData {
             funcs: self.funcs.as_ref().expect("set when the profile arrived"),

@@ -8,6 +8,8 @@
 pub mod anchor;
 pub mod baseline;
 pub mod fast;
+#[cfg(test)]
+mod oracles;
 pub mod ordered;
 pub mod piped;
 pub mod pipeline;

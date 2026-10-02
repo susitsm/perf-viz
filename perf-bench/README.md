@@ -1,6 +1,8 @@
 # perf-bench
 
-Benchmarks reading every record of a `perf.data` file with `linux-perf-data`.
+Benchmarks reading every record of a `perf.data` file with `linux-perf-data`, and checks that the
+reader of `perf-reader` (the pipeline the viewer loads through) agrees with the stock one. The reader
+itself, the tuner and the generated test file live in `perf-reader`.
 
     cargo run --release -- [FILE=perf.data] [--mode baseline|fast|both] [--threads N] [--iters N] [--touch]
 

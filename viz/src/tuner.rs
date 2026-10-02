@@ -273,9 +273,7 @@ impl Tuner {
         self.picker = Some(receiver);
     }
 
-    /// Draw the window if it is open. Returns the settings when "Apply, save and close" is clicked.
-    pub fn show(&mut self, ctx: &egui::Context) -> Outcome {
-        let mut out = Outcome::default();
+    fn poll_pickers(&mut self) {
         if let Some(receiver) = &self.picker {
             match receiver.try_recv() {
                 Ok(picked) => {
@@ -302,15 +300,11 @@ impl Tuner {
                 Err(_) => self.dir_picker = None,
             }
         }
-        if !self.open && self.confirm.is_none() {
-            return out;
-        }
-        let pal = Pal {
-            dark: ctx.global_style().visuals.dark_mode,
-        };
-        let saved_before = self.settled;
-        // A testing aid: start tuning as soon as the window opens (clicks cannot reach this window).
-        #[cfg(any(test, feature = "scripted"))]
+    }
+
+    /// A testing aid: start tuning as soon as the window opens (clicks cannot reach this window).
+    #[cfg(any(test, feature = "scripted"))]
+    fn autostart_for_testing(&mut self, ctx: &egui::Context) {
         if self.open
             && std::env::var_os("PERF_VIZ_TUNE_AUTOSTART").is_some()
             && self.source.is_some()
@@ -320,6 +314,228 @@ impl Tuner {
         {
             self.start(ctx);
         }
+    }
+
+    fn draw_intro(&self, ui: &mut egui::Ui) {
+        ui.label(format!(
+            "Measures how fast your disk reads for several seconds, then tries reader settings on reads of about 10 seconds each and picks the fastest cheap ones. {} \
+             The whole run takes about a minute and a half.",
+            if self.synthetic {
+                "It writes a generated recording to the folder below, tunes on it, and deletes it afterwards."
+            } else {
+                "It only reads the recording (nothing is written, no extra disk space is needed); a short recording is read repeatedly."
+            }
+        ));
+    }
+
+    fn draw_synthetic_choice(&mut self, ui: &mut egui::Ui, ctx: &egui::Context, running: bool) {
+        ui.add_enabled_ui(!running, |ui| {
+            ui.horizontal(|ui| {
+                ui.label("Size:");
+                let mut gb = self.synth_gb();
+                if ui
+                    .add(
+                        egui::DragValue::new(&mut gb)
+                            .range(1.0..=100.0)
+                            .speed(0.25)
+                            .suffix(" GB"),
+                    )
+                    .changed()
+                {
+                    self.synth_gb = gb;
+                }
+                ui.label("Folder:");
+                ui.label(RichText::new(self.synth_folder().display().to_string()).strong());
+                if ui
+                    .add_enabled(self.dir_picker.is_none(), egui::Button::new("Choose…"))
+                    .clicked()
+                {
+                    self.choose_folder(ctx);
+                }
+            });
+        });
+        ui.weak(format!("Needs about {:.0} GB of free space in that folder while it runs; choose a folder on the disk you want to tune for (/tmp is often memory).", self.synth_gb() + 0.3));
+    }
+
+    fn draw_recording_choice(&mut self, ui: &mut egui::Ui, ctx: &egui::Context, running: bool) {
+        ui.horizontal(|ui| {
+            ui.label("Recording:");
+            let shown = self
+                .source
+                .as_ref()
+                .map_or("(none chosen)".to_string(), |path| {
+                    path.display().to_string()
+                });
+            ui.label(RichText::new(shown).strong());
+            if ui
+                .add_enabled(
+                    !running && self.picker.is_none(),
+                    egui::Button::new("Choose…"),
+                )
+                .clicked()
+            {
+                self.choose_file(ctx);
+            }
+        });
+    }
+
+    fn draw_start_or_cancel(&mut self, ui: &mut egui::Ui, ctx: &egui::Context, running: bool) {
+        ui.horizontal(|ui| {
+            if running {
+                if ui.button("Cancel").clicked() {
+                    self.cancel.store(true, Ordering::Relaxed);
+                }
+                ui.spinner();
+            } else if ui
+                .add_enabled(self.can_start(), egui::Button::new("Start tuning"))
+                .clicked()
+            {
+                self.start(ctx);
+            }
+        });
+    }
+
+    fn draw_log(&self, ui: &mut egui::Ui) {
+        let shared_state = self.shared.lock().unwrap();
+        if shared_state.lines.is_empty() {
+            return;
+        }
+        egui::ScrollArea::vertical()
+            .max_height(260.0)
+            .stick_to_bottom(true)
+            .auto_shrink([false, true])
+            .show(ui, |ui| {
+                for line in &shared_state.lines {
+                    ui.label(RichText::new(line).monospace().size(12.0));
+                }
+            });
+    }
+
+    fn draw_report(
+        &mut self,
+        ui: &mut egui::Ui,
+        report: &tune::Report,
+        pal: &Pal,
+        saved_before: bool,
+        out: &mut Outcome,
+    ) -> bool {
+        ui.separator();
+        ui.label(format!("Disk: {:.2} GB/s sustained (first second {:.2} GB/s). With the best settings the reader does {:.2} GB/s on a {:.0} GB read{}.", report.sustained_gbps, report.burst_gbps, report.best_gbps, report.trial_bytes as f64 / 1e9, {
+            // Only when it makes sense: a read that is partly a fast burst can beat the sustained figure.
+            let share = report.best_gbps / report.sustained_gbps.max(1e-9);
+            if share <= 1.05 { format!(" ({:.0}% of the disk)", 100.0 * share) } else { String::new() }
+        }));
+        if let Some(default_gbps) = report.default_gbps {
+            ui.label(format!(
+                "The built-in defaults do {default_gbps:.2} GB/s on the same read."
+            ));
+        }
+        ui.label(
+            RichText::new(format!(
+                "Best: {} readers, {} MiB regions, {} regions open (about {} MiB of memory)",
+                report.best.readers,
+                report.best.region_mb,
+                report.best.in_flight,
+                report.best.memory_mb()
+            ))
+            .strong(),
+        );
+        for note in &report.notes {
+            ui.colored_label(pal.warning(), note);
+        }
+        ui.weak("This tunes reading only. Parsing and unwinding threads and DWARF depend on the CPU work of a real load and are left alone.");
+        if self.settled && saved_before {
+            ui.weak("Saved.");
+        } else if ui.button("Apply, save and close").on_hover_text("Saves these in the [reader] table of the config file (used the next time a file is opened) and closes this window").clicked() {
+            out.apply = Some(report.best);
+            self.settled = true;
+            return true;
+        }
+        false
+    }
+
+    /// Shows the result of the run; returns whether "Apply, save and close" was clicked.
+    fn draw_result(
+        &mut self,
+        ui: &mut egui::Ui,
+        pal: &Pal,
+        saved_before: bool,
+        out: &mut Outcome,
+    ) -> bool {
+        let shared = self.shared.clone();
+        let shared_state = shared.lock().unwrap();
+        match &shared_state.result {
+            Some(Ok(report)) => self.draw_report(ui, report, pal, saved_before, out),
+            Some(Err(message)) => {
+                ui.separator();
+                ui.colored_label(
+                    pal.suspect(),
+                    if message == "cancelled" {
+                        "Cancelled".to_string()
+                    } else {
+                        format!("Tuning failed: {message}")
+                    },
+                );
+                false
+            }
+            None => false,
+        }
+    }
+
+    /// The contents of the tuner window; returns whether the results were applied and saved.
+    fn draw_window_contents(
+        &mut self,
+        ui: &mut egui::Ui,
+        ctx: &egui::Context,
+        pal: &Pal,
+        saved_before: bool,
+        out: &mut Outcome,
+    ) -> bool {
+        self.draw_intro(ui);
+        ui.add_space(6.0);
+        let running = self.running();
+        ui.add_enabled_ui(!running, |ui| {
+            ui.checkbox(&mut self.synthetic, "Use a generated test file instead of a recording")
+                .on_hover_text("Writes a file of realistic records to the folder below, tunes on it and deletes it afterwards. For when you have no big recording, or want to tune before recording one.");
+        });
+        if self.synthetic {
+            self.draw_synthetic_choice(ui, ctx, running);
+        } else {
+            self.draw_recording_choice(ui, ctx, running);
+        }
+        self.draw_start_or_cancel(ui, ctx, running);
+        ui.add_space(4.0);
+        self.draw_log(ui);
+        let applied = self.draw_result(ui, pal, saved_before, out);
+        ui.allocate_space(vec2(ui.available_width(), 0.0));
+        applied
+    }
+
+    /// The window's close button. Results not saved yet need an answer first.
+    fn handle_close_request(&mut self, ctx: &egui::Context, viewport: egui::ViewportId) {
+        if self.unsaved() {
+            ctx.send_viewport_cmd_to(viewport, egui::ViewportCommand::CancelClose);
+            self.confirm = Some(Ask::Close);
+            ctx.request_repaint();
+        } else {
+            self.cancel.store(true, Ordering::Relaxed);
+            self.open = false;
+        }
+    }
+
+    /// Draw the window if it is open. Returns the settings when "Apply, save and close" is clicked.
+    pub fn show(&mut self, ctx: &egui::Context) -> Outcome {
+        let mut out = Outcome::default();
+        self.poll_pickers();
+        if !self.open && self.confirm.is_none() {
+            return out;
+        }
+        let pal = Pal {
+            dark: ctx.global_style().visuals.dark_mode,
+        };
+        let saved_before = self.settled;
+        #[cfg(any(test, feature = "scripted"))]
+        self.autostart_for_testing(ctx);
         let mut close_requested = false;
         let mut close_after_apply = false;
         let viewport = viewport_id();
@@ -328,104 +544,16 @@ impl Tuner {
             let builder = egui::ViewportBuilder::default()
                 .with_title("perf-viz: tune reader")
                 .with_inner_size([620.0, 640.0]);
-            ctx.show_viewport_immediate(viewport, builder, |vui, _class| {
-                if vui.input(|i| i.viewport().close_requested()) {
+            ctx.show_viewport_immediate(viewport, builder, |viewport_ui, _class| {
+                if viewport_ui.input(|input| input.viewport().close_requested()) {
                     close_requested = true;
                 }
-                egui::CentralPanel::default().show(vui, |ui| {
-            ui.label(format!(
-                "Measures how fast your disk reads for several seconds, then tries reader settings on reads of about 10 seconds each and picks the fastest cheap ones. {} \
-                 The whole run takes about a minute and a half.",
-                if self.synthetic {
-                    "It writes a generated recording to the folder below, tunes on it, and deletes it afterwards."
-                } else {
-                    "It only reads the recording (nothing is written, no extra disk space is needed); a short recording is read repeatedly."
-                }
-            ));
-            ui.add_space(6.0);
-            let running = self.running();
-            ui.add_enabled_ui(!running, |ui| {
-                ui.checkbox(&mut self.synthetic, "Use a generated test file instead of a recording")
-                    .on_hover_text("Writes a file of realistic records to the folder below, tunes on it and deletes it afterwards. For when you have no big recording, or want to tune before recording one.");
-            });
-            if self.synthetic {
-                ui.add_enabled_ui(!running, |ui| {
-                    ui.horizontal(|ui| {
-                        ui.label("Size:");
-                        let mut gb = self.synth_gb();
-                        if ui.add(egui::DragValue::new(&mut gb).range(1.0..=100.0).speed(0.25).suffix(" GB")).changed() {
-                            self.synth_gb = gb;
-                        }
-                        ui.label("Folder:");
-                        ui.label(RichText::new(self.synth_folder().display().to_string()).strong());
-                        if ui.add_enabled(self.dir_picker.is_none(), egui::Button::new("Choose…")).clicked() {
-                            self.choose_folder(ctx);
-                        }
-                    });
-                });
-                ui.weak(format!("Needs about {:.0} GB of free space in that folder while it runs; choose a folder on the disk you want to tune for (/tmp is often memory).", self.synth_gb() + 0.3));
-            } else {
-                ui.horizontal(|ui| {
-                    ui.label("Recording:");
-                    ui.label(RichText::new(self.source.as_ref().map_or("(none chosen)".to_string(), |path| path.display().to_string())).strong());
-                    if ui.add_enabled(!running && self.picker.is_none(), egui::Button::new("Choose…")).clicked() {
-                        self.choose_file(ctx);
-                    }
-                });
-            }
-            ui.horizontal(|ui| {
-                if running {
-                    if ui.button("Cancel").clicked() {
-                        self.cancel.store(true, Ordering::Relaxed);
-                    }
-                    ui.spinner();
-                } else if ui.add_enabled(self.can_start(), egui::Button::new("Start tuning")).clicked() {
-                    self.start(ctx);
-                }
-            });
-            ui.add_space(4.0);
-            let shared_state = self.shared.lock().unwrap();
-            if !shared_state.lines.is_empty() {
-                egui::ScrollArea::vertical().max_height(260.0).stick_to_bottom(true).auto_shrink([false, true]).show(ui, |ui| {
-                    for line in &shared_state.lines {
-                        ui.label(RichText::new(line).monospace().size(12.0));
-                    }
-                });
-            }
-            match &shared_state.result {
-                Some(Ok(report)) => {
-                    ui.separator();
-                    ui.label(format!("Disk: {:.2} GB/s sustained (first second {:.2} GB/s). With the best settings the reader does {:.2} GB/s on a {:.0} GB read{}.", report.sustained_gbps, report.burst_gbps, report.best_gbps, report.trial_bytes as f64 / 1e9, {
-                        // Only when it makes sense: a read that is partly a fast burst can beat the sustained figure.
-                        let share = report.best_gbps / report.sustained_gbps.max(1e-9);
-                        if share <= 1.05 { format!(" ({:.0}% of the disk)", 100.0 * share) } else { String::new() }
-                    }));
-                    if let Some(default_gbps) = report.default_gbps {
-                        ui.label(format!("The built-in defaults do {default_gbps:.2} GB/s on the same read."));
-                    }
-                    ui.label(RichText::new(format!("Best: {} readers, {} MiB regions, {} regions open (about {} MiB of memory)", report.best.readers, report.best.region_mb, report.best.in_flight, report.best.memory_mb())).strong());
-                    for note in &report.notes {
-                        ui.colored_label(pal.warning(), note);
-                    }
-                    ui.weak("This tunes reading only. Parsing and unwinding threads and DWARF depend on the CPU work of a real load and are left alone.");
-                    if self.settled && saved_before {
-                        ui.weak("Saved.");
-                    } else if ui.button("Apply, save and close").on_hover_text("Saves these in the [reader] table of the config file (used the next time a file is opened) and closes this window").clicked() {
-                        out.apply = Some(report.best);
-                        self.settled = true;
-                        close_after_apply = true;
-                    }
-                }
-                Some(Err(message)) => {
-                    ui.separator();
-                    ui.colored_label(pal.suspect(), if message == "cancelled" { "Cancelled".to_string() } else { format!("Tuning failed: {message}") });
-                }
-                None => {}
-            }
-            ui.allocate_space(vec2(ui.available_width(), 0.0));
+                egui::CentralPanel::default().show(viewport_ui, |ui| {
+                    close_after_apply =
+                        self.draw_window_contents(ui, ctx, &pal, saved_before, &mut out);
                 });
                 if matches!(self.confirm, Some(Ask::Close)) {
-                    self.confirm_ui(vui.ctx(), &mut out);
+                    self.confirm_ui(viewport_ui.ctx(), &mut out);
                 }
             });
         }
@@ -433,15 +561,7 @@ impl Tuner {
             self.open = false;
         }
         if close_requested {
-            // The window's close button. Results not saved yet need an answer first.
-            if self.unsaved() {
-                ctx.send_viewport_cmd_to(viewport, egui::ViewportCommand::CancelClose);
-                self.confirm = Some(Ask::Close);
-                ctx.request_repaint();
-            } else {
-                self.cancel.store(true, Ordering::Relaxed);
-                self.open = false;
-            }
+            self.handle_close_request(ctx, viewport);
         }
         // Opening a file or quitting is asked in the main window.
         if matches!(self.confirm, Some(Ask::Open(_) | Ask::Quit)) {

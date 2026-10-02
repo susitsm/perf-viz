@@ -59,6 +59,8 @@ pub struct ModuleResult {
     /// The level that was actually used for this module.
     pub level: Level,
     /// Why a better level was not used (missing debug info, error...), for diagnostics.
+    /// Why a lower level was used (only the tests read it).
+    #[cfg_attr(not(test), allow(dead_code))]
     pub notes: Vec<String>,
     /// For each input address, its frames from innermost (inlined) to outermost function.
     pub frames: Vec<Vec<LogicalFrame>>,

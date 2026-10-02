@@ -20,7 +20,6 @@ pub enum EventKind {
         addr: u64,
         len: u64,
         pgoff: u64,
-        prot: u32,
         path: Box<str>,
     },
     Exit {
@@ -74,7 +73,6 @@ pub fn event_of(ev: &EventRecord<'_>, time: u64) -> Option<Event> {
                     addr: mmap.address,
                     len: mmap.length,
                     pgoff: mmap.page_offset,
-                    prot: mmap.protection,
                     path: path.trim_end_matches('\0').into(),
                 },
             }

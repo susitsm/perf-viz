@@ -11,7 +11,7 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 
-use perf_callgraph::{load, symbolize::DwarfMode};
+use perf_callgraph::{DwarfMode, load};
 
 use crate::fmt::Cost;
 

@@ -6,14 +6,13 @@ use std::{
     fs::File,
     ops::{Deref, Range},
     path::{Path, PathBuf},
-    sync::OnceLock,
     sync::{Arc, Mutex},
 };
 
 use framehop::ModuleSectionInfo;
 use memmap2::Mmap;
 use object::{
-    Endianness, Object, ObjectSection, ObjectSymbol,
+    Endianness, Object, ObjectSection,
     elf::{FileHeader64, PF_X, PT_LOAD},
     read::elf::{FileHeader, ProgramHeader},
 };
@@ -45,30 +44,15 @@ struct Section {
     file: Option<Range<usize>>,
 }
 
-/// A function symbol from the ELF symbol tables.
-struct FuncSym {
-    start: u64,
-    size: u64,
-    name: String,
-}
-
 pub struct Binary {
-    pub path: PathBuf,
     mmap: Arc<Mmap>,
     loads: Vec<Load>,
     sections: HashMap<Vec<u8>, Section>,
-    /// Device and inode of the file as found on disk now, to compare with what was recorded.
-    pub dev: u64,
-    pub ino: u64,
-    /// Function symbols `(svma, size, name)` sorted by address, built on first use.
-    funcs: OnceLock<Vec<FuncSym>>,
 }
 
 impl Binary {
     pub fn open(path: &Path) -> Result<Binary, String> {
         let file = File::open(path).map_err(|error| error.to_string())?;
-        use std::os::unix::fs::MetadataExt;
-        let md = file.metadata().map_err(|error| error.to_string())?;
         let mmap = Arc::new(unsafe { Mmap::map(&file) }.map_err(|error| error.to_string())?);
 
         let obj = object::File::parse(&**mmap).map_err(|error| error.to_string())?;
@@ -106,13 +90,9 @@ impl Binary {
             .collect();
 
         Ok(Binary {
-            path: path.to_owned(),
             mmap,
             loads,
             sections,
-            dev: md.dev(),
-            ino: md.ino(),
-            funcs: OnceLock::new(),
         })
     }
 
@@ -151,34 +131,6 @@ impl Binary {
         self.mmap.get(off..off + len)
     }
 
-    /// Name of the function symbol containing static address `svma`, from the ELF symbol tables.
-    pub fn func_at(&self, svma: u64) -> Option<&str> {
-        let funcs = self.funcs.get_or_init(|| {
-            let Ok(obj) = object::File::parse(&**self.mmap) else {
-                return Vec::new();
-            };
-            let mut symbols: Vec<_> = obj
-                .symbols()
-                .chain(obj.dynamic_symbols())
-                .filter(|symbol| symbol.kind() == object::SymbolKind::Text && symbol.address() != 0)
-                .filter_map(|symbol| {
-                    Some(FuncSym {
-                        start: symbol.address(),
-                        size: symbol.size(),
-                        name: symbol.name().ok()?.to_string(),
-                    })
-                })
-                .collect();
-            symbols.sort_by_key(|function| function.start);
-            symbols
-        });
-        let i = funcs
-            .partition_point(|function| function.start <= svma)
-            .checked_sub(1)?;
-        let function = &funcs[i];
-        (svma < function.start + function.size.max(1)).then_some(function.name.as_str())
-    }
-
     pub fn section_info(self: &Arc<Self>) -> ElfSections {
         ElfSections(self.clone())
     }
@@ -208,34 +160,18 @@ impl ModuleSectionInfo<SectionData> for ElfSections {
     }
 }
 
-/// A binary that could not be opened, and why.
-#[derive(Clone, Debug)]
-pub struct BinaryError {
-    pub path: PathBuf,
-    pub message: String,
-}
-
 /// Opens each binary at most once, shared by every process that maps it.
 #[derive(Default)]
 pub struct BinaryCache {
     map: Mutex<HashMap<PathBuf, Option<Arc<Binary>>>>,
-    pub errors: Mutex<Vec<BinaryError>>,
 }
 
 impl BinaryCache {
+    /// The binary at `path`, or none if it cannot be opened.
     pub fn get(&self, path: &Path) -> Option<Arc<Binary>> {
         let mut map = self.map.lock().unwrap();
         map.entry(path.to_owned())
-            .or_insert_with(|| match Binary::open(path) {
-                Ok(binary) => Some(Arc::new(binary)),
-                Err(error) => {
-                    self.errors.lock().unwrap().push(BinaryError {
-                        path: path.to_owned(),
-                        message: error,
-                    });
-                    None
-                }
-            })
+            .or_insert_with(|| Binary::open(path).ok().map(Arc::new))
             .clone()
     }
 }

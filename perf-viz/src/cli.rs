@@ -10,7 +10,7 @@ use std::path::PathBuf;
 #[cfg(any(test, feature = "scripted"))]
 use clap::ArgMatches;
 use clap::{Args, CommandFactory, FromArgMatches, Parser, ValueEnum};
-use perf_callgraph::{load, symbolize::DwarfMode};
+use perf_callgraph::{DwarfMode, load};
 
 use crate::{
     config::{TabName, Theme},

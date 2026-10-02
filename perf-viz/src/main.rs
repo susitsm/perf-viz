@@ -483,16 +483,16 @@ impl App {
             ))
             .weak(),
         );
-        let mut dwarf = options.dwarf == perf_callgraph::symbolize::DwarfMode::Auto;
+        let mut dwarf = options.dwarf == perf_callgraph::DwarfMode::Auto;
         if ui
             .checkbox(&mut dwarf, "Use DWARF (inlined frames, file:line)")
             .on_hover_text("Off: function names only, but faster to load")
             .changed()
         {
             options.dwarf = if dwarf {
-                perf_callgraph::symbolize::DwarfMode::Auto
+                perf_callgraph::DwarfMode::Auto
             } else {
-                perf_callgraph::symbolize::DwarfMode::Never
+                perf_callgraph::DwarfMode::Never
             };
             reader.dwarf = Some(if dwarf { Dwarf::Auto } else { Dwarf::Never });
             changed = true;

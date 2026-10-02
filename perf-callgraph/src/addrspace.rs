@@ -61,12 +61,14 @@ impl Epoch {
         self.version += 1;
     }
 
+    #[cfg(test)]
     pub fn find(&self, addr: u64) -> Option<&Mapping> {
         find_in(&self.maps, addr)
     }
 }
 
 /// The mapping of a sorted, non-overlapping list containing `addr`.
+#[cfg(test)]
 pub fn find_in(maps: &[Mapping], addr: u64) -> Option<&Mapping> {
     let i = maps
         .partition_point(|mapping| mapping.start <= addr)
@@ -95,6 +97,7 @@ pub struct AddressSpaces {
 
 impl AddressSpaces {
     /// Build from events sorted by time.
+    #[cfg(test)]
     pub fn build(events: &[Event]) -> Self {
         let mut spaces = Self::default();
         spaces.apply_all(events);
@@ -204,6 +207,7 @@ impl AddressSpaces {
         })
     }
 
+    #[cfg(test)]
     pub fn lookup(&self, pid: i32, time: u64, addr: u64) -> Option<&Mapping> {
         self.epoch(pid, time)?.find(addr)
     }
@@ -211,30 +215,6 @@ impl AddressSpaces {
     /// Paths of all file-backed modules seen, indexed by module id.
     pub fn module_paths(&self) -> &[Arc<str>] {
         &self.module_paths
-    }
-
-    /// A hash of every epoch of every process, for checking that two builds are identical.
-    pub fn fingerprint(&self) -> u64 {
-        use std::hash::{Hash, Hasher};
-        let mut pids: Vec<_> = self.procs.keys().copied().collect();
-        pids.sort_unstable();
-        let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        for pid in pids {
-            pid.hash(&mut hasher);
-            for ep in &self.procs[&pid] {
-                (ep.id, ep.start_time).hash(&mut hasher);
-                for mapping in ep.maps.iter() {
-                    (
-                        mapping.start,
-                        mapping.end,
-                        mapping.pgoff,
-                        mapping.path.as_deref(),
-                    )
-                        .hash(&mut hasher);
-                }
-            }
-        }
-        hasher.finish()
     }
 
     pub fn epoch_count(&self) -> usize {
@@ -245,6 +225,7 @@ impl AddressSpaces {
         self.procs.keys()
     }
 
+    #[cfg(test)]
     pub fn epochs(&self, pid: i32) -> &[Epoch] {
         self.procs.get(&pid).map_or(&[], Vec::as_slice)
     }
@@ -262,7 +243,6 @@ mod tests {
                 addr,
                 len,
                 pgoff: 0,
-                prot: 5,
                 path: path.into(),
             },
         }

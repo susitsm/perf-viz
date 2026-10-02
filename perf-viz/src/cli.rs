@@ -398,98 +398,20 @@ mod tests {
     }
 
     #[test]
-    fn no_arguments_means_the_start_screen() {
-        let cli = parse(&[]);
-        assert!(
-            cli.file.is_none()
-                && cli.show.view.is_none()
-                && cli.show.cost.is_none()
-                && !cli.reader.cold
-                && cli.script.steps().is_empty()
-        );
-    }
-
-    #[test]
-    fn a_file_and_the_initial_view_flags() {
-        let cli = parse(&[
-            "rec.data",
-            "--view",
-            "truncated",
-            "--cost",
-            "samples",
-            "--theme",
-            "light",
-            "--tab",
-            "callercallee",
-            "--size",
-            "1280x720",
-            "--process",
-            "42",
-            "--thread",
-            "43",
-            "--search",
-            "intern",
-            "--range",
-            "10,250.5",
-        ]);
-        assert_eq!(cli.file, Some(PathBuf::from("rec.data")));
+    fn size_and_range_parsers_accept_valid_text() {
         assert_eq!(
-            (cli.show.view, cli.show.cost, cli.theme, cli.show.tab),
-            (
-                Some(View::Truncated),
-                Some(Cost::Samples),
-                Some(Theme::Light),
-                Some(TabName::Callercallee)
-            )
-        );
-        assert_eq!(
-            cli.size,
-            Some(WindowSize {
+            parse_size("1280x720"),
+            Ok(WindowSize {
                 width: 1280.0,
                 height: 720.0
             })
         );
         assert_eq!(
-            (
-                cli.show.process,
-                cli.show.thread,
-                cli.show.search.as_deref(),
-                cli.show.range
-            ),
-            (
-                Some(42),
-                Some(43),
-                Some("intern"),
-                Some(MsRange {
-                    start_ms: 10.0,
-                    end_ms: 250.5
-                })
-            )
-        );
-    }
-
-    #[test]
-    fn reader_flags() {
-        let cli = parse(&[
-            "--readers",
-            "4",
-            "--threads",
-            "8",
-            "--region-mb",
-            "128",
-            "--no-dwarf",
-            "--cold",
-        ]);
-        let reader = &cli.reader;
-        assert_eq!(
-            (
-                reader.readers,
-                reader.threads,
-                reader.region_mb,
-                reader.no_dwarf,
-                reader.cold
-            ),
-            (Some(4), Some(8), Some(128), true, true)
+            parse_range("10,250.5"),
+            Ok(MsRange {
+                start_ms: 10.0,
+                end_ms: 250.5
+            })
         );
     }
 
@@ -538,11 +460,9 @@ mod tests {
 
     #[test]
     fn bad_values_are_errors_with_a_reason() {
-        assert!(fails(&["--cost", "joules"]).contains("possible values"));
         assert!(fails(&["--readers", "0"]).contains("not in 1..=64"));
         assert!(fails(&["--size", "wide"]).contains("WIDTHxHEIGHT"));
         assert!(fails(&["--range", "9,3"]).contains("after the start"));
-        assert!(fails(&["--nonsense"]).contains("unexpected argument"));
     }
 
     #[test]

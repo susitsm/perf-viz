@@ -86,6 +86,11 @@ impl EpochUnwind {
     }
 }
 
+/// Indices of the registers the unwinder needs in a sample's `user_regs` (x86-64).
+pub const PERF_REG_X86_BP: u64 = 6;
+pub const PERF_REG_X86_SP: u64 = 7;
+pub const PERF_REG_X86_IP: u64 = 8;
+
 /// Do these 8 bytes (the ones just before a return address) end with a call instruction?
 pub fn follows_call(bytes: &[u8]) -> bool {
     let length = bytes.len();

@@ -43,13 +43,13 @@ use crate::{
     phys::PhysTrie,
     symbolize::DwarfMode,
     tries::{build_tries, module_addresses, symbolize_modules},
-    unwind::{EpochUnwind, Phys, Scratch, UnwCache, unwind_sample},
+    unwind::{
+        EpochUnwind, PERF_REG_X86_BP, PERF_REG_X86_IP, PERF_REG_X86_SP, Phys, Scratch, UnwCache,
+        unwind_sample,
+    },
 };
 
 const PERF_RECORD_SAMPLE: u32 = 9;
-const PERF_REG_X86_BP: u64 = 6;
-const PERF_REG_X86_SP: u64 = 7;
-const PERF_REG_X86_IP: u64 = 8;
 const UNWINDER_SHARDS: usize = 64;
 
 #[derive(Clone, Debug)]

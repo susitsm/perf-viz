@@ -28,13 +28,11 @@ use crate::{
     model::{FrameInfo, LoadStats, NO_MODULE, Profile, Trie, TrieBuilder},
     symbolize::{DwarfMode, ModuleSymbols},
     tries::{FrameTable, module_addresses, symbolize_modules, unmapped_frame},
+    unwind::{PERF_REG_X86_BP, PERF_REG_X86_IP, PERF_REG_X86_SP, follows_call},
 };
 
 type Unw = UnwinderX86_64<SectionData>;
 
-const PERF_REG_X86_BP: u64 = 6;
-const PERF_REG_X86_SP: u64 = 7;
-const PERF_REG_X86_IP: u64 = 8;
 const PROT_EXEC: u32 = 4;
 
 #[derive(Clone)]
@@ -62,19 +60,6 @@ struct Phys {
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Options {
     pub dwarf: DwarfMode,
-}
-
-/// Do these 8 bytes (the ones just before a return address) end with a call instruction?
-pub fn follows_call(bytes: &[u8]) -> bool {
-    let length = bytes.len();
-    let modrm_call = |i: usize| bytes[i] == 0xff && (bytes[i + 1] & 0x38) == 0x10; // FF /2
-    bytes[length - 5] == 0xe8
-        || modrm_call(length - 2)
-        || modrm_call(length - 3)
-        || modrm_call(length - 4)
-        || modrm_call(length - 6)
-        || modrm_call(length - 7)
-        || modrm_call(length - 8)
 }
 
 /// A physical frame (module, static address, suspect-tail flag) whose logical frames are cached.

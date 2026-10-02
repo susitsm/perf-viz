@@ -34,8 +34,12 @@ pub(crate) const MIN_BOX_PX: f32 = 0.5;
 
 pub(crate) const LABEL_MIN_PX: f32 = 36.0;
 
-pub(crate) fn module_color(profile: &Profile, module: Option<ModuleId>, name: &str) -> Color32 {
-    // Hue from the module, a little brightness variation from the function name.
+/// How much of its base brightness a box keeps, by row: rows repeat through four steps so that
+/// neighbouring rows are told apart without a stripe pattern.
+const ROW_SHADES: [f32; 4] = [1.0, 0.92, 0.84, 0.76];
+
+pub(crate) fn module_color(profile: &Profile, module: Option<ModuleId>) -> Color32 {
+    // The hue comes from the module.
     let hash = |text: &str| {
         text.bytes()
             .fold(0xcbf29ce484222325u64, |hash_so_far, byte| {
@@ -43,18 +47,21 @@ pub(crate) fn module_color(profile: &Profile, module: Option<ModuleId>, name: &s
             })
     };
     let hue = (hash(profile.module_name(module)) % 360) as f32 / 360.0;
-    let brightness = 0.78 + 0.16 * ((hash(name) % 100) as f32 / 100.0);
-    egui::ecolor::Hsva::new(hue, 0.45, brightness, 1.0).into()
+    egui::ecolor::Hsva::new(hue, 0.45, 0.94, 1.0).into()
 }
 
-pub(crate) fn frame_color(profile: &Profile, frame: &FrameInfo) -> Color32 {
-    if frame.suspect {
+/// The colour of a frame's box in the row `depth`.
+pub(crate) fn frame_color(profile: &Profile, frame: &FrameInfo, depth: u32) -> Color32 {
+    let base = if frame.suspect {
         Color32::from_rgb(200, 60, 60)
     } else if frame.raw {
         Color32::from_gray(150)
     } else {
-        module_color(profile, frame.module, &frame.name)
-    }
+        module_color(profile, frame.module)
+    };
+    let shade = ROW_SHADES[depth as usize % ROW_SHADES.len()];
+    let scale = |channel: u8| (channel as f32 * shade).round() as u8;
+    Color32::from_rgb(scale(base.r()), scale(base.g()), scale(base.b()))
 }
 
 pub(crate) fn flame_box_rect(rect: Rect, bottom: f32, item: &Item) -> Rect {
@@ -181,7 +188,7 @@ impl App {
             Some(frame_id) => {
                 let frame = &profile.frames[frame_id];
                 let matched = searching && self.matches[frame_id];
-                let color = frame_color(profile, frame);
+                let color = frame_color(profile, frame, item.depth);
                 let fill = if searching && !matched {
                     pal.dim(color)
                 } else {

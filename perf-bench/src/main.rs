@@ -48,38 +48,109 @@ struct Cli {
     corrupt_bound: bool,
 }
 
+fn ms(duration: std::time::Duration) -> f64 {
+    duration.as_secs_f64() * 1e3
+}
+
+fn run_fast(cli: &Cli) -> perf_bench::Result<(Stats, String)> {
+    let (stats, timings) = fast::read_all(&cli.path, cli.threads, cli.populate, cli.touch)?;
+    let detail = format!(
+        "(setup {:.1}ms, scan {:.1}ms, parse {:.1}ms, teardown {:.1}ms)",
+        ms(timings.setup),
+        ms(timings.scan),
+        ms(timings.parse),
+        ms(timings.teardown)
+    );
+    Ok((stats, detail))
+}
+
+fn run_pipe(cli: &Cli) -> perf_bench::Result<(Stats, String)> {
+    let config = Config {
+        block: cli.block_mb << 20,
+        workers: cli.threads,
+        buffers: if cli.buffers == 0 {
+            cli.threads * 2 + 2 + cli.readers * 2
+        } else {
+            cli.buffers
+        },
+        evict: Evict::Off,
+        readers: cli.readers,
+    };
+    let options = piped::Options {
+        touch: cli.touch,
+        corrupt_bound: cli.corrupt_bound,
+        ..Default::default()
+    };
+    let (stats, report) = piped::read_all(&cli.path, config, options)?;
+    let metrics = report.metrics;
+    let detail = format!(
+        "(block {}MiB, {} bufs, {} reader(s), {} regions, plan {:.0}ms{}; readers(sum): read {:.0}ms, wait-for-buffer {:.0}ms | workers(sum): busy {:.0}ms, wait-for-data {:.0}ms)",
+        cli.block_mb,
+        config.buffers,
+        cli.readers,
+        report.regions,
+        ms(report.plan_time),
+        if report.fell_back {
+            ", FELL BACK to 1 reader"
+        } else {
+            ""
+        },
+        ms(metrics.reader_read),
+        ms(metrics.reader_wait),
+        ms(metrics.worker_busy),
+        ms(metrics.worker_wait)
+    );
+    Ok((stats, detail))
+}
+
+fn run_mode(cli: &Cli, mode: &str) -> perf_bench::Result<(Stats, String)> {
+    match mode {
+        "baseline" => Ok((baseline::read_all(&cli.path, cli.touch)?, String::new())),
+        "fast" => run_fast(cli),
+        "pipe" => run_pipe(cli),
+        other => {
+            eprintln!("unknown mode `{other}` (baseline, fast, pipe, both)");
+            std::process::exit(2)
+        }
+    }
+}
+
+fn print_reference(stats: &Stats) {
+    let types: Vec<_> = stats
+        .per_type
+        .iter()
+        .enumerate()
+        .filter(|(_, count)| **count > 0)
+        .collect();
+    println!(
+        "records={} bytes={} samples={} stack_bytes={} stack_sum={} types={types:?}",
+        stats.records, stats.bytes, stats.samples, stats.user_stack_bytes, stats.stack_sum
+    );
+    println!("all modes produced identical stats");
+}
+
 fn main() -> perf_bench::Result<()> {
-    let Cli {
-        path,
-        mode,
-        threads,
-        iters,
-        touch,
-        cold,
-        populate,
-        block_mb,
-        buffers,
-        readers,
-        corrupt_bound: corrupt,
-    } = Cli::parse();
-    let modes: Vec<&str> = if mode == "both" {
+    let cli = Cli::parse();
+    let modes: Vec<&str> = if cli.mode == "both" {
         vec!["baseline", "pipe"]
     } else {
-        mode.split(',').collect()
+        cli.mode.split(',').collect()
     };
-    let size = std::fs::metadata(&path)?.len() as f64;
-    let gbps = |secs: f64| size / secs / 1e9;
-    let ms = |duration: std::time::Duration| duration.as_secs_f64() * 1e3;
+    let size = std::fs::metadata(&cli.path)?.len() as f64;
     let drop_cache = || {
-        if cold && let Ok(file) = std::fs::File::open(&path) {
+        if cli.cold
+            && let Ok(file) = std::fs::File::open(&cli.path)
+        {
             split::drop_cache(&file);
         }
     };
 
     let mut reference: Option<(String, Stats)> = None;
     let mut check = |name: &str, stats: Stats| match &reference {
-        Some((rn, reference_stats)) if *reference_stats != stats => {
-            eprintln!("MISMATCH {name} vs {rn}:\n {rn}: {reference_stats:?}\n {name}: {stats:?}");
+        Some((reference_name, reference_stats)) if *reference_stats != stats => {
+            eprintln!(
+                "MISMATCH {name} vs {reference_name}:\n {reference_name}: {reference_stats:?}\n {name}: {stats:?}"
+            );
             std::process::exit(1);
         }
         Some(_) => {}
@@ -87,91 +158,21 @@ fn main() -> perf_bench::Result<()> {
     };
 
     for mode in modes {
-        for i in 0..iters {
+        for iteration in 0..cli.iters {
             drop_cache();
             let started = Instant::now();
-            let (stats, detail) = match mode {
-                "baseline" => (baseline::read_all(&path, touch)?, String::new()),
-                "fast" => {
-                    let (stats, tm) = fast::read_all(&path, threads, populate, touch)?;
-                    (
-                        stats,
-                        format!(
-                            "(setup {:.1}ms, scan {:.1}ms, parse {:.1}ms, teardown {:.1}ms)",
-                            ms(tm.setup),
-                            ms(tm.scan),
-                            ms(tm.parse),
-                            ms(tm.teardown)
-                        ),
-                    )
-                }
-                "pipe" => {
-                    let config = Config {
-                        block: block_mb << 20,
-                        workers: threads,
-                        buffers: if buffers == 0 {
-                            threads * 2 + 2 + readers * 2
-                        } else {
-                            buffers
-                        },
-                        evict: Evict::Off,
-                        readers,
-                    };
-                    let options = piped::Options {
-                        touch,
-                        corrupt_bound: corrupt,
-                        ..Default::default()
-                    };
-                    let (stats, rp) = piped::read_all(&path, config, options)?;
-                    let mt = rp.metrics;
-                    (
-                        stats,
-                        format!(
-                            "(block {block_mb}MiB, {} bufs, {readers} reader(s), {} regions, plan {:.0}ms{}; readers(sum): read {:.0}ms, wait-for-buffer {:.0}ms | workers(sum): busy {:.0}ms, wait-for-data {:.0}ms)",
-                            config.buffers,
-                            rp.regions,
-                            ms(rp.plan_time),
-                            if rp.fell_back {
-                                ", FELL BACK to 1 reader"
-                            } else {
-                                ""
-                            },
-                            ms(mt.reader_read),
-                            ms(mt.reader_wait),
-                            ms(mt.worker_busy),
-                            ms(mt.worker_wait)
-                        ),
-                    )
-                }
-                other => {
-                    eprintln!("unknown mode `{other}` (baseline, fast, pipe, both)");
-                    std::process::exit(2)
-                }
-            };
+            let (stats, detail) = run_mode(&cli, mode)?;
             let secs = started.elapsed().as_secs_f64();
             println!(
-                "{mode:<8} x{threads:<3} #{i}: {secs:8.3}s {:6.2} GB/s  {detail}",
-                gbps(secs)
+                "{mode:<8} x{:<3} #{iteration}: {secs:8.3}s {:6.2} GB/s  {detail}",
+                cli.threads,
+                size / secs / 1e9
             );
             check(mode, stats);
         }
     }
     if let Some((_, reference_stats)) = reference {
-        let types: Vec<_> = reference_stats
-            .per_type
-            .iter()
-            .enumerate()
-            .filter(|(_, count)| **count > 0)
-            .collect();
-        println!(
-            "records={} bytes={} samples={} stack_bytes={} stack_sum={} types={types:?}",
-            reference_stats.records,
-            reference_stats.bytes,
-            reference_stats.samples,
-            reference_stats.user_stack_bytes,
-            reference_stats.stack_sum
-        );
-        println!("all modes produced identical stats");
+        print_reference(&reference_stats);
     }
     Ok(())
 }

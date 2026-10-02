@@ -1,6 +1,7 @@
 //! Checks of the loading pipeline against slower, simpler references. They need a real recording
 //! (`perf.data` at the workspace root, or the file named by `PERF_DATA`) and are skipped without one.
 
+mod address_spaces;
 mod loaders;
 
 use std::path::{Path, PathBuf};

@@ -1,4 +1,4 @@
-#![doc = include_str!("../docs/overview.md")]
+#![doc = include_str!("../../README.md")]
 
 mod cli;
 mod config;

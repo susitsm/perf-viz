@@ -1,7 +1,7 @@
 #!/bin/bash
-# Regenerates the screenshots used by the module documentation of perf-viz (docs/overview.md).
+# Regenerates the screenshots shown in the repository README.
 #
-#   docs/screenshots.sh [BIG_RECORDING] [SMALL_RECORDING]
+#   perf-viz/docs/screenshots.sh [BIG_RECORDING] [SMALL_RECORDING]
 #
 # Needs the `scripted` feature (screenshots and scripted clicks) and a recording big enough that
 # loading takes a few seconds. Window coordinates are in points: 1500x900 window, scale factor 1.333.
@@ -60,6 +60,3 @@ for name in sorted(os.listdir(raw)):
     print(name, os.path.getsize(os.path.join(out, name)) // 1024, "KiB")
 PY
 rm -rf "$RAW"
-
-# Inline the images into the markdown that main.rs includes as its documentation.
-python3 perf-viz/docs/embed.py

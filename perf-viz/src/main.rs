@@ -5,6 +5,10 @@
 #![cfg_attr(doc, doc = ::embed_doc_image::embed_image!("tuning", "docs/images/tuning.png"))]
 #![doc = include_str!("../../README.md")]
 
+// Only the doc attributes above use it, and only when building the docs.
+#[cfg(not(doc))]
+use embed_doc_image as _;
+
 mod cli;
 mod config;
 mod filter;

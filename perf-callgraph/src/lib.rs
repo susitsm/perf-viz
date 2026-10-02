@@ -1,7 +1,6 @@
 //! Loading: address spaces, unwinding, symbolization and the Profile model.
 pub mod addrspace;
 pub mod binary;
-pub mod cli;
 pub mod events;
 pub mod load;
 #[cfg(test)]

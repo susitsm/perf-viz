@@ -125,7 +125,7 @@ where
         "bounds must be strictly increasing"
     );
     let regions = bounds.len() - 1;
-    let nreaders = if path.is_some() {
+    let reader_count = if path.is_some() {
         config.readers.clamp(1, regions)
     } else {
         1
@@ -136,122 +136,181 @@ where
         free_tx.send(vec![0u8; config.block]).unwrap();
     }
     let (work_tx, work_rx) = unbounded::<Unit>();
-    let fd = file.as_raw_fd();
+    let evict_fd = (config.evict == Evict::Worker).then(|| file.as_raw_fd());
     let (next_region, abort) = (AtomicUsize::new(0), AtomicBool::new(false));
+    let plan = ReadPlan {
+        file,
+        own_path: path.filter(|_| reader_count > 1),
+        section,
+        bounds,
+        next_region: &next_region,
+        abort: &abort,
+    };
 
     std::thread::scope(|scope| {
         let workers: Vec<_> = (0..config.workers)
             .map(|_| {
                 let (receiver, free_tx, work) = (work_rx.clone(), free_tx.clone(), &work);
-                scope.spawn(move || {
-                    let (mut state, mut err, mut wait, mut busy) =
-                        (S::default(), None, Duration::ZERO, Duration::ZERO);
-                    loop {
-                        let started = Instant::now();
-                        let Ok(unit) = receiver.recv() else { break };
-                        wait += started.elapsed();
-                        let started = Instant::now();
-                        if err.is_none() {
-                            err = work(&mut state, &unit.buffer[..unit.len]).err();
-                        }
-                        busy += started.elapsed();
-                        let (file_off, len) = (unit.file_off, unit.len);
-                        let _ = free_tx.send(unit.buffer); // readers may be gone on error
-                        if config.evict == Evict::Worker {
-                            evict_range(fd, file_off, len);
-                        }
-                    }
-                    (state, err, wait, busy)
-                })
+                scope.spawn(move || run_worker(&receiver, &free_tx, work, evict_fd))
             })
             .collect();
         drop(work_rx);
         drop(free_tx);
 
-        let readers: Vec<_> = (0..nreaders)
+        let readers: Vec<_> = (0..reader_count)
             .map(|_| {
-                let (free_rx, work_tx) = (free_rx.clone(), work_tx.clone());
-                let (next_region, abort) = (&next_region, &abort);
-                scope.spawn(move || -> Result<Metrics> {
-                    let own; // this reader's own open file (own readahead state)
-                    let reader_file: &File = match path {
-                        Some(source_path) if nreaders > 1 => {
-                            own = File::open(source_path)?;
-                            &own
-                        }
-                        _ => file,
-                    };
-                    let mut metrics = Metrics::default();
-                    loop {
-                        let region_index = next_region.fetch_add(1, Ordering::Relaxed);
-                        if region_index >= regions || abort.load(Ordering::Relaxed) {
-                            return Ok(metrics);
-                        }
-                        let (lo, hi) = (bounds[region_index], bounds[region_index + 1]);
-                        let res = if section.big_endian {
-                            reader::<BigEndian>(
-                                reader_file,
-                                section,
-                                lo,
-                                hi,
-                                &free_rx,
-                                &work_tx,
-                                abort,
-                                &mut metrics,
-                            )
-                        } else {
-                            reader::<LittleEndian>(
-                                reader_file,
-                                section,
-                                lo,
-                                hi,
-                                &free_rx,
-                                &work_tx,
-                                abort,
-                                &mut metrics,
-                            )
-                        };
-                        if let Err(error) = res {
-                            abort.store(true, Ordering::Relaxed);
-                            return Err(error);
-                        }
-                    }
-                })
+                let (free_rx, work_tx, plan) = (free_rx.clone(), work_tx.clone(), &plan);
+                scope.spawn(move || read_planned(plan, &free_rx, &work_tx))
             })
             .collect();
         drop(work_tx); // lets workers drain and exit once every reader is done
         drop(free_rx);
 
-        let (mut metrics, mut read_err) = (Metrics::default(), None);
-        for reader_handle in readers {
-            match reader_handle.join().unwrap() {
-                Ok(rm) => {
-                    metrics.units += rm.units;
-                    metrics.bytes += rm.bytes;
-                    metrics.reader_wait += rm.reader_wait;
-                    metrics.reader_read += rm.reader_read;
-                }
-                Err(error) => {
-                    // A mismatch explains other readers' failures, so it wins.
-                    if read_err.is_none() || error.is::<BoundaryMismatch>() {
-                        read_err = Some(error);
-                    }
-                }
-            }
-        }
-        let (mut states, mut first_err) = (Vec::new(), None);
-        for worker_handle in workers {
-            let (state, err, wait, busy) = worker_handle.join().unwrap();
-            states.push(state);
-            first_err = first_err.or(err);
-            metrics.worker_wait += wait;
-            metrics.worker_busy += busy;
-        }
-        if let Some(error) = read_err.or(first_err) {
+        let (mut metrics, read_error) = join_readers(readers);
+        let (states, worker_error) = join_workers(workers, &mut metrics);
+        if let Some(error) = read_error.or(worker_error) {
             return Err(error);
         }
         Ok((states, metrics))
     })
+}
+
+type BoxError = Box<dyn std::error::Error + Send + Sync>;
+
+/// What one worker did: its state, the first error it hit, and how long it waited and worked.
+struct WorkerOutcome<S> {
+    state: S,
+    error: Option<BoxError>,
+    wait: Duration,
+    busy: Duration,
+}
+
+/// Work on units until the readers are done. After an error the worker stops working but keeps
+/// recycling buffers, so readers can't deadlock.
+fn run_worker<S: Default, W: Fn(&mut S, &[u8]) -> Result<()>>(
+    receiver: &Receiver<Unit>,
+    free_tx: &Sender<Vec<u8>>,
+    work: &W,
+    evict_fd: Option<i32>,
+) -> WorkerOutcome<S> {
+    let mut outcome = WorkerOutcome {
+        state: S::default(),
+        error: None,
+        wait: Duration::ZERO,
+        busy: Duration::ZERO,
+    };
+    loop {
+        let started = Instant::now();
+        let Ok(unit) = receiver.recv() else { break };
+        outcome.wait += started.elapsed();
+        let started = Instant::now();
+        if outcome.error.is_none() {
+            outcome.error = work(&mut outcome.state, &unit.buffer[..unit.len]).err();
+        }
+        outcome.busy += started.elapsed();
+        let (file_off, len) = (unit.file_off, unit.len);
+        let _ = free_tx.send(unit.buffer); // readers may be gone on error
+        if let Some(fd) = evict_fd {
+            evict_range(fd, file_off, len);
+        }
+    }
+    outcome
+}
+
+/// What every reader shares: where the regions are and which file to read them from.
+struct ReadPlan<'a> {
+    file: &'a File,
+    /// Set when each reader opens the file itself (readahead state is per open file).
+    own_path: Option<&'a Path>,
+    section: &'a DataSection,
+    bounds: &'a [u64],
+    next_region: &'a AtomicUsize,
+    abort: &'a AtomicBool,
+}
+
+/// Take regions from the shared counter and read them until none are left or a run fails.
+fn read_planned(
+    plan: &ReadPlan,
+    free_rx: &Receiver<Vec<u8>>,
+    work_tx: &Sender<Unit>,
+) -> Result<Metrics> {
+    let own = plan.own_path.map(File::open).transpose()?;
+    let reader_file = own.as_ref().unwrap_or(plan.file);
+    let regions = plan.bounds.len() - 1;
+    let mut metrics = Metrics::default();
+    loop {
+        let region_index = plan.next_region.fetch_add(1, Ordering::Relaxed);
+        if region_index >= regions || plan.abort.load(Ordering::Relaxed) {
+            return Ok(metrics);
+        }
+        let (lo, hi) = (plan.bounds[region_index], plan.bounds[region_index + 1]);
+        let read = if plan.section.big_endian {
+            reader::<BigEndian>(
+                reader_file,
+                plan.section,
+                lo,
+                hi,
+                free_rx,
+                work_tx,
+                plan.abort,
+                &mut metrics,
+            )
+        } else {
+            reader::<LittleEndian>(
+                reader_file,
+                plan.section,
+                lo,
+                hi,
+                free_rx,
+                work_tx,
+                plan.abort,
+                &mut metrics,
+            )
+        };
+        if let Err(error) = read {
+            plan.abort.store(true, Ordering::Relaxed);
+            return Err(error);
+        }
+    }
+}
+
+/// Sum the readers' metrics; a mismatch explains other readers' failures, so it is the error kept.
+fn join_readers(
+    readers: Vec<std::thread::ScopedJoinHandle<'_, Result<Metrics>>>,
+) -> (Metrics, Option<BoxError>) {
+    let (mut metrics, mut read_error) = (Metrics::default(), None);
+    for reader_handle in readers {
+        match reader_handle.join().unwrap() {
+            Ok(reader_metrics) => {
+                metrics.units += reader_metrics.units;
+                metrics.bytes += reader_metrics.bytes;
+                metrics.reader_wait += reader_metrics.reader_wait;
+                metrics.reader_read += reader_metrics.reader_read;
+            }
+            Err(error) => {
+                if read_error.is_none() || error.is::<BoundaryMismatch>() {
+                    read_error = Some(error);
+                }
+            }
+        }
+    }
+    (metrics, read_error)
+}
+
+/// Collect the workers' states, adding their times to `metrics`; the first error is returned.
+fn join_workers<S>(
+    workers: Vec<std::thread::ScopedJoinHandle<'_, WorkerOutcome<S>>>,
+    metrics: &mut Metrics,
+) -> (Vec<S>, Option<BoxError>) {
+    let (mut states, mut first_error) = (Vec::new(), None);
+    for worker_handle in workers {
+        let outcome = worker_handle.join().unwrap();
+        states.push(outcome.state);
+        first_error = first_error.or(outcome.error);
+        metrics.worker_wait += outcome.wait;
+        metrics.worker_busy += outcome.busy;
+    }
+    (states, first_error)
 }
 
 #[allow(clippy::too_many_arguments)]

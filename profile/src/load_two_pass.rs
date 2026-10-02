@@ -243,6 +243,66 @@ fn open_binaries(module_paths: &[PathBuf], workers: usize) -> BinaryCache {
     bins
 }
 
+fn read_address_spaces(
+    src: &Source,
+    path: &Path,
+    config: Config,
+    sopts: stream::Options,
+    stats: &mut LoadStats,
+) -> Result<AddressSpaces> {
+    let started = Instant::now();
+    let (meta, report) = meta::read_meta(src, path, config, sopts)?;
+    let spaces = AddressSpaces::build(&meta.events);
+    stats.secs_pass1 = started.elapsed().as_secs_f64();
+    stats.lost_records = meta.lost_records;
+    stats.lost_events = meta.lost_events;
+    stats.fell_back |= report.fell_back;
+    stats.processes = spaces.pids().count();
+    stats.epochs = spaces.epoch_count();
+    Ok(spaces)
+}
+
+fn unwind_samples(
+    src: &Source,
+    path: &Path,
+    config: Config,
+    sopts: stream::Options,
+    shared: &Shared<'_>,
+    stats: &mut LoadStats,
+) -> Result<Vec<Pass2State>> {
+    let started = Instant::now();
+    let (states, report) = stream::stream_open::<Pass2State, _>(
+        &src.file,
+        &src.section,
+        path,
+        config,
+        sopts,
+        |state, buffer| {
+            if src.section.big_endian {
+                pass2_collect::<BigEndian>(state, shared, buffer)
+            } else {
+                pass2_collect::<LittleEndian>(state, shared, buffer)
+            }
+        },
+    )?;
+    stats.secs_pass2 = started.elapsed().as_secs_f64();
+    stats.fell_back |= report.fell_back;
+    Ok(states)
+}
+
+fn merge(states: Vec<Pass2State>, stats: &mut LoadStats) -> Merged {
+    let started = Instant::now();
+    let merged = merge_states(states);
+    stats.secs_merge = started.elapsed().as_secs_f64();
+    let counters = &merged.counters;
+    stats.samples = counters.samples;
+    stats.samples_without_stack = counters.without_stack;
+    stats.physical_frames = counters.frames;
+    stats.suspect_samples = counters.suspect_samples;
+    stats.suspect_frames = counters.suspect_frames;
+    merged
+}
+
 pub fn load_two_pass(
     path: &Path,
     options: Options,
@@ -264,16 +324,7 @@ pub fn load_two_pass(
     };
 
     progress("pass 1: reading task and mmap events");
-    let started = Instant::now();
-    let (meta, rep1) = meta::read_meta(&src, path, config, sopts)?;
-    let spaces = AddressSpaces::build(&meta.events);
-    stats.secs_pass1 = started.elapsed().as_secs_f64();
-    stats.lost_records = meta.lost_records;
-    stats.lost_events = meta.lost_events;
-    stats.fell_back |= rep1.fell_back;
-    stats.processes = spaces.pids().count();
-    stats.epochs = spaces.epoch_count();
-    drop(meta);
+    let spaces = read_address_spaces(&src, path, config, sopts, &mut stats)?;
 
     progress("opening binaries");
     let started = Instant::now();
@@ -286,7 +337,6 @@ pub fn load_two_pass(
     stats.secs_open_binaries = started.elapsed().as_secs_f64();
 
     progress("pass 2: unwinding samples");
-    let started = Instant::now();
     let shared = Shared {
         src: &src,
         spaces: &spaces,
@@ -294,41 +344,15 @@ pub fn load_two_pass(
         empty: EpochUnwind::default(),
         bins: &bins,
     };
-    let (states, rep2) = stream::stream_open::<Pass2State, _>(
-        &src.file,
-        &src.section,
-        path,
-        config,
-        sopts,
-        |state, buffer| {
-            if src.section.big_endian {
-                pass2_collect::<BigEndian>(state, &shared, buffer)
-            } else {
-                pass2_collect::<LittleEndian>(state, &shared, buffer)
-            }
-        },
-    )?;
-    stats.secs_pass2 = started.elapsed().as_secs_f64();
-    stats.fell_back |= rep2.fell_back;
+    let states = unwind_samples(&src, path, config, sopts, &shared, &mut stats)?;
 
     progress("merging");
-    let started = Instant::now();
-    let Merged {
-        phys,
-        rows,
-        counters,
-    } = merge_states(states);
-    stats.secs_merge = started.elapsed().as_secs_f64();
-    stats.samples = counters.samples;
-    stats.samples_without_stack = counters.without_stack;
-    stats.physical_frames = counters.frames;
-    stats.suspect_samples = counters.suspect_samples;
-    stats.suspect_frames = counters.suspect_frames;
+    let merged = merge(states, &mut stats);
 
     progress("symbolizing");
     let started = Instant::now();
     let tasks = module_addresses(
-        phys.nodes[1..]
+        merged.phys.nodes[1..]
             .iter()
             .map(|node| (node.frame.module, node.frame.svma)),
     );
@@ -337,8 +361,9 @@ pub fn load_two_pass(
 
     progress("building call trees");
     let started = Instant::now();
-    let tries = build_tries(&phys, &results);
-    let samples = rows
+    let tries = build_tries(&merged.phys, &results);
+    let samples = merged
+        .rows
         .iter()
         .map(|row| SampleRef {
             time: row.time,

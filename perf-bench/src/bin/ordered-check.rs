@@ -36,9 +36,14 @@ impl Consumer for Check {
     type Local = Stats;
     type Events = usize;
 
-    fn extract(&self, _region: usize, _local: &mut Stats, buf: &[u8]) -> perf_bench::Result<usize> {
+    fn extract(
+        &self,
+        _region: usize,
+        _local: &mut Stats,
+        buffer: &[u8],
+    ) -> perf_bench::Result<usize> {
         self.units_extracted.fetch_add(1, Ordering::Relaxed);
-        Ok(buf.len())
+        Ok(buffer.len())
     }
 
     fn commit(&self, region: usize, events: Vec<usize>) -> perf_bench::Result<()> {
@@ -52,7 +57,7 @@ impl Consumer for Check {
         Ok(())
     }
 
-    fn process(&self, region: usize, local: &mut Stats, buf: &[u8]) -> perf_bench::Result<()> {
+    fn process(&self, region: usize, local: &mut Stats, buffer: &[u8]) -> perf_bench::Result<()> {
         // A unit may only run once its own region (and so every earlier one) is committed.
         if self.committed.load(Ordering::SeqCst) <= region {
             self.violations.fetch_add(1, Ordering::SeqCst);
@@ -63,9 +68,9 @@ impl Consumer for Check {
             .unwrap()
             .push((region, self.committed.load(Ordering::SeqCst)));
         if self.big_endian {
-            parse_chunk::<BigEndian>(buf, &self.ctx, false, local)
+            parse_chunk::<BigEndian>(buffer, &self.ctx, false, local)
         } else {
-            parse_chunk::<LittleEndian>(buf, &self.ctx, false, local)
+            parse_chunk::<LittleEndian>(buffer, &self.ctx, false, local)
         }
     }
 }
@@ -112,8 +117,8 @@ enum Mode {
 }
 
 impl std::fmt::Display for Mode {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.pad(match self {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.pad(match self {
             Mode::Multi => "multi",
             Mode::Sequential => "sequential",
             Mode::Corrupt => "corrupt",
@@ -125,7 +130,7 @@ fn main() -> perf_bench::Result<()> {
     let cli = Cli::parse();
     let (path, trace, cold, verify, mode) =
         (cli.path, cli.trace, cli.cold, !cli.no_verify, cli.mode);
-    let cfg = ordered::Config {
+    let config = ordered::Config {
         readers: cli.readers,
         workers: cli.workers,
         region_bytes: cli.region_mb << 20,
@@ -149,7 +154,7 @@ fn main() -> perf_bench::Result<()> {
         seen: Default::default(),
     };
     let progress = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
-    let opts = ordered::Options {
+    let options = ordered::Options {
         cold,
         corrupt_bound: mode == Mode::Corrupt,
         force_sequential: mode == Mode::Sequential,
@@ -175,50 +180,50 @@ fn main() -> perf_bench::Result<()> {
         })
     });
 
-    let t = Instant::now();
-    let (check, locals, rep) = ordered::stream_ordered(&path, cfg, opts, make)?;
-    let secs = t.elapsed().as_secs_f64();
+    let started = Instant::now();
+    let (check, locals, rep) = ordered::stream_ordered(&path, config, options, make)?;
+    let secs = started.elapsed().as_secs_f64();
     done.store(true, Ordering::Relaxed);
-    if let Some(m) = monitor {
-        let _ = m.join();
+    if let Some(monitor_thread) = monitor {
+        let _ = monitor_thread.join();
     }
     let mut got = Stats::default();
-    for l in &locals {
-        got.merge(l);
+    for local in &locals {
+        got.merge(local);
     }
-    let m = rep.metrics;
+    let metrics = rep.metrics;
     let size = std::fs::metadata(&path)?.len() as f64;
-    let ms = |d: std::time::Duration| d.as_secs_f64() * 1e3;
+    let ms = |duration: std::time::Duration| duration.as_secs_f64() * 1e3;
     println!(
         "{mode:<10}: {secs:.3}s ({:.2} GB/s) | {} regions ({} planned), plan {:.0}ms{} | {} units, {} MiB | max held units {} ({} MiB) | reader: read {:.0}ms wait-token {:.0}ms wait-buffer {:.0}ms | workers: extract {:.0}ms process {:.0}ms idle {:.0}ms",
         size / secs / 1e9,
-        m.regions,
+        metrics.regions,
         rep.regions,
         ms(rep.plan_time),
         if rep.fell_back { ", FELL BACK" } else { "" },
-        m.units,
-        m.bytes >> 20,
-        m.max_held_units,
-        m.max_held_units * (cfg.block as u64 >> 20),
-        ms(m.reader_read),
-        ms(m.reader_wait_token),
-        ms(m.reader_wait_buffer),
-        ms(m.extract_busy),
-        ms(m.process_busy),
-        ms(m.worker_idle)
+        metrics.units,
+        metrics.bytes >> 20,
+        metrics.max_held_units,
+        metrics.max_held_units * (config.block as u64 >> 20),
+        ms(metrics.reader_read),
+        ms(metrics.reader_wait_token),
+        ms(metrics.reader_wait_buffer),
+        ms(metrics.extract_busy),
+        ms(metrics.process_busy),
+        ms(metrics.worker_idle)
     );
 
     let mut ok = true;
-    let v = check.violations.load(Ordering::SeqCst);
-    if v != 0 {
-        println!("ORDERING VIOLATIONS: {v}");
+    let violations = check.violations.load(Ordering::SeqCst);
+    if violations != 0 {
+        println!("ORDERING VIOLATIONS: {violations}");
         ok = false;
     }
-    if check.committed.load(Ordering::SeqCst) as u64 != m.regions {
+    if check.committed.load(Ordering::SeqCst) as u64 != metrics.regions {
         println!(
             "committed {} regions but the run had {}",
             check.committed.load(Ordering::SeqCst),
-            m.regions
+            metrics.regions
         );
         ok = false;
     }
@@ -229,12 +234,14 @@ fn main() -> perf_bench::Result<()> {
         .lock()
         .unwrap()
         .iter()
-        .filter(|&&(r, c)| c < (r + 1 + cfg.lookahead).min(m.regions as usize))
+        .filter(|&&(region, committed)| {
+            committed < (region + 1 + config.lookahead).min(metrics.regions as usize)
+        })
         .count();
     if bad_lookahead != 0 {
         println!(
             "LOOKAHEAD VIOLATIONS: {bad_lookahead} units ran before regions up to r + {} were committed",
-            cfg.lookahead
+            config.lookahead
         );
         ok = false;
     }

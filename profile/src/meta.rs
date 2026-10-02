@@ -78,45 +78,45 @@ impl Event {
 pub fn event_of(ev: &EventRecord<'_>, time: u64) -> Option<Event> {
     const PROT_EXEC: u32 = 4;
     Some(match ev {
-        EventRecord::Mmap2(m) if m.protection & PROT_EXEC != 0 => {
-            let p = m.path.as_slice();
-            let p = String::from_utf8_lossy(&p);
+        EventRecord::Mmap2(mmap) if mmap.protection & PROT_EXEC != 0 => {
+            let path = mmap.path.as_slice();
+            let path = String::from_utf8_lossy(&path);
             Event {
                 time,
                 kind: EventKind::Mmap {
-                    pid: m.pid,
-                    addr: m.address,
-                    len: m.length,
-                    pgoff: m.page_offset,
-                    prot: m.protection,
-                    path: p.trim_end_matches('\0').into(),
+                    pid: mmap.pid,
+                    addr: mmap.address,
+                    len: mmap.length,
+                    pgoff: mmap.page_offset,
+                    prot: mmap.protection,
+                    path: path.trim_end_matches('\0').into(),
                 },
             }
         }
-        EventRecord::Fork(f) => Event {
-            time: f.timestamp,
+        EventRecord::Fork(fork) => Event {
+            time: fork.timestamp,
             kind: EventKind::Fork {
-                pid: f.pid,
-                ppid: f.ppid,
+                pid: fork.pid,
+                ppid: fork.ppid,
             },
         },
-        EventRecord::Exit(f) => Event {
-            time: f.timestamp,
+        EventRecord::Exit(exit) => Event {
+            time: exit.timestamp,
             kind: EventKind::Exit {
-                pid: f.pid,
-                tid: f.tid,
+                pid: exit.pid,
+                tid: exit.tid,
             },
         },
-        EventRecord::Comm(c) => {
-            let n = c.name.as_slice();
-            let name = String::from_utf8_lossy(&n);
+        EventRecord::Comm(comm) => {
+            let name = comm.name.as_slice();
+            let name = String::from_utf8_lossy(&name);
             Event {
                 time,
                 kind: EventKind::Comm {
-                    pid: c.pid,
-                    tid: c.tid,
+                    pid: comm.pid,
+                    tid: comm.tid,
                     name: name.trim_end_matches('\0').into(),
-                    exec: c.is_execve,
+                    exec: comm.is_execve,
                 },
             }
         }
@@ -147,50 +147,51 @@ pub struct Meta {
 }
 
 impl Meta {
-    fn merge(&mut self, mut o: Meta) {
-        self.events.append(&mut o.events);
-        self.samples.append(&mut o.samples);
-        self.lost_events += o.lost_events;
-        self.lost_records += o.lost_records;
-        self.records += o.records;
+    fn merge(&mut self, mut other: Meta) {
+        self.events.append(&mut other.events);
+        self.samples.append(&mut other.samples);
+        self.lost_events += other.lost_events;
+        self.lost_records += other.lost_records;
+        self.records += other.records;
     }
 
     /// Put events and samples in time order (deterministic for equal timestamps).
     pub fn finish(mut self) -> Meta {
         self.events.sort_by(|a, b| a.sort_key().cmp(&b.sort_key()));
-        self.samples.sort_by_key(|s| (s.time, s.tid, s.ip));
+        self.samples
+            .sort_by_key(|sample| (sample.time, sample.tid, sample.ip));
         self
     }
 }
 
-fn collect<T: byteorder::ByteOrder>(meta: &mut Meta, ctx: &Ctx, buf: &[u8]) -> Result<()> {
-    for_each_record::<T>(buf, |r| {
+fn collect<T: byteorder::ByteOrder>(meta: &mut Meta, ctx: &Ctx, buffer: &[u8]) -> Result<()> {
+    for_each_record::<T>(buffer, |record| {
         meta.records += 1;
         // Only kernel event records matter here; perf's synthesized user records are skipped.
-        if r.ty >= 64 {
+        if record.ty >= 64 {
             return Ok(());
         }
-        let raw = ctx.raw_event::<T>(r.ty, r.misc, r.body);
+        let raw = ctx.raw_event::<T>(record.ty, record.misc, record.body);
         let time = raw.timestamp().unwrap_or(0);
         let ev = raw.parse()?;
-        if let Some(e) = event_of(&ev, time) {
-            meta.events.push(e);
+        if let Some(event) = event_of(&ev, time) {
+            meta.events.push(event);
             return Ok(());
         }
         match ev {
-            EventRecord::Sample(s) => {
-                let has_stack = s.user_regs.is_some() && s.user_stack.is_some();
+            EventRecord::Sample(sample) => {
+                let has_stack = sample.user_regs.is_some() && sample.user_stack.is_some();
                 meta.samples.push(SampleRow {
-                    time: s.timestamp.unwrap_or(time),
-                    pid: s.pid.unwrap_or(-1),
-                    tid: s.tid.unwrap_or(-1),
-                    ip: s.ip.unwrap_or(0),
+                    time: sample.timestamp.unwrap_or(time),
+                    pid: sample.pid.unwrap_or(-1),
+                    tid: sample.tid.unwrap_or(-1),
+                    ip: sample.ip.unwrap_or(0),
                     has_stack,
                 });
             }
-            EventRecord::Lost(l) => {
+            EventRecord::Lost(lost) => {
                 meta.lost_records += 1;
-                meta.lost_events += l.count;
+                meta.lost_events += lost.count;
             }
             _ => {}
         }
@@ -202,28 +203,34 @@ fn collect<T: byteorder::ByteOrder>(meta: &mut Meta, ctx: &Ctx, buf: &[u8]) -> R
 pub fn read_meta(
     src: &Source,
     path: &Path,
-    cfg: Config,
-    opts: stream::Options,
+    config: Config,
+    options: stream::Options,
 ) -> Result<(Meta, Report)> {
-    let (states, report) =
-        stream::stream_open::<Meta, _>(&src.file, &src.sec, path, cfg, opts, |m, buf| {
-            if src.sec.big_endian {
-                collect::<BigEndian>(m, &src.ctx, buf)
+    let (states, report) = stream::stream_open::<Meta, _>(
+        &src.file,
+        &src.section,
+        path,
+        config,
+        options,
+        |meta, buffer| {
+            if src.section.big_endian {
+                collect::<BigEndian>(meta, &src.ctx, buffer)
             } else {
-                collect::<LittleEndian>(m, &src.ctx, buf)
+                collect::<LittleEndian>(meta, &src.ctx, buffer)
             }
-        })?;
+        },
+    )?;
     let mut total = Meta::default();
-    for s in states {
-        total.merge(s);
+    for state in states {
+        total.merge(state);
     }
     Ok((total.finish(), report))
 }
 
-/// An opened file with its parse context, shared by the passes.
+/// An opened file with its parse ctx, shared by the passes.
 pub struct Source {
     pub file: std::fs::File,
-    pub sec: perf_bench::split::DataSection,
+    pub section: perf_bench::split::DataSection,
     pub ctx: Ctx,
     /// What the first event's sample period counts: "cycles", "ns" or "events".
     pub period_unit: &'static str,
@@ -231,7 +238,7 @@ pub struct Source {
 
 impl Source {
     pub fn open(path: &Path) -> Result<Source> {
-        let (file, sec) = perf_bench::split::open(path)?;
+        let (file, section) = perf_bench::split::open(path)?;
         let reader = PerfFileReader::parse_file(&file)?;
         let ctx = Ctx::new(
             reader.perf_file.event_attributes(),
@@ -242,7 +249,7 @@ impl Source {
             .perf_file
             .event_attributes()
             .first()
-            .map(|a| &a.attr.type_)
+            .map(|attribute| &attribute.attr.type_)
         {
             Some(PerfEventType::Hardware(
                 HardwareEventId::CpuCycles | HardwareEventId::RefCpuCycles,
@@ -256,7 +263,7 @@ impl Source {
         drop(reader);
         Ok(Source {
             file,
-            sec,
+            section,
             ctx,
             period_unit,
         })

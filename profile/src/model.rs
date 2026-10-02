@@ -55,12 +55,12 @@ pub struct Trie {
 }
 
 impl Trie {
-    pub fn children(&self, n: u32) -> &[u32] {
-        let (a, b) = (
-            self.child_start[n as usize] as usize,
-            self.child_start[n as usize + 1] as usize,
+    pub fn children(&self, node: u32) -> &[u32] {
+        let (start, end) = (
+            self.child_start[node as usize] as usize,
+            self.child_start[node as usize + 1] as usize,
         );
-        &self.children[a..b]
+        &self.children[start..end]
     }
 
     pub fn total(&self) -> u32 {
@@ -101,15 +101,15 @@ impl TrieBuilder {
         })
     }
 
-    pub fn add_self(&mut self, node: u32, n: u32) {
-        self.nodes[node as usize].self_count += n;
+    pub fn add_self(&mut self, node: u32, count: u32) {
+        self.nodes[node as usize].self_count += count;
     }
 
     /// Add one sample whose stack is `path` (root-first frame ids).
     pub fn insert(&mut self, path: impl IntoIterator<Item = u32>) {
         let mut cur = ROOT;
-        for f in path {
-            cur = self.child(cur, f);
+        for frame in path {
+            cur = self.child(cur, frame);
         }
         self.add_self(cur, 1);
     }
@@ -120,28 +120,29 @@ impl TrieBuilder {
             self.nodes[i].total = self.nodes[i].self_count;
         }
         for i in (1..self.nodes.len()).rev() {
-            let (p, t) = (self.nodes[i].parent as usize, self.nodes[i].total);
-            self.nodes[p].total += t;
+            let (parent, total) = (self.nodes[i].parent as usize, self.nodes[i].total);
+            self.nodes[parent].total += total;
         }
         // CSR children, heaviest first (ties by node id for a stable layout).
-        let n = self.nodes.len();
-        let mut count = vec![0u32; n + 1];
+        let node_count = self.nodes.len();
+        let mut count = vec![0u32; node_count + 1];
         for node in &self.nodes[1..] {
             count[node.parent as usize + 1] += 1;
         }
-        for i in 0..n {
+        for i in 0..node_count {
             count[i + 1] += count[i];
         }
         let mut fill = count.clone();
-        let mut children = vec![0u32; n.saturating_sub(1)];
+        let mut children = vec![0u32; node_count.saturating_sub(1)];
         for (i, node) in self.nodes.iter().enumerate().skip(1) {
             let slot = &mut fill[node.parent as usize];
             children[*slot as usize] = i as u32;
             *slot += 1;
         }
-        for p in 0..n {
-            let (a, b) = (count[p] as usize, count[p + 1] as usize);
-            children[a..b].sort_by_key(|&c| (std::cmp::Reverse(self.nodes[c as usize].total), c));
+        for parent in 0..node_count {
+            let (start, end) = (count[parent] as usize, count[parent + 1] as usize);
+            children[start..end]
+                .sort_by_key(|&child| (std::cmp::Reverse(self.nodes[child as usize].total), child));
         }
         Trie {
             nodes: self.nodes,

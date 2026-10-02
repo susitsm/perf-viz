@@ -16,33 +16,39 @@ use perf_profile::{
 };
 
 /// hash of the root-to-node path (frame name, module name, suspect) -> (total, self, node)
-fn canon(p: &Profile, t: &Trie) -> HashMap<u64, (u32, u32, u32)> {
+fn canon(profile: &Profile, trie: &Trie) -> HashMap<u64, (u32, u32, u32)> {
     let mut out = HashMap::new();
     let mut stack = vec![(ROOT, 0u64)];
-    while let Some((n, h)) = stack.pop() {
-        let node = t.nodes[n as usize];
-        out.insert(h, (node.total, node.self_count, n));
-        for &c in t.children(n) {
-            let f = &p.frames[t.nodes[c as usize].frame as usize];
+    while let Some((node_id, hash)) = stack.pop() {
+        let node = trie.nodes[node_id as usize];
+        out.insert(hash, (node.total, node.self_count, node_id));
+        for &child in trie.children(node_id) {
+            let frame = &profile.frames[trie.nodes[child as usize].frame as usize];
             let mut hasher = std::collections::hash_map::DefaultHasher::new();
-            (h, &f.name, p.module_path(f.module), f.suspect).hash(&mut hasher);
-            stack.push((c, hasher.finish()));
+            (
+                hash,
+                &frame.name,
+                profile.module_path(frame.module),
+                frame.suspect,
+            )
+                .hash(&mut hasher);
+            stack.push((child, hasher.finish()));
         }
     }
     out
 }
 
-fn path_of(p: &Profile, t: &Trie, mut n: u32) -> String {
+fn path_of(profile: &Profile, trie: &Trie, mut node: u32) -> String {
     let mut names = Vec::new();
-    while n != ROOT {
+    while node != ROOT {
         names.push(
-            p.frames[t.nodes[n as usize].frame as usize]
+            profile.frames[trie.nodes[node as usize].frame as usize]
                 .name
                 .chars()
                 .take(40)
                 .collect::<String>(),
         );
-        n = t.nodes[n as usize].parent;
+        node = trie.nodes[node as usize].parent;
     }
     names.reverse();
     let tail: Vec<_> = names.iter().rev().take(4).rev().cloned().collect();
@@ -50,19 +56,19 @@ fn path_of(p: &Profile, t: &Trie, mut n: u32) -> String {
 }
 
 /// Children of the node reached by `parent_path_hash` in `t`: (name, module, suspect, total, self).
-fn children_of(p: &Profile, t: &Trie, node: u32) -> Vec<String> {
-    t.children(node)
+fn children_of(profile: &Profile, trie: &Trie, node: u32) -> Vec<String> {
+    trie.children(node)
         .iter()
-        .map(|&c| {
-            let n = t.nodes[c as usize];
-            let f = &p.frames[n.frame as usize];
+        .map(|&child| {
+            let node = trie.nodes[child as usize];
+            let frame = &profile.frames[node.frame as usize];
             format!(
                 "{} [{}]{} total {} self {}",
-                f.name.chars().take(48).collect::<String>(),
-                p.module_name(f.module),
-                if f.suspect { " SUSPECT" } else { "" },
-                n.total,
-                n.self_count
+                frame.name.chars().take(48).collect::<String>(),
+                profile.module_name(frame.module),
+                if frame.suspect { " SUSPECT" } else { "" },
+                node.total,
+                node.self_count
             )
         })
         .collect()
@@ -81,25 +87,29 @@ struct Cli {
 fn main() {
     let cli = Cli::parse();
     let path = cli.path;
-    let opts = cli.load.options();
-    let t = Instant::now();
-    let new = load::load(&path, opts, &mut |s| eprintln!("  new: {s}")).unwrap();
-    let t_new = t.elapsed().as_secs_f64();
-    let t = Instant::now();
+    let options = cli.load.options();
+    let started = Instant::now();
+    let new = load::load(&path, options, &mut |phase| eprintln!("  new: {phase}")).unwrap();
+    let t_new = started.elapsed().as_secs_f64();
+    let started = Instant::now();
     let old = load_replay::load_replay(&path, Default::default(), &mut |_| {}).unwrap();
-    let t_old = t.elapsed().as_secs_f64();
+    let t_old = started.elapsed().as_secs_f64();
 
-    let (a, b) = (&new.stats, &old.stats);
+    let (new_stats, old_stats) = (&new.stats, &old.stats);
     println!(
         "single-pass loader {t_new:.2}s (stream {:.2}, plan {:.2}, merge {:.2}, symbolize {:.2}, build {:.2}; {} regions, <= {} MiB held){} | replay loader {t_old:.2}s",
-        a.secs_stream,
-        a.secs_plan,
-        a.secs_merge,
-        a.secs_symbolize,
-        a.secs_build,
-        a.stream_regions,
-        a.stream_max_held_units,
-        if a.fell_back { " FELL BACK" } else { "" }
+        new_stats.secs_stream,
+        new_stats.secs_plan,
+        new_stats.secs_merge,
+        new_stats.secs_symbolize,
+        new_stats.secs_build,
+        new_stats.stream_regions,
+        new_stats.stream_max_held_units,
+        if new_stats.fell_back {
+            " FELL BACK"
+        } else {
+            ""
+        }
     );
     let mut ok = true;
     let mut check = |name: &str, x: u64, y: u64| {
@@ -110,19 +120,31 @@ fn main() {
             if same { "ok" } else { "DIFFERENT" }
         );
     };
-    check("samples", a.samples, b.samples);
+    check("samples", new_stats.samples, old_stats.samples);
     check(
         "samples without stack",
-        a.samples_without_stack,
-        b.samples_without_stack,
+        new_stats.samples_without_stack,
+        old_stats.samples_without_stack,
     );
-    check("physical frames", a.physical_frames, b.physical_frames);
-    check("suspect samples", a.suspect_samples, b.suspect_samples);
-    check("suspect frames", a.suspect_frames, b.suspect_frames);
+    check(
+        "physical frames",
+        new_stats.physical_frames,
+        old_stats.physical_frames,
+    );
+    check(
+        "suspect samples",
+        new_stats.suspect_samples,
+        old_stats.suspect_samples,
+    );
+    check(
+        "suspect frames",
+        new_stats.suspect_frames,
+        old_stats.suspect_frames,
+    );
     check(
         "unique addresses",
-        a.unique_addresses as u64,
-        b.unique_addresses as u64,
+        new_stats.unique_addresses as u64,
+        old_stats.unique_addresses as u64,
     );
     check(
         "full trie nodes",
@@ -137,7 +159,7 @@ fn main() {
     check(
         "sample refs",
         new.samples.len() as u64,
-        a.samples - a.samples_without_stack,
+        new_stats.samples - new_stats.samples_without_stack,
     );
 
     for (name, tn, to) in [
@@ -147,8 +169,8 @@ fn main() {
         let (cn, co) = (canon(&new, tn), canon(&old, to));
         let mut same = 0usize;
         let mut shown = 0;
-        for (h, &(tot, slf, node)) in &cn {
-            match co.get(h) {
+        for (hash, &(tot, slf, node)) in &cn {
+            match co.get(hash) {
                 Some(&(t2, s2, _)) if t2 == tot && s2 == slf => same += 1,
                 other => {
                     if shown < 5 {
@@ -166,10 +188,16 @@ fn main() {
                             chain.push(x);
                             x = tn.nodes[x as usize].parent;
                         }
-                        for &c in chain.iter().rev() {
-                            let f = &new.frames[tn.nodes[c as usize].frame as usize];
+                        for &child in chain.iter().rev() {
+                            let frame = &new.frames[tn.nodes[child as usize].frame as usize];
                             let mut hasher = std::collections::hash_map::DefaultHasher::new();
-                            (ph, &f.name, new.module_path(f.module), f.suspect).hash(&mut hasher);
+                            (
+                                ph,
+                                &frame.name,
+                                new.module_path(frame.module),
+                                frame.suspect,
+                            )
+                                .hash(&mut hasher);
                             ph = hasher.finish();
                         }
                         println!(
@@ -186,7 +214,7 @@ fn main() {
                 }
             }
         }
-        let only_old = co.keys().filter(|h| !cn.contains_key(h)).count();
+        let only_old = co.keys().filter(|hash| !cn.contains_key(hash)).count();
         let all = same == cn.len() && only_old == 0;
         ok &= all;
         println!(
@@ -198,13 +226,15 @@ fn main() {
     }
     // Sample refs must point at nodes whose totals include them, and be time-sorted.
     assert!(
-        new.samples.windows(2).all(|w| w[0].time <= w[1].time),
+        new.samples
+            .windows(2)
+            .all(|pair| pair[0].time <= pair[1].time),
         "sample refs are time-sorted"
     );
     let leaf_sum: u64 = new
         .samples
         .iter()
-        .map(|s| new.full.nodes[s.full as usize].self_count as u64)
+        .map(|sample| new.full.nodes[sample.full as usize].self_count as u64)
         .count() as u64;
     let _ = leaf_sum;
     println!(

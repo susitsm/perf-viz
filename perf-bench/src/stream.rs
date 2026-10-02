@@ -52,62 +52,73 @@ pub struct Report {
 ///
 /// If the multi-reader run fails verification, `work` is called again from scratch with fresh
 /// states in a single-reader run, so `work` must only depend on its arguments.
-pub fn stream<S, W>(path: &Path, cfg: Config, opts: Options, work: W) -> Result<(Vec<S>, Report)>
-where
-    S: Default + Send,
-    W: Fn(&mut S, &[u8]) -> Result<()> + Sync,
-{
-    let (file, sec) = split::open(path)?;
-    stream_open(&file, &sec, path, cfg, opts, work)
-}
-
-/// Like [`stream`], for callers that already opened the file.
-pub fn stream_open<S, W>(
-    file: &std::fs::File,
-    sec: &DataSection,
+pub fn stream<S, W>(
     path: &Path,
-    cfg: Config,
-    opts: Options,
+    config: Config,
+    options: Options,
     work: W,
 ) -> Result<(Vec<S>, Report)>
 where
     S: Default + Send,
     W: Fn(&mut S, &[u8]) -> Result<()> + Sync,
 {
-    if opts.cold {
+    let (file, section) = split::open(path)?;
+    stream_open(&file, &section, path, config, options, work)
+}
+
+/// Like [`stream`], for callers that already opened the file.
+pub fn stream_open<S, W>(
+    file: &std::fs::File,
+    section: &DataSection,
+    path: &Path,
+    config: Config,
+    options: Options,
+    work: W,
+) -> Result<(Vec<S>, Report)>
+where
+    S: Default + Send,
+    W: Fn(&mut S, &[u8]) -> Result<()> + Sync,
+{
+    if options.cold {
         split::drop_cache(file);
     }
     let mut report = Report {
         regions: 1,
         ..Default::default()
     };
-    if cfg.readers > 1 {
-        let t = Instant::now();
-        let mut bounds =
-            anchor::plan_regions(file, sec, cfg.readers * opts.regions_per_reader.max(1))?;
-        if opts.corrupt_bound && bounds.len() > 2 {
+    if config.readers > 1 {
+        let started = Instant::now();
+        let mut bounds = anchor::plan_regions(
+            file,
+            section,
+            config.readers * options.regions_per_reader.max(1),
+        )?;
+        if options.corrupt_bound && bounds.len() > 2 {
             bounds[1] += 4; // record sizes are multiples of 8, so this is never a boundary
         }
-        report.plan_time = t.elapsed();
+        report.plan_time = started.elapsed();
         report.regions = bounds.len() - 1;
-        match pipeline::run_regions::<S, _>(file, Some(path), sec, &bounds, cfg, &work) {
+        match pipeline::run_regions::<S, _>(file, Some(path), section, &bounds, config, &work) {
             Ok((states, metrics)) => {
                 report.metrics = metrics;
                 return Ok((states, report));
             }
-            Err(e) if e.is::<BoundaryMismatch>() => {
-                eprintln!("warning: {e}; redoing with a single reader");
+            Err(error) if error.is::<BoundaryMismatch>() => {
+                eprintln!("warning: {error}; redoing with a single reader");
                 report.fell_back = true;
             }
-            Err(e) => return Err(e),
+            Err(error) => return Err(error),
         }
     }
     let (states, metrics) = pipeline::run_regions::<S, _>(
         file,
         Some(path),
-        sec,
-        &[0, sec.len],
-        Config { readers: 1, ..cfg },
+        section,
+        &[0, section.len],
+        Config {
+            readers: 1,
+            ..config
+        },
         &work,
     )?;
     report.metrics = metrics;

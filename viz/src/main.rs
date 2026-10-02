@@ -66,8 +66,8 @@ impl Tab {
         }
     }
 
-    fn from_name(n: TabName) -> Tab {
-        match n {
+    fn from_name(name: TabName) -> Tab {
+        match name {
             TabName::Summary => Tab::Summary,
             TabName::Flame => Tab::FlameGraph,
             TabName::Topdown => Tab::TopDown,
@@ -78,16 +78,16 @@ impl Tab {
     }
 }
 
-fn theme_pref(t: Theme) -> egui::ThemePreference {
-    match t {
+fn theme_pref(theme: Theme) -> egui::ThemePreference {
+    match theme {
         Theme::System => egui::ThemePreference::System,
         Theme::Light => egui::ThemePreference::Light,
         Theme::Dark => egui::ThemePreference::Dark,
     }
 }
 
-fn theme_setting(p: egui::ThemePreference) -> Theme {
-    match p {
+fn theme_setting(preference: egui::ThemePreference) -> Theme {
+    match preference {
         egui::ThemePreference::System => Theme::System,
         egui::ThemePreference::Light => Theme::Light,
         egui::ThemePreference::Dark => Theme::Dark,
@@ -129,14 +129,14 @@ struct LoadInfo {
 }
 
 impl SummaryInfo {
-    fn new(p: &Profile) -> Self {
-        let pids: HashSet<i32> = p.samples.iter().map(|s| s.pid).collect();
-        let tids: HashSet<i32> = p.samples.iter().map(|s| s.tid).collect();
+    fn new(profile: &Profile) -> Self {
+        let pids: HashSet<i32> = profile.samples.iter().map(|sample| sample.pid).collect();
+        let tids: HashSet<i32> = profile.samples.iter().map(|sample| sample.tid).collect();
         Self {
             processes: pids.len(),
             threads: tids.len(),
-            first_ns: p.samples.first().map_or(0, |s| s.time),
-            last_ns: p.samples.last().map_or(0, |s| s.time),
+            first_ns: profile.samples.first().map_or(0, |sample| sample.time),
+            last_ns: profile.samples.last().map_or(0, |sample| sample.time),
             load: None,
         }
     }
@@ -269,7 +269,7 @@ struct Args {
     theme: Option<egui::ThemePreference>,
     tab: Tab,
     cold: bool,
-    opts: load::Options,
+    load_options: load::Options,
     process: Option<i32>,
     thread: Option<i32>,
     search: String,
@@ -336,7 +336,7 @@ struct App {
     /// "Tune now" was chosen for the pending load.
     tune_first: bool,
     file_size: u64,
-    rx: Option<mpsc::Receiver<Result<Profile, String>>>,
+    receiver: Option<mpsc::Receiver<Result<Profile, String>>>,
     log: Arc<Mutex<LoadLog>>,
     bytes_read: Arc<AtomicU64>,
     load_started: Instant,
@@ -364,7 +364,7 @@ struct App {
     pending_range_ms: Option<MsRange>,
     /// A selection being dragged, as x coordinates.
     drag: Option<XDrag>,
-    tl: Option<TimelineCache>,
+    timeline_data: Option<TimelineCache>,
 
     // Filters
     sel_pid: Option<i32>,
@@ -401,8 +401,8 @@ struct App {
 impl App {
     fn new(cc: &eframe::CreationContext<'_>, args: Args) -> Self {
         timing("window and renderer ready");
-        if let Some(t) = args.theme {
-            cc.egui_ctx.set_theme(t);
+        if let Some(theme) = args.theme {
+            cc.egui_ctx.set_theme(theme);
         }
         args.harness.configure(&cc.egui_ctx);
         Self::from_args(&cc.egui_ctx, args)
@@ -410,15 +410,15 @@ impl App {
 
     /// Open another file, keeping the settings in effect now (view, cost, tab, saved config).
     fn open(&mut self, ctx: &egui::Context, path: PathBuf) {
-        let mut a = self.base.clone();
-        a.path = Some(path);
-        a.truncated = self.truncated;
-        a.cost = Some(self.cost);
-        a.tab = self.tab;
-        a.config = self.config.clone();
-        a.harness = self.harness.after_open();
+        let mut args = self.base.clone();
+        args.path = Some(path);
+        args.truncated = self.truncated;
+        args.cost = Some(self.cost);
+        args.tab = self.tab;
+        args.config = self.config.clone();
+        args.harness = self.harness.after_open();
         let tuner = std::mem::take(&mut self.tuner);
-        *self = Self::from_args(ctx, a);
+        *self = Self::from_args(ctx, args);
         self.tuner = tuner;
     }
 
@@ -427,16 +427,16 @@ impl App {
         if self.picker.is_some() {
             return;
         }
-        let (tx, rx) = mpsc::channel();
+        let (sender, receiver) = mpsc::channel();
         let ctx = ctx.clone();
         std::thread::spawn(move || {
             let picked = rfd::FileDialog::new()
                 .set_title("Open a perf.data file")
                 .pick_file();
-            let _ = tx.send(picked);
+            let _ = sender.send(picked);
             ctx.request_repaint();
         });
-        self.picker = Some(rx);
+        self.picker = Some(receiver);
     }
 
     fn from_args(ctx: &egui::Context, args: Args) -> Self {
@@ -454,8 +454,8 @@ impl App {
         let file_size = args
             .path
             .as_ref()
-            .and_then(|p| std::fs::metadata(p).ok())
-            .map_or(0, |m| m.len());
+            .and_then(|path| std::fs::metadata(path).ok())
+            .map_or(0, |metadata| metadata.len());
         // The first time a file is opened, offer to tune the reader before the load starts.
         let ask_to_tune = args.path.is_some()
             && args.config.tuning_prompted != Some(true)
@@ -466,7 +466,7 @@ impl App {
             base,
             picker: None,
             tuner: Tuner::default(),
-            rx: None,
+            receiver: None,
             pending_load: ask_to_tune,
             frames_total: 0,
             tune_first: false,
@@ -491,7 +491,7 @@ impl App {
             range: None,
             pending_range_ms: args.range_ms,
             drag: None,
-            tl: None,
+            timeline_data: None,
             sel_pid: args.process,
             sel_tid: args.thread,
             proc_rows: Vec::new(),
@@ -526,21 +526,21 @@ impl App {
         };
         self.pending_load = false;
         self.load_started = Instant::now();
-        let (tx, rx) = mpsc::channel();
-        self.rx = Some(rx);
+        let (sender, receiver) = mpsc::channel();
+        self.receiver = Some(receiver);
         let (log, ctx) = (self.log.clone(), ctx.clone());
-        let mut opts = self.base.opts.clone();
-        opts.cold = self.base.cold;
-        opts.progress = Some(self.bytes_read.clone());
+        let mut load_options = self.base.load_options.clone();
+        load_options.cold = self.base.cold;
+        load_options.progress = Some(self.bytes_read.clone());
         std::thread::spawn(move || {
             let log2 = log.clone();
             let ctx2 = ctx.clone();
-            let r = load::load(&path, opts, &mut move |s| {
-                log2.lock().unwrap().begin(s);
+            let result = load::load(&path, load_options, &mut move |phase| {
+                log2.lock().unwrap().begin(phase);
                 ctx2.request_repaint();
             });
             log.lock().unwrap().finish();
-            let _ = tx.send(r.map_err(|e| e.to_string()));
+            let _ = sender.send(result.map_err(|error| error.to_string()));
             ctx.request_repaint();
         });
     }
@@ -590,60 +590,60 @@ impl App {
     /// file is opened (the one on screen is already loaded).
     fn reader_options(&mut self, ui: &mut egui::Ui) {
         ui.label(RichText::new("Reader (applies to the next file opened)").weak());
-        let o = &mut self.base.opts;
-        let r = &mut self.config.reader;
+        let options = &mut self.base.load_options;
+        let reader = &mut self.config.reader;
         let mut changed = false;
         egui::Grid::new("reader_opts").num_columns(2).spacing([12.0, 4.0]).show(ui, |ui| {
-            let row = |ui: &mut egui::Ui, label: &str, tip: &str, v: &mut usize, range: std::ops::RangeInclusive<usize>, store: &mut Option<usize>| -> bool {
+            let row = |ui: &mut egui::Ui, label: &str, tip: &str, value: &mut usize, range: std::ops::RangeInclusive<usize>, store: &mut Option<usize>| -> bool {
                 ui.label(label).on_hover_text(tip);
-                let c = ui.add(egui::DragValue::new(v).range(range)).changed();
-                if c {
-                    *store = Some(*v);
+                let changed = ui.add(egui::DragValue::new(value).range(range)).changed();
+                if changed {
+                    *store = Some(*value);
                 }
                 ui.end_row();
-                c
+                changed
             };
-            changed |= row(ui, "Readers", "Threads reading the file in parallel", &mut o.readers, 1..=32, &mut r.readers);
-            changed |= row(ui, "Parse threads", "Threads parsing and unwinding", &mut o.workers, 1..=128, &mut r.threads);
-            let mut region = o.region_mb as usize;
+            changed |= row(ui, "Readers", "Threads reading the file in parallel", &mut options.readers, 1..=32, &mut reader.readers);
+            changed |= row(ui, "Parse threads", "Threads parsing and unwinding", &mut options.workers, 1..=128, &mut reader.threads);
+            let mut region = options.region_mb as usize;
             ui.label("Region (MiB)").on_hover_text("Size of one file region; each reader works on a region at a time. Larger regions read big files faster.");
             if ui.add(egui::DragValue::new(&mut region).range(4..=2048).speed(2.0)).changed() {
-                o.region_mb = region as u64;
-                r.region_mb = Some(region as u64);
+                options.region_mb = region as u64;
+                reader.region_mb = Some(region as u64);
                 changed = true;
             }
             ui.end_row();
-            changed |= row(ui, "Regions open", "Regions held in memory at once (memory is about Region × this)", &mut o.in_flight, 1..=64, &mut r.in_flight);
-            changed |= row(ui, "Lookahead", "Process a region after this many following regions are read", &mut o.lookahead, 0..=8, &mut r.lookahead);
+            changed |= row(ui, "Regions open", "Regions held in memory at once (memory is about Region × this)", &mut options.in_flight, 1..=64, &mut reader.in_flight);
+            changed |= row(ui, "Lookahead", "Process a region after this many following regions are read", &mut options.lookahead, 0..=8, &mut reader.lookahead);
         });
         ui.label(
             RichText::new(format!(
                 "about {} MiB of read buffers",
-                o.region_mb * o.in_flight as u64
+                options.region_mb * options.in_flight as u64
             ))
             .weak(),
         );
-        let mut dwarf = o.dwarf == perf_profile::symbolize::DwarfMode::Auto;
+        let mut dwarf = options.dwarf == perf_profile::symbolize::DwarfMode::Auto;
         if ui
             .checkbox(&mut dwarf, "Use DWARF (inlined frames, file:line)")
             .on_hover_text("Off: function names only, but faster to load")
             .changed()
         {
-            o.dwarf = if dwarf {
+            options.dwarf = if dwarf {
                 perf_profile::symbolize::DwarfMode::Auto
             } else {
                 perf_profile::symbolize::DwarfMode::Never
             };
-            r.dwarf = Some(if dwarf { Dwarf::Auto } else { Dwarf::Never });
+            reader.dwarf = Some(if dwarf { Dwarf::Auto } else { Dwarf::Never });
             changed = true;
         }
         if ui
-            .checkbox(&mut o.cold, "Drop the file from the page cache first")
+            .checkbox(&mut options.cold, "Drop the file from the page cache first")
             .on_hover_text("For timing a cold read; adds time when the file is cached")
             .changed()
         {
-            self.base.cold = o.cold;
-            r.cold = Some(o.cold);
+            self.base.cold = options.cold;
+            reader.cold = Some(options.cold);
             changed = true;
         }
         if ui
@@ -651,9 +651,9 @@ impl App {
             .on_hover_text("Back to the built-in defaults")
             .clicked()
         {
-            *r = ReaderConfig::default();
+            *reader = ReaderConfig::default();
             let fresh = load::Options::default();
-            *o = fresh;
+            *options = fresh;
             self.base.cold = false;
             changed = true;
         }
@@ -693,9 +693,9 @@ impl App {
             {
                 self.tuner.open_for(ctx, None);
             }
-            if let Some(p) = config::path() {
+            if let Some(path) = config::path() {
                 ui.add_space(28.0);
-                ui.weak(format!("settings: {}", p.display()));
+                ui.weak(format!("settings: {}", path.display()));
             }
         });
     }
@@ -703,7 +703,7 @@ impl App {
     fn path_text(&self) -> String {
         self.path
             .as_ref()
-            .map_or(String::new(), |p| p.display().to_string())
+            .map_or(String::new(), |path| path.display().to_string())
     }
 
     fn view(&self) -> usize {
@@ -712,8 +712,8 @@ impl App {
 
     fn filter(&self) -> Filter {
         match (self.sel_tid, self.sel_pid) {
-            (Some(t), _) => Filter::Thread(t),
-            (None, Some(p)) => Filter::Process(p),
+            (Some(thread_id), _) => Filter::Thread(thread_id),
+            (None, Some(process_id)) => Filter::Process(process_id),
             _ => Filter::All,
         }
     }
@@ -746,17 +746,17 @@ impl App {
         let active = log
             .entries
             .last()
-            .filter(|e| e.end.is_none())
-            .map(|e| e.name.as_str());
+            .filter(|phase| phase.end.is_none())
+            .map(|phase| phase.name.as_str());
         for (name, label) in PHASES {
-            let entry = log.entries.iter().find(|e| e.name == name);
+            let entry = log.entries.iter().find(|phase| phase.name == name);
             // Status marks are drawn, not typed: the default font lacks the usual check/cross glyphs.
             let dot = |ui: &mut egui::Ui, fill: Option<Color32>| {
-                let (r, _) = ui.allocate_exact_size(vec2(14.0, 14.0), Sense::hover());
+                let (rect, _) = ui.allocate_exact_size(vec2(14.0, 14.0), Sense::hover());
                 match fill {
-                    Some(c) => ui.painter().circle_filled(r.center(), 5.0, c),
+                    Some(color) => ui.painter().circle_filled(rect.center(), 5.0, color),
                     None => ui.painter().circle_stroke(
-                        r.center(),
+                        rect.center(),
                         5.0,
                         Stroke::new(1.0, ui.visuals().weak_text_color()),
                     ),
@@ -802,25 +802,26 @@ impl App {
     }
 }
 
-fn module_color(p: &Profile, module: u32, name: &str) -> Color32 {
+fn module_color(profile: &Profile, module: u32, name: &str) -> Color32 {
     // Hue from the module, a little brightness variation from the function name.
-    let h = |s: &str| {
-        s.bytes().fold(0xcbf29ce484222325u64, |a, b| {
-            (a ^ b as u64).wrapping_mul(0x100000001b3)
-        })
+    let hash = |text: &str| {
+        text.bytes()
+            .fold(0xcbf29ce484222325u64, |hash_so_far, byte| {
+                (hash_so_far ^ byte as u64).wrapping_mul(0x100000001b3)
+            })
     };
-    let hue = (h(p.module_name(module)) % 360) as f32 / 360.0;
-    let v = 0.78 + 0.16 * ((h(name) % 100) as f32 / 100.0);
-    egui::ecolor::Hsva::new(hue, 0.45, v, 1.0).into()
+    let hue = (hash(profile.module_name(module)) % 360) as f32 / 360.0;
+    let brightness = 0.78 + 0.16 * ((hash(name) % 100) as f32 / 100.0);
+    egui::ecolor::Hsva::new(hue, 0.45, brightness, 1.0).into()
 }
 
-fn frame_color(p: &Profile, f: &FrameInfo) -> Color32 {
-    if f.suspect {
+fn frame_color(profile: &Profile, frame: &FrameInfo) -> Color32 {
+    if frame.suspect {
         Color32::from_rgb(200, 60, 60)
-    } else if f.raw {
+    } else if frame.raw {
         Color32::from_gray(150)
     } else {
-        module_color(p, f.module, &f.name)
+        module_color(profile, frame.module, &frame.name)
     }
 }
 
@@ -851,13 +852,16 @@ impl eframe::App for App {
                 .dropped_files
                 .iter()
                 .next()
-                .map(|f| f.path().to_path_buf())
+                .map(|file| file.path().to_path_buf())
         });
-        let picked = self.picker.as_ref().and_then(|rx| match rx.try_recv() {
-            Ok(p) => Some(p),
-            Err(mpsc::TryRecvError::Empty) => None,
-            Err(mpsc::TryRecvError::Disconnected) => Some(None),
-        });
+        let picked = self
+            .picker
+            .as_ref()
+            .and_then(|receiver| match receiver.try_recv() {
+                Ok(picked) => Some(picked),
+                Err(mpsc::TryRecvError::Empty) => None,
+                Err(mpsc::TryRecvError::Disconnected) => Some(None),
+            });
         if picked.is_some() {
             self.picker = None;
         }
@@ -886,15 +890,15 @@ impl eframe::App for App {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
         }
         let open_after = tuned.open_file;
-        if let Some(t) = tuned.apply {
+        if let Some(settings) = tuned.apply {
             self.config.tuning_prompted = Some(true);
-            self.config.reader.readers = Some(t.readers);
-            self.config.reader.region_mb = Some(t.region_mb);
-            self.config.reader.in_flight = Some(t.in_flight);
+            self.config.reader.readers = Some(settings.readers);
+            self.config.reader.region_mb = Some(settings.region_mb);
+            self.config.reader.in_flight = Some(settings.in_flight);
             config::save(&self.config);
-            self.base.opts.readers = t.readers;
-            self.base.opts.region_mb = t.region_mb;
-            self.base.opts.in_flight = t.in_flight;
+            self.base.load_options.readers = settings.readers;
+            self.base.load_options.region_mb = settings.region_mb;
+            self.base.load_options.in_flight = settings.in_flight;
         }
         if let Some(path) = open_after {
             self.open(&ctx, path);
@@ -927,22 +931,24 @@ impl eframe::App for App {
             );
         }
 
-        if let Some(rx) = &self.rx {
-            match rx.try_recv() {
-                Ok(Ok(p)) => {
-                    if p.stats.samples_with_period == 0 {
+        if let Some(receiver) = &self.receiver {
+            match receiver.try_recv() {
+                Ok(Ok(loaded_profile)) => {
+                    if loaded_profile.stats.samples_with_period == 0 {
                         self.cost = Cost::Samples;
                     }
-                    self.proc_rows = filter::processes(&p, self.cost);
-                    self.funcs = Some(Functions::new(&p));
-                    self.summary = SummaryInfo::new(&p);
+                    self.proc_rows = filter::processes(&loaded_profile, self.cost);
+                    self.funcs = Some(Functions::new(&loaded_profile));
+                    self.summary = SummaryInfo::new(&loaded_profile);
                     self.summary.load = {
                         let log = self.log.lock().unwrap();
                         let read = log
                             .entries
                             .iter()
-                            .find(|e| e.name == PHASES[0].0)
-                            .and_then(|e| e.end.map(|end| (end - e.start).as_secs_f32()));
+                            .find(|phase| phase.name == PHASES[0].0)
+                            .and_then(|phase| {
+                                phase.end.map(|end| (end - phase.start).as_secs_f32())
+                            });
                         read.map(|read_secs| LoadInfo {
                             file_bytes: self.file_size,
                             read_secs,
@@ -950,7 +956,7 @@ impl eframe::App for App {
                         })
                     };
                     if let (Some(ms), Some(first)) =
-                        (self.pending_range_ms.take(), p.samples.first())
+                        (self.pending_range_ms.take(), loaded_profile.samples.first())
                     {
                         self.range = Some(TimeRange {
                             start: first.time + (ms.start_ms * 1e6) as u64,
@@ -958,31 +964,35 @@ impl eframe::App for App {
                         });
                     }
                     // `--thread` alone: find the thread's process so the selectors agree.
-                    if let (Some(t), None) = (self.sel_tid, self.sel_pid) {
-                        self.sel_pid = p.samples.iter().find(|s| s.tid == t).map(|s| s.pid);
+                    if let (Some(thread_id), None) = (self.sel_tid, self.sel_pid) {
+                        self.sel_pid = loaded_profile
+                            .samples
+                            .iter()
+                            .find(|sample| sample.tid == thread_id)
+                            .map(|sample| sample.pid);
                     }
-                    self.profile = Some(Arc::new(p));
-                    self.rx = None;
+                    self.profile = Some(Arc::new(loaded_profile));
+                    self.receiver = None;
                 }
-                Ok(Err(e)) => {
-                    self.error = Some(e);
-                    self.rx = None;
+                Ok(Err(message)) => {
+                    self.error = Some(message);
+                    self.receiver = None;
                 }
                 Err(_) => {}
             }
         }
 
-        let Some(profile) = self.profile.clone() else {
+        let Some(shared_profile) = self.profile.clone() else {
             egui::CentralPanel::default().show(ui, |ui| {
                 if self.path.is_none() {
                     self.welcome_screen(ui, &ctx);
                 } else if self.pending_load {
                     self.tune_prompt_screen(ui, &ctx);
-                } else if let Some(e) = self.error.clone() {
+                } else if let Some(message) = self.error.clone() {
                     ui.add_space(40.0);
                     ui.colored_label(
                         pal.suspect(),
-                        format!("Failed to load {}: {e}", self.path_text()),
+                        format!("Failed to load {}: {message}", self.path_text()),
                     );
                     ui.add_space(8.0);
                     if ui.button("Open another file…").clicked() {
@@ -998,7 +1008,7 @@ impl eframe::App for App {
             });
             return;
         };
-        let p: &Profile = &profile;
+        let profile: &Profile = &shared_profile;
         self.frames_since_load += 1;
 
         self.harness.poll_screen(&ctx, self.frames_since_load);
@@ -1013,8 +1023,8 @@ impl eframe::App for App {
                 }
                 ui.label(self.path_text());
                 ui.separator();
-                for (t, label) in TABS {
-                    ui.selectable_value(&mut self.tab, t, label);
+                for (tab, label) in TABS {
+                    ui.selectable_value(&mut self.tab, tab, label);
                 }
                 ui.separator();
                 // Stays open while settings are changed; closes on a click outside.
@@ -1022,21 +1032,21 @@ impl eframe::App for App {
                     .config(egui::containers::menu::MenuConfig::new().close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside))
                     .ui(ui, |ui| {
                         ui.set_min_width(230.0);
-                        if p.stats.samples_with_period > 0 {
+                        if profile.stats.samples_with_period > 0 {
                             ui.label(RichText::new("Cost").weak());
                             let before = self.cost;
                             ui.radio_value(&mut self.cost, Cost::Samples, "Samples").on_hover_text("Count each sample once");
-                            ui.radio_value(&mut self.cost, Cost::Cycles, cycles_label(p)).on_hover_text("Weigh each sample by its period: the events (cycles) it stands for");
+                            ui.radio_value(&mut self.cost, Cost::Cycles, cycles_label(profile)).on_hover_text("Weigh each sample by its period: the events (cycles) it stands for");
                             if self.cost != before {
                                 self.config.cost = Some(self.cost);
                                 config::save(&self.config);
-                                self.proc_rows = filter::processes(p, self.cost);
+                                self.proc_rows = filter::processes(profile, self.cost);
                                 self.totals_key = None;
                             }
                             ui.separator();
                         }
                         ui.label(RichText::new("Theme").weak());
-                        let mut pref = ctx.options(|o| o.theme_preference);
+                        let mut pref = ctx.options(|options| options.theme_preference);
                         let before = pref;
                         ui.radio_value(&mut pref, egui::ThemePreference::System, "System").on_hover_text("Follow the desktop's light/dark setting (dark if it has none)");
                         ui.radio_value(&mut pref, egui::ThemePreference::Light, "Light");
@@ -1062,15 +1072,15 @@ impl eframe::App for App {
                         }
                     });
                 ui.separator();
-                let (r, _) = ui.allocate_exact_size(vec2(12.0, 12.0), Sense::hover());
-                ui.painter().rect_filled(r, 2.0, Color32::from_rgb(200, 60, 60)); // the same red as the boxes
+                let (rect, _) = ui.allocate_exact_size(vec2(12.0, 12.0), Sense::hover());
+                ui.painter().rect_filled(rect, 2.0, Color32::from_rgb(200, 60, 60)); // the same red as the boxes
                 ui.label("suspect tail: from the first invalid return address out to the root");
             });
             ui.horizontal_wrapped(|ui| {
                 // Process selector
                 let proc_text = match self.sel_pid {
                     None => "All processes".to_string(),
-                    Some(pid) => format!("{} ({pid})", p.comm.get(&pid).map_or("?", String::as_str)),
+                    Some(pid) => format!("{} ({pid})", profile.comm.get(&pid).map_or("?", String::as_str)),
                 };
                 ui.label("Process:");
                 egui::ComboBox::from_id_salt("proc").width(230.0).selected_text(proc_text).show_ui(ui, |ui| {
@@ -1079,19 +1089,19 @@ impl eframe::App for App {
                         (self.sel_pid, self.sel_tid) = (None, None);
                         filter_changed = true;
                     }
-                    let q = self.proc_query.to_lowercase();
+                    let query_lowercase = self.proc_query.to_lowercase();
                     egui::ScrollArea::vertical().max_height(320.0).show(ui, |ui| {
                         let mut shown = 0;
-                        for r in &self.proc_rows {
+                        for row in &self.proc_rows {
                             if shown >= MAX_LIST {
                                 ui.weak(format!("…refine the filter to see more of {} processes", self.proc_rows.len()));
                                 break;
                             }
-                            if q.is_empty() || r.comm.to_lowercase().contains(&q) || r.pid.to_string().contains(&q) {
+                            if query_lowercase.is_empty() || row.comm.to_lowercase().contains(&query_lowercase) || row.pid.to_string().contains(&query_lowercase) {
                                 shown += 1;
-                                let label = format!("{} ({}) — {} {}", r.comm, r.pid, self.cost.format(r.cost), noun(p, self.cost));
-                                if ui.selectable_label(self.sel_pid == Some(r.pid), label).clicked() {
-                                    (self.sel_pid, self.sel_tid) = (Some(r.pid), None);
+                                let label = format!("{} ({}) — {} {}", row.comm, row.pid, self.cost.format(row.cost), noun(profile, self.cost));
+                                if ui.selectable_label(self.sel_pid == Some(row.pid), label).clicked() {
+                                    (self.sel_pid, self.sel_tid) = (Some(row.pid), None);
                                     filter_changed = true;
                                 }
                             }
@@ -1101,15 +1111,15 @@ impl eframe::App for App {
                 // Thread selector, once a process is chosen
                 if let Some(pid) = self.sel_pid {
                     ui.label("Thread:");
-                    let text = self.sel_tid.map_or("All threads".to_string(), |t| t.to_string());
+                    let text = self.sel_tid.map_or("All threads".to_string(), |thread_id| thread_id.to_string());
                     egui::ComboBox::from_id_salt("thread").width(140.0).selected_text(text).show_ui(ui, |ui| {
                         if ui.selectable_label(self.sel_tid.is_none(), "All threads").clicked() {
                             self.sel_tid = None;
                             filter_changed = true;
                         }
                         egui::ScrollArea::vertical().max_height(320.0).show(ui, |ui| {
-                            for (tid, n) in filter::threads(p, pid, self.cost).into_iter().take(MAX_LIST) {
-                                if ui.selectable_label(self.sel_tid == Some(tid), format!("{tid} — {} {}", self.cost.format(n), noun(p, self.cost))).clicked() {
+                            for (tid, cost) in filter::threads(profile, pid, self.cost).into_iter().take(MAX_LIST) {
+                                if ui.selectable_label(self.sel_tid == Some(tid), format!("{tid} — {} {}", self.cost.format(cost), noun(profile, self.cost))).clicked() {
                                     self.sel_tid = Some(tid);
                                     filter_changed = true;
                                 }
@@ -1140,12 +1150,12 @@ impl eframe::App for App {
         // are per node of the chosen trie, so a stale trie would index them out of range.
         let view = self.view();
         let trie: &Trie = if self.truncated {
-            &p.truncated
+            &profile.truncated
         } else {
-            &p.full
+            &profile.full
         };
         let cost = self.cost;
-        let unit = noun(p, cost);
+        let unit = noun(profile, cost);
         let totals_key = TotalsKey {
             truncated: self.truncated,
             filter,
@@ -1153,11 +1163,11 @@ impl eframe::App for App {
             cost,
         };
         if self.totals_key != Some(totals_key) {
-            self.totals = filter::totals_in(p, self.truncated, filter, self.range, cost);
+            self.totals = filter::totals_in(profile, self.truncated, filter, self.range, cost);
             self.grand_total = if filter == Filter::All && self.range.is_none() {
                 self.totals[ROOT as usize]
             } else {
-                filter::totals_in(p, self.truncated, Filter::All, None, cost)[ROOT as usize]
+                filter::totals_in(profile, self.truncated, Filter::All, None, cost)[ROOT as usize]
             };
             self.selfs = views::self_counts(trie, &self.totals);
             if let Some(funcs) = &self.funcs {
@@ -1176,8 +1186,9 @@ impl eframe::App for App {
             totals_version: self.totals_version,
         };
         if self.search_applied.as_ref() != Some(&search_key) {
-            self.matches = filter::matching_frames(p, &self.search);
-            self.coverage = filter::search_coverage(p, self.truncated, &self.totals, &self.matches);
+            self.matches = filter::matching_frames(profile, &self.search);
+            self.coverage =
+                filter::search_coverage(profile, self.truncated, &self.totals, &self.matches);
             self.search_applied = Some(search_key);
         }
         let totals = &self.totals;
@@ -1187,35 +1198,34 @@ impl eframe::App for App {
 
         // ---- timeline: build its data, and show the compact strip on every tab but its own ----
         let tl_bins = (((ui.available_width() - TL_LABEL_W - 10.0) / 2.0).max(60.0)) as usize;
-        let timeline_current = self
-            .tl
-            .as_ref()
-            .is_some_and(|t| t.filter == filter && t.bins == tl_bins && t.cost == cost);
+        let timeline_current = self.timeline_data.as_ref().is_some_and(|cache| {
+            cache.filter == filter && cache.bins == tl_bins && cache.cost == cost
+        });
         if !timeline_current {
-            self.tl = Some(TimelineCache {
+            self.timeline_data = Some(TimelineCache {
                 filter,
                 bins: tl_bins,
                 cost,
-                timeline: timeline::build(p, filter, tl_bins, 12, cost),
+                timeline: timeline::build(profile, filter, tl_bins, 12, cost),
             });
         }
         let mut tl_actions: Vec<timeline::Action> = Vec::new();
         if self.tab != Tab::Timeline {
             tl_actions = egui::Panel::top("timeline_strip")
                 .show(ui, |ui| {
-                    let o = timeline::Options {
-                        tl: &self.tl.as_ref().unwrap().timeline,
+                    let timeline_options = timeline::Options {
+                        timeline_data: &self.timeline_data.as_ref().unwrap().timeline,
                         range: self.range,
                         samples_in_range: self.range.map(|_| totals[ROOT as usize]),
                         cost,
                         noun: unit,
                         strip_h: 44.0,
                         show_lanes: false,
-                        comm: &p.comm,
+                        comm: &profile.comm,
                         selected_tid: self.sel_tid,
                         label_w: TL_LABEL_W,
                     };
-                    timeline::draw(ui, &o, &mut self.drag)
+                    timeline::draw(ui, &timeline_options, &mut self.drag)
                 })
                 .inner;
         }
@@ -1225,20 +1235,20 @@ impl eframe::App for App {
             egui::Panel::top("crumbs").show(ui, |ui| {
                 ui.horizontal_wrapped(|ui| {
                     let mut path = Vec::new();
-                    let mut n = self.focus[view];
-                    while n != ROOT {
-                        path.push(n);
-                        n = trie.nodes[n as usize].parent;
+                    let mut current = self.focus[view];
+                    while current != ROOT {
+                        path.push(current);
+                        current = trie.nodes[current as usize].parent;
                     }
                     if ui.small_button("all").clicked() {
                         self.focus[view] = ROOT;
                     }
-                    for &n in path.iter().rev() {
+                    for &node in path.iter().rev() {
                         ui.label(">");
-                        let name = &p.frames[trie.nodes[n as usize].frame as usize].name;
+                        let name = &profile.frames[trie.nodes[node as usize].frame as usize].name;
                         let short: String = name.chars().take(28).collect();
                         if ui.small_button(short).clicked() {
-                            self.focus[view] = n;
+                            self.focus[view] = node;
                         }
                     }
                     ui.weak("(click a box to zoom, Esc to zoom out)");
@@ -1271,7 +1281,7 @@ impl eframe::App for App {
 
         // ---- status bar ----
         egui::Panel::bottom("status").show(ui, |ui| {
-            let st = &p.stats;
+            let state = &profile.stats;
             ui.horizontal_wrapped(|ui| {
                 if !filtered {
                     ui.label(format!("{} {unit} in view", cost.format(totals[ROOT as usize])));
@@ -1281,14 +1291,14 @@ impl eframe::App for App {
                 ui.separator();
                 ui.label(format!("{} nodes", trie.nodes.len()));
                 ui.separator();
-                ui.label(format!("suspect tails: {}% of samples", fmt::pct_of(st.suspect_samples as f64, st.samples as f64)));
+                ui.label(format!("suspect tails: {}% of samples", fmt::pct_of(state.suspect_samples as f64, state.samples as f64)));
                 ui.separator();
-                if st.lost_events > 0 {
-                    let seen = st.samples + st.lost_events;
-                    ui.colored_label(pal.warning(), format!("kernel dropped {} events ({}% of {})", st.lost_events, fmt::pct_of(st.lost_events as f64, seen as f64), seen));
+                if state.lost_events > 0 {
+                    let seen = state.samples + state.lost_events;
+                    ui.colored_label(pal.warning(), format!("kernel dropped {} events ({}% of {})", state.lost_events, fmt::pct_of(state.lost_events as f64, seen as f64), seen));
                     ui.separator();
                 }
-                ui.label(format!("symbols: {} DWARF / {} ELF-only / {} raw modules, {} of {} addresses unresolved", st.modules_full, st.modules_symbols_only, st.modules_raw, st.unresolved_addresses, st.unique_addresses));
+                ui.label(format!("symbols: {} DWARF / {} ELF-only / {} raw modules, {} of {} addresses unresolved", state.modules_full, state.modules_symbols_only, state.modules_raw, state.unresolved_addresses, state.unique_addresses));
                 if self.tab == Tab::FlameGraph {
                     ui.separator();
                     ui.label(format!("{} boxes", self.items.len()));
@@ -1306,7 +1316,7 @@ impl eframe::App for App {
                 Tab::TopDown => {
                     return draw_top_down(
                         ui,
-                        p,
+                        profile,
                         trie,
                         totals,
                         &self.selfs,
@@ -1321,7 +1331,7 @@ impl eframe::App for App {
                 Tab::BottomUp => {
                     return draw_bottom_up(
                         ui,
-                        p,
+                        profile,
                         funcs,
                         trie,
                         totals,
@@ -1336,7 +1346,7 @@ impl eframe::App for App {
                 Tab::CallerCallee => {
                     return draw_caller_callee(
                         ui,
-                        p,
+                        profile,
                         funcs,
                         trie,
                         totals,
@@ -1348,29 +1358,31 @@ impl eframe::App for App {
                     );
                 }
                 Tab::Timeline => {
-                    let o = timeline::Options {
-                        tl: &self.tl.as_ref().unwrap().timeline,
+                    let timeline_options = timeline::Options {
+                        timeline_data: &self.timeline_data.as_ref().unwrap().timeline,
                         range: self.range,
                         samples_in_range: self.range.map(|_| totals[ROOT as usize]),
                         cost,
                         noun: unit,
                         strip_h: 96.0,
                         show_lanes: true,
-                        comm: &p.comm,
+                        comm: &profile.comm,
                         selected_tid: self.sel_tid,
                         label_w: TL_LABEL_W,
                     };
                     let actions = egui::ScrollArea::vertical()
                         .auto_shrink([false, false])
-                        .show(ui, |ui| timeline::draw(ui, &o, &mut self.drag))
+                        .show(ui, |ui| {
+                            timeline::draw(ui, &timeline_options, &mut self.drag)
+                        })
                         .inner;
                     tl_actions.extend(actions);
                     return;
                 }
                 Tab::Summary => {
-                    if let Some(f) = draw_summary(
+                    if let Some(function) = draw_summary(
                         ui,
-                        p,
+                        profile,
                         funcs,
                         &self.costs,
                         cost,
@@ -1380,7 +1392,7 @@ impl eframe::App for App {
                         filtered,
                     ) {
                         // A hotspot was clicked: show it in the caller/callee view.
-                        self.cc.selected = Some(f);
+                        self.cc.selected = Some(function);
                         self.tab = Tab::CallerCallee;
                     }
                     return;
@@ -1409,7 +1421,7 @@ impl eframe::App for App {
                 .iter()
                 .map(|i| i.depth)
                 .max()
-                .map_or(1, |d| d + 1);
+                .map_or(1, |depth| depth + 1);
             let content_h = (rows as f32 * ROW_H + 8.0).max(avail.y);
 
             let mut clicked_node = None;
@@ -1434,20 +1446,20 @@ impl eframe::App for App {
                 let bottom = rect.bottom() - 2.0;
 
                 let hovered = resp.hover_pos().and_then(|pos| {
-                    let d = ((bottom - pos.y) / ROW_H).floor();
-                    (d >= 0.0)
-                        .then(|| flame::hit(&self.items, pos.x - rect.left(), d as u32))
+                    let depth_index = ((bottom - pos.y) / ROW_H).floor();
+                    (depth_index >= 0.0)
+                        .then(|| flame::hit(&self.items, pos.x - rect.left(), depth_index as u32))
                         .flatten()
                         .copied()
                 });
 
                 for it in &self.items {
                     let y1 = bottom - it.depth as f32 * ROW_H;
-                    let r = Rect::from_min_max(
+                    let box_rect = Rect::from_min_max(
                         pos2(rect.left() + it.x, y1 - ROW_H + 1.0),
-                        pos2(rect.left() + it.x + it.w, y1),
+                        pos2(rect.left() + it.x + it.width, y1),
                     );
-                    if !painter.clip_rect().intersects(r) {
+                    if !painter.clip_rect().intersects(box_rect) {
                         continue;
                     }
                     let node = trie.nodes[it.node as usize];
@@ -1455,79 +1467,81 @@ impl eframe::App for App {
                         if node.frame == u32::MAX {
                             (pal.root_box(), "all samples".into(), false)
                         } else {
-                            let f = &p.frames[node.frame as usize];
+                            let frame = &profile.frames[node.frame as usize];
                             (
-                                frame_color(p, f),
-                                f.name.clone(),
+                                frame_color(profile, frame),
+                                frame.name.clone(),
                                 searching && self.matches[node.frame as usize],
                             )
                         };
                     if searching && !matched && node.frame != u32::MAX {
                         fill = pal.dim(fill);
                     }
-                    painter.rect_filled(r, 0.0, fill);
+                    painter.rect_filled(box_rect, 0.0, fill);
                     painter.rect_stroke(
-                        r,
+                        box_rect,
                         0.0,
                         Stroke::new(0.5, Color32::from_black_alpha(90)),
                         StrokeKind::Inside,
                     );
                     if matched {
                         painter.rect_stroke(
-                            r,
+                            box_rect,
                             0.0,
                             Stroke::new(2.0, pal.highlight()),
                             StrokeKind::Inside,
                         );
                     }
-                    if it.w >= LABEL_MIN_PX {
-                        painter.with_clip_rect(r.shrink2(vec2(2.0, 0.0))).text(
-                            pos2(r.left() + 3.0, r.center().y),
-                            Align2::LEFT_CENTER,
-                            label,
-                            FontId::proportional(11.0),
-                            Color32::BLACK,
-                        );
+                    if it.width >= LABEL_MIN_PX {
+                        painter
+                            .with_clip_rect(box_rect.shrink2(vec2(2.0, 0.0)))
+                            .text(
+                                pos2(box_rect.left() + 3.0, box_rect.center().y),
+                                Align2::LEFT_CENTER,
+                                label,
+                                FontId::proportional(11.0),
+                                Color32::BLACK,
+                            );
                     }
                 }
 
-                if let Some(h) = hovered {
-                    let y1 = bottom - h.depth as f32 * ROW_H;
-                    let r = Rect::from_min_max(
-                        pos2(rect.left() + h.x, y1 - ROW_H + 1.0),
-                        pos2(rect.left() + h.x + h.w, y1),
+                if let Some(hovered_item) = hovered {
+                    let y1 = bottom - hovered_item.depth as f32 * ROW_H;
+                    let box_rect = Rect::from_min_max(
+                        pos2(rect.left() + hovered_item.x, y1 - ROW_H + 1.0),
+                        pos2(rect.left() + hovered_item.x + hovered_item.width, y1),
                     );
                     painter.rect_stroke(
-                        r,
+                        box_rect,
                         0.0,
                         Stroke::new(1.5, pal.hover_outline()),
                         StrokeKind::Inside,
                     );
-                    let node = trie.nodes[h.node as usize];
-                    let node_total = totals[h.node as usize];
+                    let node = trie.nodes[hovered_item.node as usize];
+                    let node_total = totals[hovered_item.node as usize];
                     let children_total: u64 = trie
-                        .children(h.node)
+                        .children(hovered_item.node)
                         .iter()
-                        .map(|&c| totals[c as usize])
+                        .map(|&child| totals[child as usize])
                         .sum();
                     let self_count = node_total.saturating_sub(children_total);
                     resp.clone().on_hover_ui_at_pointer(|ui| {
                         if node.frame == u32::MAX {
                             ui.strong("all samples");
                         } else {
-                            let f = &p.frames[node.frame as usize];
-                            ui.strong(&f.name);
-                            ui.label(format!("module: {}", p.module_name(f.module)));
-                            if let Some(file) = &f.file {
-                                ui.label(format!("{}:{}", file, f.line.unwrap_or(0)));
+                            let frame = &profile.frames[node.frame as usize];
+                            ui.strong(&frame.name);
+                            ui.label(format!("module: {}", profile.module_name(frame.module)));
+                            if let Some(file) = &frame.file {
+                                ui.label(format!("{}:{}", file, frame.line.unwrap_or(0)));
                             }
-                            if f.suspect {
+                            if frame.suspect {
                                 ui.colored_label(
                                     pal.suspect(),
                                     "suspect tail: at or beyond the first invalid return address",
                                 );
                             }
-                            if f.raw {
+                            if frame.raw {
                                 ui.label("no symbol found");
                             }
                         }
@@ -1545,16 +1559,16 @@ impl eframe::App for App {
                         ui.label(format!("{} {unit} self", cost.format(self_count)));
                     });
                     if resp.clicked() {
-                        clicked_node = Some(h.node);
+                        clicked_node = Some(hovered_item.node);
                     }
                 }
             });
-            if let Some(n) = clicked_node {
-                self.focus[view] = n;
+            if let Some(node) = clicked_node {
+                self.focus[view] = node;
             }
         });
-        for a in tl_actions {
-            match a {
+        for action in tl_actions {
+            match action {
                 timeline::Action::SetRange(range) => self.range = Some(range),
                 timeline::Action::ClearRange => self.range = None,
                 timeline::Action::SelectThread { pid, tid } => {
@@ -1570,52 +1584,52 @@ impl eframe::App for App {
 #[allow(clippy::too_many_arguments)]
 fn draw_top_down(
     ui: &mut egui::Ui,
-    p: &Profile,
+    profile: &Profile,
     trie: &Trie,
     totals: &[u64],
     selfs: &[u64],
     cost: Cost,
     matches: &[bool],
     searching: bool,
-    st: &mut TdState,
+    state: &mut TdState,
     view: usize,
     version: u64,
 ) {
     // Until the user has chosen, show the hottest path expanded, as a useful starting point.
-    if !st.touched[view] {
-        st.expanded[view] = views::hottest_path(trie, totals, 0.3).into_iter().collect();
-        st.touched[view] = true;
-        st.version += 1;
+    if !state.touched[view] {
+        state.expanded[view] = views::hottest_path(trie, totals, 0.3).into_iter().collect();
+        state.touched[view] = true;
+        state.version += 1;
     }
     ui.horizontal(|ui| {
         if ui.button("Collapse all").clicked() {
-            st.expanded[view].clear();
-            st.version += 1;
+            state.expanded[view].clear();
+            state.version += 1;
         }
         if ui.button("Expand hottest path").clicked() {
-            st.expanded[view] = views::hottest_path(trie, totals, 0.3).into_iter().collect();
-            st.version += 1;
+            state.expanded[view] = views::hottest_path(trie, totals, 0.3).into_iter().collect();
+            state.version += 1;
         }
         if ui.button("Expand 6 levels").clicked() {
-            st.expanded[view] = views::expand_to_depth(trie, totals, 6);
-            st.version += 1;
+            state.expanded[view] = views::expand_to_depth(trie, totals, 6);
+            state.version += 1;
         }
         ui.weak(format!(
             "{} rows shown; click the arrow (or double-click) to expand",
-            st.rows.len()
+            state.rows.len()
         ));
     });
     let key = RowsKey {
         view,
         data_version: version,
-        expansion_version: st.version,
+        expansion_version: state.version,
     };
-    if st.rows_key != Some(key) {
-        st.rows = views::top_down_rows(trie, totals, &st.expanded[view]);
-        st.rows_key = Some(key);
+    if state.rows_key != Some(key) {
+        state.rows = views::top_down_rows(trie, totals, &state.expanded[view]);
+        state.rows_key = Some(key);
     }
-    let selected = st.selected[view];
-    let rows = &st.rows;
+    let selected = state.selected[view];
+    let rows = &state.rows;
     let action = table::draw(
         ui,
         &Columns {
@@ -1628,37 +1642,37 @@ fn draw_top_down(
         rows.len(),
         totals[ROOT as usize],
         |i| {
-            let r = rows[i];
-            let node = trie.nodes[r.node as usize];
-            let f = &p.frames[node.frame as usize];
+            let row = rows[i];
+            let node = trie.nodes[row.node as usize];
+            let frame = &profile.frames[node.frame as usize];
             RowData {
-                depth: r.depth,
-                arrow: if !r.expandable {
+                depth: row.depth,
+                arrow: if !row.expandable {
                     Arrow::None
-                } else if r.expanded {
+                } else if row.expanded {
                     Arrow::Expanded
                 } else {
                     Arrow::Collapsed
                 },
-                name: &f.name,
-                module: p.module_name(f.module),
-                cost: totals[r.node as usize],
-                self_cost: Some(selfs[r.node as usize]),
+                name: &frame.name,
+                module: profile.module_name(frame.module),
+                cost: totals[row.node as usize],
+                self_cost: Some(selfs[row.node as usize]),
                 highlight: searching && matches[node.frame as usize],
-                suspect: f.suspect,
-                selected: selected == Some(r.node),
+                suspect: frame.suspect,
+                selected: selected == Some(row.node),
             }
         },
     );
     match action {
         Some(Click::Toggle(i)) => {
-            let n = st.rows[i].node;
-            if !st.expanded[view].remove(&n) {
-                st.expanded[view].insert(n);
+            let node = state.rows[i].node;
+            if !state.expanded[view].remove(&node) {
+                state.expanded[view].insert(node);
             }
-            st.version += 1;
+            state.version += 1;
         }
-        Some(Click::Select(i)) => st.selected[view] = Some(st.rows[i].node),
+        Some(Click::Select(i)) => state.selected[view] = Some(state.rows[i].node),
         Some(Click::SortBy(_)) | None => {}
     }
 }
@@ -1667,35 +1681,35 @@ fn draw_top_down(
 #[allow(clippy::too_many_arguments)]
 fn draw_bottom_up(
     ui: &mut egui::Ui,
-    p: &Profile,
+    profile: &Profile,
     funcs: &Functions,
     trie: &Trie,
     totals: &[u64],
     selfs: &[u64],
     cost: Cost,
     query: &str,
-    st: &mut BuState,
+    state: &mut BuState,
     view: usize,
     version: u64,
 ) {
     ui.horizontal(|ui| {
         if ui.button("Collapse all").clicked() {
-            st.expanded.clear();
-            st.version += 1;
+            state.expanded.clear();
+            state.version += 1;
         }
-        ui.weak(format!("{} rows shown; each function's cost is the {} that end in it; expand to see its callers", st.rows.len(), noun(p, cost)));
+        ui.weak(format!("{} rows shown; each function's cost is the {} that end in it; expand to see its callers", state.rows.len(), noun(profile, cost)));
     });
     let key = RowsKey {
         view,
         data_version: version,
-        expansion_version: st.version,
+        expansion_version: state.version,
     };
-    if st.rows_key != Some(key) {
-        st.rows = views::bu_rows(trie, funcs, selfs, &st.expanded);
-        st.rows_key = Some(key);
+    if state.rows_key != Some(key) {
+        state.rows = views::bu_rows(trie, funcs, selfs, &state.expanded);
+        state.rows_key = Some(key);
     }
-    let rows = &st.rows;
-    let selected = st.selected.clone();
+    let rows = &state.rows;
+    let selected = state.selected.clone();
     let action = table::draw(
         ui,
         &Columns {
@@ -1708,55 +1722,55 @@ fn draw_bottom_up(
         rows.len(),
         totals[ROOT as usize],
         |i| {
-            let r = &rows[i];
-            let f = &funcs.funcs[r.func as usize];
+            let row = &rows[i];
+            let func = &funcs.funcs[row.func as usize];
             RowData {
-                depth: r.path.len() as u32 - 1,
-                arrow: if !r.has_callers {
+                depth: row.path.len() as u32 - 1,
+                arrow: if !row.has_callers {
                     Arrow::None
-                } else if r.expanded {
+                } else if row.expanded {
                     Arrow::Expanded
                 } else {
                     Arrow::Collapsed
                 },
-                name: &f.name,
-                module: p.module_name(f.module),
-                cost: r.cost,
+                name: &func.name,
+                module: profile.module_name(func.module),
+                cost: row.cost,
                 self_cost: None,
-                highlight: !query.is_empty() && f.name.to_lowercase().contains(query),
+                highlight: !query.is_empty() && func.name.to_lowercase().contains(query),
                 suspect: false,
-                selected: selected.as_ref() == Some(&r.path),
+                selected: selected.as_ref() == Some(&row.path),
             }
         },
     );
     match action {
         Some(Click::Toggle(i)) => {
-            let path = st.rows[i].path.clone();
-            if !st.expanded.remove(&path) {
-                st.expanded.insert(path);
+            let path = state.rows[i].path.clone();
+            if !state.expanded.remove(&path) {
+                state.expanded.insert(path);
             }
-            st.version += 1;
+            state.version += 1;
         }
-        Some(Click::Select(i)) => st.selected = Some(st.rows[i].path.clone()),
+        Some(Click::Select(i)) => state.selected = Some(state.rows[i].path.clone()),
         Some(Click::SortBy(_)) | None => {}
     }
 }
 
 /// A table row for a function with a cost, with no tree structure.
 fn func_row<'a>(
-    p: &'a Profile,
+    profile: &'a Profile,
     funcs: &'a Functions,
-    f: u32,
+    func: u32,
     cost: u64,
     self_cost: Option<u64>,
     selected: bool,
 ) -> RowData<'a> {
-    let func = &funcs.funcs[f as usize];
+    let func = &funcs.funcs[func as usize];
     RowData {
         depth: 0,
         arrow: Arrow::None,
         name: &func.name,
-        module: p.module_name(func.module),
+        module: profile.module_name(func.module),
         cost,
         self_cost,
         highlight: false,
@@ -1769,27 +1783,27 @@ fn func_row<'a>(
 #[allow(clippy::too_many_arguments)]
 fn draw_caller_callee(
     ui: &mut egui::Ui,
-    p: &Profile,
+    profile: &Profile,
     funcs: &Functions,
     trie: &Trie,
     totals: &[u64],
     costs: &views::Costs,
     cost: Cost,
     query: &str,
-    st: &mut CcState,
+    state: &mut CcState,
     version: u64,
 ) {
-    if let Some(f) = st.selected {
-        if !st
+    if let Some(func) = state.selected {
+        if !state
             .lists
             .as_ref()
-            .is_some_and(|l| l.func == f && l.version == version)
+            .is_some_and(|lists| lists.func == func && lists.version == version)
         {
-            st.lists = Some(CallLists {
-                func: f,
+            state.lists = Some(CallLists {
+                func,
                 version,
-                callers: views::callers_of(trie, totals, funcs, f),
-                callees: views::callees_of(trie, totals, funcs, f),
+                callers: views::callers_of(trie, totals, funcs, func),
+                callees: views::callees_of(trie, totals, funcs, func),
             });
         }
     }
@@ -1799,21 +1813,24 @@ fn draw_caller_callee(
         .resizable(true)
         .default_size(250.0)
         .min_size(100.0)
-        .show(ui, |ui| match (&st.selected, &st.lists) {
+        .show(ui, |ui| match (&state.selected, &state.lists) {
             (
-                Some(f),
+                Some(func),
                 Some(CallLists {
                     callers, callees, ..
                 }),
             ) => {
-                let (name, incl) = (&funcs.funcs[*f as usize].name, costs.inclusive[*f as usize]);
+                let (name, incl) = (
+                    &funcs.funcs[*func as usize].name,
+                    costs.inclusive[*func as usize],
+                );
                 ui.horizontal(|ui| {
                     ui.strong(name.chars().take(90).collect::<String>());
                     ui.weak(format!(
                         "inclusive {}, self {} {}; percentages are of the inclusive cost",
                         cost.format(incl),
-                        cost.format(costs.self_[*f as usize]),
-                        noun(p, cost)
+                        cost.format(costs.self_[*func as usize]),
+                        noun(profile, cost)
                     ));
                 });
                 ui.columns(2, |cols| {
@@ -1829,7 +1846,7 @@ fn draw_caller_callee(
                         },
                         callers.len(),
                         incl,
-                        |i| func_row(p, funcs, callers[i].id, callers[i].cost, None, false),
+                        |i| func_row(profile, funcs, callers[i].id, callers[i].cost, None, false),
                     );
                     if let Some(Click::Select(i) | Click::Toggle(i)) = click {
                         next = Some(callers[i].id);
@@ -1846,7 +1863,7 @@ fn draw_caller_callee(
                         },
                         callees.len(),
                         incl,
-                        |i| func_row(p, funcs, callees[i].id, callees[i].cost, None, false),
+                        |i| func_row(profile, funcs, callees[i].id, callees[i].cost, None, false),
                     );
                     if let Some(Click::Select(i) | Click::Toggle(i)) = click {
                         next = Some(callees[i].id);
@@ -1860,18 +1877,18 @@ fn draw_caller_callee(
         });
 
     ui.horizontal(|ui| {
-        ui.weak(format!("{} functions; click the Inclusive or Self header to sort; the search box filters by name", st.list.len()));
+        ui.weak(format!("{} functions; click the Inclusive or Self header to sort; the search box filters by name", state.list.len()));
     });
     let key = ListKey {
         version,
-        sort: st.sort,
+        sort: state.sort,
         query: query.to_string(),
     };
-    if st.list_key.as_ref() != Some(&key) {
-        st.list = views::ranked_functions(costs, funcs, st.sort, query);
-        st.list_key = Some(key);
+    if state.list_key.as_ref() != Some(&key) {
+        state.list = views::ranked_functions(costs, funcs, state.sort, query);
+        state.list_key = Some(key);
     }
-    let (list, selected) = (&st.list, st.selected);
+    let (list, selected) = (&state.list, state.selected);
     let click = table::draw(
         ui,
         &Columns {
@@ -1879,7 +1896,7 @@ fn draw_caller_callee(
             name: "Function",
             cost: "Inclusive",
             self_cost: Some("Self"),
-            sort: Some(if st.sort == views::SortBy::Inclusive {
+            sort: Some(if state.sort == views::SortBy::Inclusive {
                 0
             } else {
                 1
@@ -1888,21 +1905,21 @@ fn draw_caller_callee(
         list.len(),
         totals[ROOT as usize],
         |i| {
-            let f = list[i];
+            let func = list[i];
             func_row(
-                p,
+                profile,
                 funcs,
-                f,
-                costs.inclusive[f as usize],
-                Some(costs.self_[f as usize]),
-                selected == Some(f),
+                func,
+                costs.inclusive[func as usize],
+                Some(costs.self_[func as usize]),
+                selected == Some(func),
             )
         },
     );
     match click {
-        Some(Click::Select(i) | Click::Toggle(i)) => next = Some(st.list[i]),
+        Some(Click::Select(i) | Click::Toggle(i)) => next = Some(state.list[i]),
         Some(Click::SortBy(col)) => {
-            st.sort = if col == 0 {
+            state.sort = if col == 0 {
                 views::SortBy::Inclusive
             } else {
                 views::SortBy::Self_
@@ -1911,7 +1928,7 @@ fn draw_caller_callee(
         None => {}
     }
     if next.is_some() {
-        st.selected = next;
+        state.selected = next;
     }
 }
 
@@ -1919,7 +1936,7 @@ fn draw_caller_callee(
 /// show in the caller/callee view if one of the hotspots was clicked.
 fn draw_summary(
     ui: &mut egui::Ui,
-    p: &Profile,
+    profile: &Profile,
     funcs: &Functions,
     costs: &views::Costs,
     cost: Cost,
@@ -1929,19 +1946,19 @@ fn draw_summary(
     filtered: bool,
 ) -> Option<u32> {
     let mut nav = None;
-    let st = &p.stats;
+    let state = &profile.stats;
     egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
         ui.add_space(6.0);
         ui.heading("Summary");
         ui.add_space(4.0);
         egui::Grid::new("summary_grid").num_columns(2).spacing([28.0, 4.0]).show(ui, |ui| {
-            let mut row = |k: &str, v: String| {
+            let mut row = |k: &str, value: String| {
                 ui.label(RichText::new(k).weak());
-                ui.label(v);
+                ui.label(value);
                 ui.end_row();
             };
-            let with_stacks = st.samples - st.samples_without_stack;
-            let unit = noun(p, cost);
+            let with_stacks = state.samples - state.samples_without_stack;
+            let unit = noun(profile, cost);
             let _ = with_stacks;
             row(if cost == Cost::Samples { "Samples" } else { "Cost" }, if !filtered { format!("{} {unit}", cost.format(total)) } else { format!("{} {unit} in the current filter (process, thread or time range), of {} in the recording", cost.format(total), cost.format(grand_total)) });
             if let Some(load) = info.load {
@@ -1951,19 +1968,19 @@ fn draw_summary(
                 row("Read speed", format!("{size} read and unwound in {} s: {} GB/s (whole load, with symbols and call trees: {} s)", fmt::sig3(read_s as f64), fmt::sig3(gb / read_s.max(1e-6) as f64), fmt::sig3(total_s as f64)));
             }
             row("Recording", format!("{:.2} s, {} processes, {} threads", info.last_ns.saturating_sub(info.first_ns) as f64 / 1e9, info.processes, info.threads));
-            if st.lost_events > 0 {
-                row("Kernel drops", format!("{} events in {} LOST records ({}% of everything sampled): the profile under-counts", st.lost_events, st.lost_records, fmt::pct_of(st.lost_events as f64, (st.samples + st.lost_events) as f64)));
+            if state.lost_events > 0 {
+                row("Kernel drops", format!("{} events in {} LOST records ({}% of everything sampled): the profile under-counts", state.lost_events, state.lost_records, fmt::pct_of(state.lost_events as f64, (state.samples + state.lost_events) as f64)));
             }
-            row("Suspect stack tails", format!("{} samples ({}%) have frames past the first invalid return address", st.suspect_samples, fmt::pct_of(st.suspect_samples as f64, st.samples as f64)));
-            row("Symbols", format!("{} modules with DWARF, {} with ELF symbols only, {} without; {} of {} addresses unresolved ({}%)", st.modules_full, st.modules_symbols_only, st.modules_raw, st.unresolved_addresses, st.unique_addresses, fmt::pct_of(st.unresolved_addresses as f64, st.unique_addresses as f64)));
-            row("Call tree", format!("{} functions, {} nodes (full), {} (truncated)", funcs.funcs.len(), p.full.nodes.len(), p.truncated.nodes.len()));
+            row("Suspect stack tails", format!("{} samples ({}%) have frames past the first invalid return address", state.suspect_samples, fmt::pct_of(state.suspect_samples as f64, state.samples as f64)));
+            row("Symbols", format!("{} modules with DWARF, {} with ELF symbols only, {} without; {} of {} addresses unresolved ({}%)", state.modules_full, state.modules_symbols_only, state.modules_raw, state.unresolved_addresses, state.unique_addresses, fmt::pct_of(state.unresolved_addresses as f64, state.unique_addresses as f64)));
+            row("Call tree", format!("{} functions, {} nodes (full), {} (truncated)", funcs.funcs.len(), profile.full.nodes.len(), profile.truncated.nodes.len()));
         });
         ui.add_space(12.0);
         ui.strong("Top hotspots by self cost (click one to see its callers and callees)");
         let top: Vec<u32> = views::ranked_functions(costs, funcs, views::SortBy::Self_, "").into_iter().take(12).collect();
-        let h = (top.len() + 1) as f32 * table::ROW_H + 6.0;
+        let height = (top.len() + 1) as f32 * table::ROW_H + 6.0;
         let click = ui
-            .allocate_ui(vec2(ui.available_width(), h), |ui| table::draw(ui, &Columns { unit: cost, name: "Function", cost: "Self", self_cost: Some("Inclusive"), sort: None }, top.len(), total, |i| func_row(p, funcs, top[i], costs.self_[top[i] as usize], Some(costs.inclusive[top[i] as usize]), false)))
+            .allocate_ui(vec2(ui.available_width(), height), |ui| table::draw(ui, &Columns { unit: cost, name: "Function", cost: "Self", self_cost: Some("Inclusive"), sort: None }, top.len(), total, |i| func_row(profile, funcs, top[i], costs.self_[top[i] as usize], Some(costs.inclusive[top[i] as usize]), false)))
             .inner;
         if let Some(Click::Select(i) | Click::Toggle(i)) = click {
             nav = Some(top[i]);
@@ -1971,12 +1988,12 @@ fn draw_summary(
         ui.add_space(12.0);
         ui.strong("Self cost by module");
         let mods: Vec<Weighted> = views::module_self_costs(funcs, costs).into_iter().take(10).collect();
-        let h = (mods.len() + 1) as f32 * table::ROW_H + 6.0;
-        ui.allocate_ui(vec2(ui.available_width(), h), |ui| {
+        let height = (mods.len() + 1) as f32 * table::ROW_H + 6.0;
+        ui.allocate_ui(vec2(ui.available_width(), height), |ui| {
             table::draw(ui, &Columns { unit: cost, name: "Module", cost: "Self", self_cost: None, sort: None }, mods.len(), total, |i| RowData {
                 depth: 0,
                 arrow: Arrow::None,
-                name: p.module_name(mods[i].id),
+                name: profile.module_name(mods[i].id),
                 module: "",
                 cost: mods[i].cost,
                 self_cost: None,
@@ -1990,18 +2007,19 @@ fn draw_summary(
 }
 
 /// The name of what a cost counts: samples, or the profile's event unit (cycles, ns, ...).
-fn noun(p: &Profile, cost: Cost) -> &str {
+fn noun(profile: &Profile, cost: Cost) -> &str {
     match cost {
         Cost::Samples => "samples",
-        Cost::Cycles => &p.stats.period_unit,
+        Cost::Cycles => &profile.stats.period_unit,
     }
 }
 
 /// Label of the weighted cost button, e.g. `Cycles`.
-fn cycles_label(p: &Profile) -> String {
-    let mut c = p.stats.period_unit.chars();
-    c.next()
-        .map(|f| f.to_uppercase().chain(c).collect())
+fn cycles_label(profile: &Profile) -> String {
+    let mut chars = profile.stats.period_unit.chars();
+    chars
+        .next()
+        .map(|first| first.to_uppercase().chain(chars).collect())
         .unwrap_or_default()
 }
 
@@ -2021,18 +2039,18 @@ fn main() -> eframe::Result {
     timing("main");
     let cli = Cli::parse_args();
     let config = config::load();
-    let mut opts = load::Options::default();
-    config.reader.apply(&mut opts);
+    let mut load_options = load::Options::default();
+    config.reader.apply(&mut load_options);
     // Flags override the saved settings for this run.
-    cli.reader.apply(&mut opts);
+    cli.reader.apply(&mut load_options);
     let harness = Harness::from_cli(&cli);
     let show = cli.show;
     let args = Args {
         path: cli.file,
         truncated: show
             .view
-            .map_or(config.truncate_suspect_tails.unwrap_or(false), |v| {
-                v == cli::View::Truncated
+            .map_or(config.truncate_suspect_tails.unwrap_or(false), |view| {
+                view == cli::View::Truncated
             }),
         cost: show.cost.or(config.cost),
         theme: cli.theme.or(config.theme).map(theme_pref),
@@ -2040,8 +2058,8 @@ fn main() -> eframe::Result {
             .tab
             .or(config.tab)
             .map_or(Tab::FlameGraph, Tab::from_name),
-        cold: opts.cold,
-        opts,
+        cold: load_options.cold,
+        load_options,
         process: show.process,
         thread: show.thread,
         search: show.search.unwrap_or_default(),
@@ -2050,9 +2068,9 @@ fn main() -> eframe::Result {
         config,
     };
     // Maximized unless `--size` asks for a fixed window (which the screenshot checks rely on).
-    let (size, maximized) = cli
-        .size
-        .map_or(([1500.0, 900.0], true), |s| ([s.width, s.height], false));
+    let (size, maximized) = cli.size.map_or(([1500.0, 900.0], true), |size| {
+        ([size.width, size.height], false)
+    });
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size(size)

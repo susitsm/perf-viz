@@ -34,26 +34,26 @@ pub struct LoadArgs {
 impl LoadArgs {
     /// The loader options these flags describe.
     pub fn options(&self) -> Options {
-        let mut o = Options::default();
-        if let Some(v) = self.threads {
-            o.workers = v;
+        let mut options = Options::default();
+        if let Some(value) = self.threads {
+            options.workers = value;
         }
-        if let Some(v) = self.readers {
-            o.readers = v;
+        if let Some(value) = self.readers {
+            options.readers = value;
         }
-        if let Some(v) = self.region_mb {
-            o.region_mb = v;
+        if let Some(value) = self.region_mb {
+            options.region_mb = value;
         }
-        if let Some(v) = self.in_flight {
-            o.in_flight = v;
+        if let Some(value) = self.in_flight {
+            options.in_flight = value;
         }
-        if let Some(v) = self.lookahead {
-            o.lookahead = v;
+        if let Some(value) = self.lookahead {
+            options.lookahead = value;
         }
-        o.cold = self.cold;
-        o.force_sequential = self.sequential;
-        o.corrupt_bound = self.corrupt_bound;
-        o
+        options.cold = self.cold;
+        options.force_sequential = self.sequential;
+        options.corrupt_bound = self.corrupt_bound;
+        options
     }
 }
 
@@ -70,13 +70,23 @@ mod tests {
 
     #[test]
     fn unset_flags_keep_the_defaults_and_set_ones_override() {
-        let d = Options::default();
-        let o = T::try_parse_from(["t"]).unwrap().load.options();
+        let defaults = Options::default();
+        let options = T::try_parse_from(["t"]).unwrap().load.options();
         assert_eq!(
-            (o.workers, o.readers, o.region_mb, o.cold),
-            (d.workers, d.readers, d.region_mb, false)
+            (
+                options.workers,
+                options.readers,
+                options.region_mb,
+                options.cold
+            ),
+            (
+                defaults.workers,
+                defaults.readers,
+                defaults.region_mb,
+                false
+            )
         );
-        let o = T::try_parse_from([
+        let options = T::try_parse_from([
             "t",
             "--readers",
             "5",
@@ -96,10 +106,16 @@ mod tests {
         .load
         .options();
         assert_eq!(
-            (o.readers, o.workers, o.region_mb, o.in_flight, o.lookahead),
+            (
+                options.readers,
+                options.workers,
+                options.region_mb,
+                options.in_flight,
+                options.lookahead
+            ),
             (5, 2, 64, 9, 0)
         );
-        assert!(o.cold && o.force_sequential && o.corrupt_bound);
+        assert!(options.cold && options.force_sequential && options.corrupt_bound);
     }
 
     #[test]

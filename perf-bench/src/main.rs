@@ -20,7 +20,7 @@ struct Cli {
     #[arg(long, default_value = "both")]
     mode: String,
     /// Parse workers.
-    #[arg(long, default_value_t = std::thread::available_parallelism().map_or(1, |n| n.get()))]
+    #[arg(long, default_value_t = std::thread::available_parallelism().map_or(1, |cpu_count| cpu_count.get()))]
     threads: usize,
     /// Repetitions of each measurement.
     #[arg(long, default_value_t = 3)]
@@ -69,35 +69,35 @@ fn main() -> perf_bench::Result<()> {
     };
     let size = std::fs::metadata(&path)?.len() as f64;
     let gbps = |secs: f64| size / secs / 1e9;
-    let ms = |d: std::time::Duration| d.as_secs_f64() * 1e3;
+    let ms = |duration: std::time::Duration| duration.as_secs_f64() * 1e3;
     let drop_cache = || {
         if cold {
-            if let Ok(f) = std::fs::File::open(&path) {
-                split::drop_cache(&f);
+            if let Ok(file) = std::fs::File::open(&path) {
+                split::drop_cache(&file);
             }
         }
     };
 
     let mut reference: Option<(String, Stats)> = None;
-    let mut check = |name: &str, s: Stats| match &reference {
-        Some((rn, r)) if *r != s => {
-            eprintln!("MISMATCH {name} vs {rn}:\n {rn}: {r:?}\n {name}: {s:?}");
+    let mut check = |name: &str, stats: Stats| match &reference {
+        Some((rn, reference_stats)) if *reference_stats != stats => {
+            eprintln!("MISMATCH {name} vs {rn}:\n {rn}: {reference_stats:?}\n {name}: {stats:?}");
             std::process::exit(1);
         }
         Some(_) => {}
-        None => reference = Some((name.to_string(), s)),
+        None => reference = Some((name.to_string(), stats)),
     };
 
-    for m in modes {
+    for mode in modes {
         for i in 0..iters {
             drop_cache();
-            let t = Instant::now();
-            let (stats, detail) = match m {
+            let started = Instant::now();
+            let (stats, detail) = match mode {
                 "baseline" => (baseline::read_all(&path, touch)?, String::new()),
                 "fast" => {
-                    let (s, tm) = fast::read_all(&path, threads, populate, touch)?;
+                    let (stats, tm) = fast::read_all(&path, threads, populate, touch)?;
                     (
-                        s,
+                        stats,
                         format!(
                             "(setup {:.1}ms, scan {:.1}ms, parse {:.1}ms, teardown {:.1}ms)",
                             ms(tm.setup),
@@ -108,7 +108,7 @@ fn main() -> perf_bench::Result<()> {
                     )
                 }
                 "pipe" => {
-                    let cfg = Config {
+                    let config = Config {
                         block: block_mb << 20,
                         workers: threads,
                         buffers: if buffers == 0 {
@@ -119,18 +119,18 @@ fn main() -> perf_bench::Result<()> {
                         evict: Evict::Off,
                         readers,
                     };
-                    let opts = piped::Options {
+                    let options = piped::Options {
                         touch,
                         corrupt_bound: corrupt,
                         ..Default::default()
                     };
-                    let (s, rp) = piped::read_all(&path, cfg, opts)?;
+                    let (stats, rp) = piped::read_all(&path, config, options)?;
                     let mt = rp.metrics;
                     (
-                        s,
+                        stats,
                         format!(
                             "(block {block_mb}MiB, {} bufs, {readers} reader(s), {} regions, plan {:.0}ms{}; readers(sum): read {:.0}ms, wait-for-buffer {:.0}ms | workers(sum): busy {:.0}ms, wait-for-data {:.0}ms)",
-                            cfg.buffers,
+                            config.buffers,
                             rp.regions,
                             ms(rp.plan_time),
                             if rp.fell_back {
@@ -150,24 +150,28 @@ fn main() -> perf_bench::Result<()> {
                     std::process::exit(2)
                 }
             };
-            let secs = t.elapsed().as_secs_f64();
+            let secs = started.elapsed().as_secs_f64();
             println!(
-                "{m:<8} x{threads:<3} #{i}: {secs:8.3}s {:6.2} GB/s  {detail}",
+                "{mode:<8} x{threads:<3} #{i}: {secs:8.3}s {:6.2} GB/s  {detail}",
                 gbps(secs)
             );
-            check(m, stats);
+            check(mode, stats);
         }
     }
-    if let Some((_, r)) = reference {
-        let types: Vec<_> = r
+    if let Some((_, reference_stats)) = reference {
+        let types: Vec<_> = reference_stats
             .per_type
             .iter()
             .enumerate()
-            .filter(|(_, c)| **c > 0)
+            .filter(|(_, count)| **count > 0)
             .collect();
         println!(
             "records={} bytes={} samples={} stack_bytes={} stack_sum={} types={types:?}",
-            r.records, r.bytes, r.samples, r.user_stack_bytes, r.stack_sum
+            reference_stats.records,
+            reference_stats.bytes,
+            reference_stats.samples,
+            reference_stats.user_stack_bytes,
+            reference_stats.stack_sum
         );
         println!("all modes produced identical stats");
     }

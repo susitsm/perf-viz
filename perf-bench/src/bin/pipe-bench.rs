@@ -69,70 +69,84 @@ fn main() -> perf_bench::Result<()> {
     } = Cli::parse();
     let evict: Vec<Evict> = evict
         .into_iter()
-        .map(|e| match e {
+        .map(|evict_arg| match evict_arg {
             EvictArg::Off => Evict::Off,
             EvictArg::Worker => Evict::Worker,
         })
         .collect();
     let noop = work == Work::Noop;
-    let (file, sec) = split::open(&path)?;
-    let gb = sec.len as f64 / 1e9;
+    let (file, section) = split::open(&path)?;
+    let gb = section.len as f64 / 1e9;
     println!("data section: {gb:.2} GB, cold={cold}");
 
     let reference = verify.then(|| {
-        let mut buf = vec![0u8; 1 << 24];
+        let mut buffer = vec![0u8; 1 << 24];
         let (mut pos, mut sum) = (0u64, 0u64);
         use std::os::unix::fs::FileExt;
-        while pos < sec.len {
-            let n = buf.len().min((sec.len - pos) as usize);
-            file.read_exact_at(&mut buf[..n], sec.start + pos).unwrap();
-            sum = sum.wrapping_add(pipeline::touch_all(&buf[..n]));
-            pos += n as u64;
+        while pos < section.len {
+            let read_len = buffer.len().min((section.len - pos) as usize);
+            file.read_exact_at(&mut buffer[..read_len], section.start + pos)
+                .unwrap();
+            sum = sum.wrapping_add(pipeline::touch_all(&buffer[..read_len]));
+            pos += read_len as u64;
         }
         sum
     });
 
     for &mb in &blocks {
-        for &w in &workers {
+        for &worker_count in &workers {
             for &ev in &evict {
                 for i in 0..iters {
                     if cold {
                         split::drop_cache(&file);
                     }
-                    let cfg = pipeline::Config {
+                    let config = pipeline::Config {
                         block: mb << 20,
-                        workers: w,
-                        buffers: if buffers == 0 { w * 2 + 2 } else { buffers },
+                        workers: worker_count,
+                        buffers: if buffers == 0 {
+                            worker_count * 2 + 2
+                        } else {
+                            buffers
+                        },
                         evict: ev,
                         readers: 1,
                     };
-                    let t = Instant::now();
-                    let (sum, m) = {
-                        let (states, m) = pipeline::run::<u64, _>(&file, &sec, cfg, |s, b| {
-                            *s = s.wrapping_add(if noop {
-                                b.len() as u64
-                            } else {
-                                pipeline::touch_all(b)
-                            });
-                            Ok(())
-                        })?;
-                        (states.iter().fold(0u64, |a, &b| a.wrapping_add(b)), m)
+                    let started = Instant::now();
+                    let (sum, metrics) = {
+                        let (states, metrics) =
+                            pipeline::run::<u64, _>(&file, &section, config, |state, buffer| {
+                                *state = state.wrapping_add(if noop {
+                                    buffer.len() as u64
+                                } else {
+                                    pipeline::touch_all(buffer)
+                                });
+                                Ok(())
+                            })?;
+                        (
+                            states
+                                .iter()
+                                .fold(0u64, |total, &value| total.wrapping_add(value)),
+                            metrics,
+                        )
                     };
-                    let secs = t.elapsed().as_secs_f64();
-                    let ms = |d: std::time::Duration| d.as_secs_f64() * 1e3;
+                    let secs = started.elapsed().as_secs_f64();
+                    let ms = |duration: std::time::Duration| duration.as_secs_f64() * 1e3;
                     println!(
-                        "block {mb:>2}MiB evict {ev:?} workers {w:>2} bufs {:>3} #{i}: {secs:7.3}s {:5.2} GB/s | reader: read {:7.0}ms, waiting-for-buffer {:7.0}ms | workers(sum): busy {:8.0}ms, waiting-for-data {:8.0}ms | {} units",
-                        cfg.buffers,
+                        "block {mb:>2}MiB evict {ev:?} workers {worker_count:>2} bufs {:>3} #{i}: {secs:7.3}s {:5.2} GB/s | reader: read {:7.0}ms, waiting-for-buffer {:7.0}ms | workers(sum): busy {:8.0}ms, waiting-for-data {:8.0}ms | {} units",
+                        config.buffers,
                         gb / secs,
-                        ms(m.reader_read),
-                        ms(m.reader_wait),
-                        ms(m.worker_busy),
-                        ms(m.worker_wait),
-                        m.units
+                        ms(metrics.reader_read),
+                        ms(metrics.reader_wait),
+                        ms(metrics.worker_busy),
+                        ms(metrics.worker_wait),
+                        metrics.units
                     );
-                    assert_eq!(m.bytes, sec.len, "not every byte was delivered");
-                    if let (Some(r), false) = (reference, noop) {
-                        assert_eq!(sum, r, "checksum differs: some bytes missed or duplicated");
+                    assert_eq!(metrics.bytes, section.len, "not every byte was delivered");
+                    if let (Some(reference_sum), false) = (reference, noop) {
+                        assert_eq!(
+                            sum, reference_sum,
+                            "checksum differs: some bytes missed or duplicated"
+                        );
                     }
                 }
             }

@@ -74,18 +74,18 @@ pub struct Options {
 
 impl Default for Options {
     fn default() -> Self {
-        let d = ordered::Config::default();
+        let defaults = ordered::Config::default();
         // Both stages are cheap next to reading; more workers only add contention.
-        let cpus = std::thread::available_parallelism().map_or(4, |n| n.get());
+        let cpus = std::thread::available_parallelism().map_or(4, |count| count.get());
         Self {
             progress: None,
             dwarf: DwarfMode::Auto,
-            readers: d.readers,
+            readers: defaults.readers,
             workers: cpus.min(8),
             cold: false,
-            region_mb: d.region_bytes >> 20,
-            in_flight: d.in_flight,
-            lookahead: d.lookahead,
+            region_mb: defaults.region_bytes >> 20,
+            in_flight: defaults.in_flight,
+            lookahead: defaults.lookahead,
             corrupt_bound: false,
             force_sequential: false,
         }
@@ -187,8 +187,8 @@ impl Loader {
         let mut shard = self.unwinders[snap.id as usize % UNWINDER_SHARDS]
             .lock()
             .unwrap();
-        if let Some((v, eu)) = shard.get(&snap.id) {
-            if *v == snap.version {
+        if let Some((version, eu)) = shard.get(&snap.id) {
+            if *version == snap.version {
                 return eu.clone();
             }
         }
@@ -197,33 +197,33 @@ impl Loader {
         eu
     }
 
-    fn extract_events<T: ByteOrder>(&self, local: &mut Local, buf: &[u8]) -> Result<Extracted> {
+    fn extract_events<T: ByteOrder>(&self, local: &mut Local, buffer: &[u8]) -> Result<Extracted> {
         let mut events = Vec::new();
         let mut max_sample_time = 0u64;
-        for_each_record::<T>(buf, |r| {
+        for_each_record::<T>(buffer, |record| {
             local.counters.records += 1;
-            if r.ty == PERF_RECORD_SAMPLE {
+            if record.ty == PERF_RECORD_SAMPLE {
                 // Samples are the bulk of the data and are handled by `process`; only their time is needed here.
                 max_sample_time = max_sample_time.max(
                     self.ctx
-                        .raw_event::<T>(r.ty, r.misc, r.body)
+                        .raw_event::<T>(record.ty, record.misc, record.body)
                         .timestamp()
                         .unwrap_or(0),
                 );
                 return Ok(());
             }
             // User records and types without task/mmap meaning are skipped without parsing.
-            if r.ty >= 64 {
+            if record.ty >= 64 {
                 return Ok(());
             }
-            let raw = self.ctx.raw_event::<T>(r.ty, r.misc, r.body);
+            let raw = self.ctx.raw_event::<T>(record.ty, record.misc, record.body);
             let time = raw.timestamp().unwrap_or(0);
             let ev = raw.parse()?;
-            if let Some(e) = event_of(&ev, time) {
-                events.push(e);
-            } else if let EventRecord::Lost(l) = ev {
+            if let Some(event) = event_of(&ev, time) {
+                events.push(event);
+            } else if let EventRecord::Lost(lost) = ev {
                 local.counters.lost_records += 1;
-                local.counters.lost_events += l.count;
+                local.counters.lost_events += lost.count;
             }
             Ok(())
         })?;
@@ -233,17 +233,21 @@ impl Loader {
         })
     }
 
-    fn process_samples<T: ByteOrder>(&self, local: &mut Local, buf: &[u8]) -> Result<()> {
-        for_each_record::<T>(buf, |r| {
-            if r.ty != PERF_RECORD_SAMPLE {
+    fn process_samples<T: ByteOrder>(&self, local: &mut Local, buffer: &[u8]) -> Result<()> {
+        for_each_record::<T>(buffer, |record| {
+            if record.ty != PERF_RECORD_SAMPLE {
                 return Ok(());
             }
-            let EventRecord::Sample(s) = self.ctx.raw_event::<T>(r.ty, r.misc, r.body).parse()?
+            let EventRecord::Sample(sample) = self
+                .ctx
+                .raw_event::<T>(record.ty, record.misc, record.body)
+                .parse()?
             else {
                 return Ok(());
             };
             local.counters.samples += 1;
-            let (Some(regs), Some((stack, dyn_size))) = (&s.user_regs, &s.user_stack) else {
+            let (Some(regs), Some((stack, dyn_size))) = (&sample.user_regs, &sample.user_stack)
+            else {
                 local.counters.without_stack += 1;
                 return Ok(());
             };
@@ -256,9 +260,9 @@ impl Loader {
                 return Ok(());
             };
             let (pid, time, tid) = (
-                s.pid.unwrap_or(-1),
-                s.timestamp.unwrap_or(0),
-                s.tid.unwrap_or(-1),
+                sample.pid.unwrap_or(-1),
+                sample.timestamp.unwrap_or(0),
+                sample.tid.unwrap_or(-1),
             );
             // The address-space epoch current for this process at this time, as applied so far.
             let snap = self.spaces.read().unwrap().snapshot(pid, time);
@@ -293,10 +297,10 @@ impl Loader {
                 local.counters.suspect_frames += (local.frames.len() - suspect_from) as u64;
             }
             let node = local.trie.insert_leaf_first(&local.frames);
-            local.counters.with_period += s.period.is_some() as u64;
+            local.counters.with_period += sample.period.is_some() as u64;
             local.rows.push(Row {
                 time,
-                period: s.period.unwrap_or(1),
+                period: sample.period.unwrap_or(1),
                 pid,
                 tid,
                 node,
@@ -310,30 +314,34 @@ impl Consumer for Loader {
     type Local = Local;
     type Events = Extracted;
 
-    fn extract(&self, _region: usize, local: &mut Local, buf: &[u8]) -> Result<Extracted> {
+    fn extract(&self, _region: usize, local: &mut Local, buffer: &[u8]) -> Result<Extracted> {
         if self.big_endian {
-            self.extract_events::<BigEndian>(local, buf)
+            self.extract_events::<BigEndian>(local, buffer)
         } else {
-            self.extract_events::<LittleEndian>(local, buf)
+            self.extract_events::<LittleEndian>(local, buffer)
         }
     }
 
     fn commit(&self, _region: usize, extracted: Vec<Extracted>) -> Result<()> {
-        let mut p = self.pending.lock().unwrap();
+        let mut pending = self.pending.lock().unwrap();
         // Apply events up to the newest sample time of the *previous* regions: the samples of the
         // region released next (this one's predecessor) need exactly those, and applying in time
         // order keeps fork copies correct even when a parent's earlier mmap sits in a later region.
-        let apply_upto = p.max_sample_time;
+        let apply_upto = pending.max_sample_time;
         let mut region_max = 0;
-        for e in extracted {
-            region_max = region_max.max(e.max_sample_time);
-            p.events.extend(e.events);
+        for extract in extracted {
+            region_max = region_max.max(extract.max_sample_time);
+            pending.events.extend(extract.events);
         }
-        p.events.sort_by(|a, b| a.sort_key().cmp(&b.sort_key()));
-        let n = p.events.partition_point(|e| e.time <= apply_upto);
-        let ready: Vec<Event> = p.events.drain(..n).collect();
-        p.max_sample_time = p.max_sample_time.max(region_max);
-        drop(p);
+        pending
+            .events
+            .sort_by(|a, b| a.sort_key().cmp(&b.sort_key()));
+        let applicable_count = pending
+            .events
+            .partition_point(|event| event.time <= apply_upto);
+        let ready: Vec<Event> = pending.events.drain(..applicable_count).collect();
+        pending.max_sample_time = pending.max_sample_time.max(region_max);
+        drop(pending);
         if !ready.is_empty() {
             self.spaces.write().unwrap().apply_all(&ready);
         }
@@ -341,48 +349,48 @@ impl Consumer for Loader {
     }
 
     fn finish(&self) -> Result<()> {
-        let mut p = self.pending.lock().unwrap();
-        let rest: Vec<Event> = std::mem::take(&mut p.events); // already sorted by the last commit
-        drop(p);
+        let mut pending = self.pending.lock().unwrap();
+        let rest: Vec<Event> = std::mem::take(&mut pending.events); // already sorted by the last commit
+        drop(pending);
         self.spaces.write().unwrap().apply_all(&rest);
         Ok(())
     }
 
-    fn process(&self, _region: usize, local: &mut Local, buf: &[u8]) -> Result<()> {
+    fn process(&self, _region: usize, local: &mut Local, buffer: &[u8]) -> Result<()> {
         if self.big_endian {
-            self.process_samples::<BigEndian>(local, buf)
+            self.process_samples::<BigEndian>(local, buffer)
         } else {
-            self.process_samples::<LittleEndian>(local, buf)
+            self.process_samples::<LittleEndian>(local, buffer)
         }
     }
 }
 
-pub fn load(path: &Path, opts: Options, progress: &mut dyn FnMut(&str)) -> Result<Profile> {
+pub fn load(path: &Path, options: Options, progress: &mut dyn FnMut(&str)) -> Result<Profile> {
     let mut stats = LoadStats::default();
     let src = Source::open(path)?;
-    let big_endian = src.sec.big_endian;
-    let cfg = ordered::Config {
+    let big_endian = src.section.big_endian;
+    let config = ordered::Config {
         block: 1 << 20,
-        workers: opts.workers,
-        readers: opts.readers,
-        region_bytes: opts.region_mb << 20,
-        in_flight: opts.in_flight,
-        lookahead: opts.lookahead.max(1), /* required: see the module docs */
+        workers: options.workers,
+        readers: options.readers,
+        region_bytes: options.region_mb << 20,
+        in_flight: options.in_flight,
+        lookahead: options.lookahead.max(1), /* required: see the module docs */
     };
     let sopts = ordered::Options {
-        progress: opts.progress.clone(),
-        cold: opts.cold,
-        corrupt_bound: opts.corrupt_bound,
-        force_sequential: opts.force_sequential,
+        progress: options.progress.clone(),
+        cold: options.cold,
+        corrupt_bound: options.corrupt_bound,
+        force_sequential: options.force_sequential,
     };
 
     // ---- one pass: read, extract events, commit, unwind ---------------------------------------
     progress("reading and unwinding");
-    let t = Instant::now();
-    let (loader, states, rep) = ordered::stream_ordered(path, cfg, sopts, || {
+    let started = Instant::now();
+    let (loader, states, rep) = ordered::stream_ordered(path, config, sopts, || {
         Loader::new(src.ctx.clone(), big_endian)
     })?;
-    stats.secs_stream = t.elapsed().as_secs_f64();
+    stats.secs_stream = started.elapsed().as_secs_f64();
     stats.secs_plan = rep.plan_time.as_secs_f64();
     stats.stream_regions = rep.metrics.regions;
     stats.stream_max_held_units = rep.metrics.max_held_units;
@@ -391,79 +399,79 @@ pub fn load(path: &Path, opts: Options, progress: &mut dyn FnMut(&str)) -> Resul
     let module_paths: Vec<PathBuf> = spaces
         .module_paths()
         .iter()
-        .map(|p| PathBuf::from(&**p))
+        .map(|path| PathBuf::from(&**path))
         .collect();
     stats.processes = spaces.pids().count();
     stats.epochs = spaces.epoch_count();
 
     // ---- merge the workers' tries ------------------------------------------------------------
     progress("merging");
-    let t = Instant::now();
+    let started = Instant::now();
     let mut phys = PhysTrie::default();
     let mut rows: Vec<Row> = Vec::new();
-    let mut c = Counters::default();
-    for st in states {
-        let map = phys.merge(&st.trie);
-        rows.extend(st.rows.iter().map(|r| Row {
-            node: map[r.node as usize],
-            ..*r
+    let mut counters = Counters::default();
+    for state in states {
+        let map = phys.merge(&state.trie);
+        rows.extend(state.rows.iter().map(|row| Row {
+            node: map[row.node as usize],
+            ..*row
         }));
-        c.samples += st.counters.samples;
-        c.without_stack += st.counters.without_stack;
-        c.frames += st.counters.frames;
-        c.suspect_samples += st.counters.suspect_samples;
-        c.suspect_frames += st.counters.suspect_frames;
-        c.lost_records += st.counters.lost_records;
-        c.lost_events += st.counters.lost_events;
-        c.with_period += st.counters.with_period;
+        counters.samples += state.counters.samples;
+        counters.without_stack += state.counters.without_stack;
+        counters.frames += state.counters.frames;
+        counters.suspect_samples += state.counters.suspect_samples;
+        counters.suspect_frames += state.counters.suspect_frames;
+        counters.lost_records += state.counters.lost_records;
+        counters.lost_events += state.counters.lost_events;
+        counters.with_period += state.counters.with_period;
     }
-    rows.sort_by_key(|r| (r.time, r.tid, r.node));
-    stats.secs_merge = t.elapsed().as_secs_f64();
-    stats.samples = c.samples;
-    stats.samples_without_stack = c.without_stack;
-    stats.physical_frames = c.frames;
-    stats.suspect_samples = c.suspect_samples;
-    stats.suspect_frames = c.suspect_frames;
-    stats.lost_records = c.lost_records;
-    stats.lost_events = c.lost_events;
-    stats.samples_with_period = c.with_period;
+    rows.sort_by_key(|row| (row.time, row.tid, row.node));
+    stats.secs_merge = started.elapsed().as_secs_f64();
+    stats.samples = counters.samples;
+    stats.samples_without_stack = counters.without_stack;
+    stats.physical_frames = counters.frames;
+    stats.suspect_samples = counters.suspect_samples;
+    stats.suspect_frames = counters.suspect_frames;
+    stats.lost_records = counters.lost_records;
+    stats.lost_events = counters.lost_events;
+    stats.samples_with_period = counters.with_period;
     stats.period_unit = src.period_unit.to_string();
 
     // ---- symbolize the unique (module, address) pairs ----------------------------------------
     progress("symbolizing");
-    let t = Instant::now();
+    let started = Instant::now();
     let mut per_module: BTreeMap<u32, BTreeSet<u64>> = BTreeMap::new();
-    for n in &phys.nodes[1..] {
-        if n.frame.module != NO_MODULE {
+    for node in &phys.nodes[1..] {
+        if node.frame.module != NO_MODULE {
             per_module
-                .entry(n.frame.module)
+                .entry(node.frame.module)
                 .or_default()
-                .insert(n.frame.svma);
+                .insert(node.frame.svma);
         }
     }
     let tasks: Vec<ModuleAddrs> = per_module
         .into_iter()
-        .map(|(module, s)| ModuleAddrs {
+        .map(|(module, addresses)| ModuleAddrs {
             module,
-            addrs: s.into_iter().collect(),
+            addrs: addresses.into_iter().collect(),
         })
         .collect();
-    stats.unique_addresses = tasks.iter().map(|t| t.addrs.len()).sum();
-    let results = symbolize_many(&module_paths, tasks, opts.dwarf);
+    stats.unique_addresses = tasks.iter().map(|task| task.addrs.len()).sum();
+    let results = symbolize_many(&module_paths, tasks, options.dwarf);
     for syms in results.values() {
-        let r = &syms.result;
-        match r.level {
+        let result = &syms.result;
+        match result.level {
             Level::Full => stats.modules_full += 1,
             Level::SymbolsOnly => stats.modules_symbols_only += 1,
             Level::Raw => stats.modules_raw += 1,
         }
-        stats.unresolved_addresses += r.unresolved;
+        stats.unresolved_addresses += result.unresolved;
     }
-    stats.secs_symbolize = t.elapsed().as_secs_f64();
+    stats.secs_symbolize = started.elapsed().as_secs_f64();
 
     // ---- expand the physical trie into the logical tries -------------------------------------
     progress("building call trees");
-    let t = Instant::now();
+    let started = Instant::now();
     let mut frames: Vec<FrameInfo> = Vec::new();
     let mut frame_ids: FxHashMap<FrameKey, u32> = FxHashMap::default();
     let mut intern = |lf: &LogicalFrame, module: u32, suspect: bool| -> u32 {
@@ -495,50 +503,50 @@ pub fn load(path: &Path, opts: Options, progress: &mut dyn FnMut(&str)) -> Resul
     // Where each physical node ends up: the innermost logical frame of its chain.
     let mut full_of = vec![ROOT; phys.nodes.len()];
     let mut trunc_of = vec![ROOT; phys.nodes.len()];
-    for (i, n) in phys.nodes.iter().enumerate().skip(1) {
-        let chain: Vec<u32> = if n.frame.module == NO_MODULE {
-            vec![intern(&unmapped, NO_MODULE, n.frame.suspect)]
+    for (i, node) in phys.nodes.iter().enumerate().skip(1) {
+        let chain: Vec<u32> = if node.frame.module == NO_MODULE {
+            vec![intern(&unmapped, NO_MODULE, node.frame.suspect)]
         } else {
-            results[&n.frame.module]
-                .frames_of(n.frame.svma)
+            results[&node.frame.module]
+                .frames_of(node.frame.svma)
                 .iter()
-                .map(|lf| intern(lf, n.frame.module, n.frame.suspect))
+                .map(|lf| intern(lf, node.frame.module, node.frame.suspect))
                 .collect()
         };
         // The chain is innermost-first; a path is root-first, so walk it backwards.
-        let mut cur = full_of[n.parent as usize];
-        for &f in chain.iter().rev() {
-            cur = full.child(cur, f);
+        let mut cur = full_of[node.parent as usize];
+        for &frame in chain.iter().rev() {
+            cur = full.child(cur, frame);
         }
         full_of[i] = cur;
-        full.add_self(cur, n.self_count);
+        full.add_self(cur, node.self_count);
         // The truncated view drops suspect frames: their node collapses into the parent's.
-        let mut cur = trunc_of[n.parent as usize];
-        if !n.frame.suspect {
-            for &f in chain.iter().rev() {
-                cur = truncated.child(cur, f);
+        let mut cur = trunc_of[node.parent as usize];
+        if !node.frame.suspect {
+            for &frame in chain.iter().rev() {
+                cur = truncated.child(cur, frame);
             }
         }
         trunc_of[i] = cur;
-        truncated.add_self(cur, n.self_count);
+        truncated.add_self(cur, node.self_count);
     }
     let (full, truncated) = (full.finish(), truncated.finish());
     let samples = rows
         .iter()
-        .map(|r| SampleRef {
-            time: r.time,
-            period: r.period,
-            pid: r.pid,
-            tid: r.tid,
-            full: full_of[r.node as usize],
-            truncated: trunc_of[r.node as usize],
+        .map(|row| SampleRef {
+            time: row.time,
+            period: row.period,
+            pid: row.pid,
+            tid: row.tid,
+            full: full_of[row.node as usize],
+            truncated: trunc_of[row.node as usize],
         })
         .collect();
-    stats.secs_build = t.elapsed().as_secs_f64();
+    stats.secs_build = started.elapsed().as_secs_f64();
 
     let modules = module_paths
         .iter()
-        .map(|p| p.to_string_lossy().to_string())
+        .map(|path| path.to_string_lossy().to_string())
         .collect();
     Ok(Profile {
         modules,

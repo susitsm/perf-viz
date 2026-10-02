@@ -32,18 +32,18 @@ fn main() -> perf_bench::Result<()> {
         samples,
         window_mb,
     } = Cli::parse();
-    let (file, sec) = split::open(&path)?;
-    let t = Instant::now();
-    let starts: Vec<u64> = split::split(&file, &sec, 4 << 20, 1)?
+    let (file, section) = split::open(&path)?;
+    let started = Instant::now();
+    let starts: Vec<u64> = split::split(&file, &section, 4 << 20, 1)?
         .into_iter()
-        .map(|(a, _)| a)
+        .map(|(start, _)| start)
         .collect();
     println!(
         "{} records, exact boundaries in {:.1}s",
         starts.len(),
-        t.elapsed().as_secs_f64()
+        started.elapsed().as_secs_f64()
     );
-    let is_boundary = |o: u64| starts.binary_search(&o).is_ok();
+    let is_boundary = |offset: u64| starts.binary_search(&offset).is_ok();
 
     // Deterministic pseudo-random nominal offsets (xorshift), plus the very start.
     let mut x = 0x9E3779B97F4A7C15u64;
@@ -52,29 +52,32 @@ fn main() -> perf_bench::Result<()> {
         x ^= x << 13;
         x ^= x >> 7;
         x ^= x << 17;
-        nominals.push(x % sec.len);
+        nominals.push(x % section.len);
     }
 
     let mut any_bad = false;
     for generic_only in [false, true] {
         let (mut ok, mut bad, mut none, mut rounds, mut chains) = (0, 0, 0, 0, 0);
         let (mut dist_sum, mut dist_max) = (0u64, 0u64);
-        let t = Instant::now();
+        let started = Instant::now();
         for &nom in &nominals {
-            match anchor::find(&file, &sec, nom, window_mb << 20, generic_only)? {
+            match anchor::find(&file, &section, nom, window_mb << 20, generic_only)? {
                 None => none += 1,
-                Some(a) => {
-                    assert!(a.offset >= nom);
-                    if is_boundary(a.offset) {
+                Some(anchor) => {
+                    assert!(anchor.offset >= nom);
+                    if is_boundary(anchor.offset) {
                         ok += 1;
-                        let d = a.offset - nom;
-                        dist_sum += d;
-                        dist_max = dist_max.max(d);
+                        let distance = anchor.offset - nom;
+                        dist_sum += distance;
+                        dist_max = dist_max.max(distance);
                     } else {
                         bad += 1;
-                        eprintln!("FALSE ANCHOR at {} (nominal {nom}, {:?})", a.offset, a.kind);
+                        eprintln!(
+                            "FALSE ANCHOR at {} (nominal {nom}, {:?})",
+                            anchor.offset, anchor.kind
+                        );
                     }
-                    match a.kind {
+                    match anchor.kind {
                         Kind::FinishedRound => rounds += 1,
                         Kind::Chain => chains += 1,
                     }
@@ -90,7 +93,7 @@ fn main() -> perf_bench::Result<()> {
             },
             dist_sum as f64 / ok.max(1) as f64 / 1024.0,
             dist_max / 1024,
-            t.elapsed().as_secs_f64() * 1e3 / nominals.len() as f64
+            started.elapsed().as_secs_f64() * 1e3 / nominals.len() as f64
         );
         any_bad |= bad > 0;
     }

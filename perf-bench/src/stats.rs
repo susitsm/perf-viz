@@ -49,64 +49,73 @@ impl Stats {
 
     #[inline]
     pub fn add_event(&mut self, ev: &EventRecord<'_>, touch: bool) {
-        if let EventRecord::Sample(s) = ev {
+        if let EventRecord::Sample(sample) = ev {
             self.samples += 1;
-            self.ip_sum = self.ip_sum.wrapping_add(s.ip.unwrap_or(0));
-            self.time_sum = self.time_sum.wrapping_add(s.timestamp.unwrap_or(0));
-            let pid = s.pid.unwrap_or(0) as u32 as u64;
-            let tid = s.tid.unwrap_or(0) as u32 as u64;
+            self.ip_sum = self.ip_sum.wrapping_add(sample.ip.unwrap_or(0));
+            self.time_sum = self.time_sum.wrapping_add(sample.timestamp.unwrap_or(0));
+            let pid = sample.pid.unwrap_or(0) as u32 as u64;
+            let tid = sample.tid.unwrap_or(0) as u32 as u64;
             self.pid_tid_sum = self.pid_tid_sum.wrapping_add(pid << 32 | tid);
-            self.callchain_entries += s.callchain.as_ref().map_or(0, |c| c.len() as u64);
-            if let Some((d, _)) = &s.user_stack {
-                self.user_stack_bytes += d.len() as u64;
+            self.callchain_entries += sample
+                .callchain
+                .as_ref()
+                .map_or(0, |chain| chain.len() as u64);
+            if let Some((dump, _)) = &sample.user_stack {
+                self.user_stack_bytes += dump.len() as u64;
                 if touch {
-                    self.stack_sum = self.stack_sum.wrapping_add(sum_words(d));
+                    self.stack_sum = self.stack_sum.wrapping_add(sum_words(dump));
                 }
             }
-            self.user_reg0_sum = self
-                .user_reg0_sum
-                .wrapping_add(s.user_regs.as_ref().and_then(|r| r.get(0)).unwrap_or(0));
+            self.user_reg0_sum = self.user_reg0_sum.wrapping_add(
+                sample
+                    .user_regs
+                    .as_ref()
+                    .and_then(|registers| registers.get(0))
+                    .unwrap_or(0),
+            );
         }
     }
 
-    pub fn merge(&mut self, o: &Stats) {
-        self.records += o.records;
-        self.bytes += o.bytes;
-        for (a, b) in self.per_type.iter_mut().zip(&o.per_type) {
-            *a += b;
+    pub fn merge(&mut self, other: &Stats) {
+        self.records += other.records;
+        self.bytes += other.bytes;
+        for (count, other_count) in self.per_type.iter_mut().zip(&other.per_type) {
+            *count += other_count;
         }
-        self.samples += o.samples;
-        self.ip_sum = self.ip_sum.wrapping_add(o.ip_sum);
-        self.time_sum = self.time_sum.wrapping_add(o.time_sum);
-        self.pid_tid_sum = self.pid_tid_sum.wrapping_add(o.pid_tid_sum);
-        self.callchain_entries += o.callchain_entries;
-        self.user_stack_bytes += o.user_stack_bytes;
-        self.user_reg0_sum = self.user_reg0_sum.wrapping_add(o.user_reg0_sum);
-        self.stack_sum = self.stack_sum.wrapping_add(o.stack_sum);
+        self.samples += other.samples;
+        self.ip_sum = self.ip_sum.wrapping_add(other.ip_sum);
+        self.time_sum = self.time_sum.wrapping_add(other.time_sum);
+        self.pid_tid_sum = self.pid_tid_sum.wrapping_add(other.pid_tid_sum);
+        self.callchain_entries += other.callchain_entries;
+        self.user_stack_bytes += other.user_stack_bytes;
+        self.user_reg0_sum = self.user_reg0_sum.wrapping_add(other.user_reg0_sum);
+        self.stack_sum = self.stack_sum.wrapping_add(other.stack_sum);
     }
 }
 
 /// Wrapping sum of little-endian-agnostic u64 words (byte order doesn't matter for
 /// equality between readers on the same file). Written so LLVM vectorizes it.
-fn sum_words(d: &RawData<'_>) -> u64 {
-    let sum = |b: &[u8]| {
+fn sum_words(data: &RawData<'_>) -> u64 {
+    let sum = |bytes: &[u8]| {
         let mut acc = [0u64; 4];
         let mut total = 0u64;
-        for w in b.chunks_exact(32) {
-            for (i, a) in acc.iter_mut().enumerate() {
-                *a = a.wrapping_add(u64::from_ne_bytes(w[i * 8..i * 8 + 8].try_into().unwrap()));
+        for word in bytes.chunks_exact(32) {
+            for (i, lane) in acc.iter_mut().enumerate() {
+                *lane = lane.wrapping_add(u64::from_ne_bytes(
+                    word[i * 8..i * 8 + 8].try_into().unwrap(),
+                ));
             }
         }
-        for a in acc {
-            total = total.wrapping_add(a);
+        for lane in acc {
+            total = total.wrapping_add(lane);
         }
-        for w in b.chunks_exact(32).remainder().chunks_exact(8) {
-            total = total.wrapping_add(u64::from_ne_bytes(w.try_into().unwrap()));
+        for word in bytes.chunks_exact(32).remainder().chunks_exact(8) {
+            total = total.wrapping_add(u64::from_ne_bytes(word.try_into().unwrap()));
         }
         total
     };
-    match d {
-        RawData::Single(b) => sum(b),
-        RawData::Split(a, b) => sum(a).wrapping_add(sum(b)),
+    match data {
+        RawData::Single(bytes) => sum(bytes),
+        RawData::Split(first, second) => sum(first).wrapping_add(sum(second)),
     }
 }

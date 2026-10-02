@@ -45,22 +45,22 @@ fn main() -> perf_bench::Result<()> {
         region_mb,
         verify,
     } = Cli::parse();
-    let (file, sec) = split::open(&path)?;
-    let gb = sec.len as f64 / 1e9;
+    let (file, section) = split::open(&path)?;
+    let gb = section.len as f64 / 1e9;
     println!("data section: {gb:.2} GB, cold={cold}");
 
     if !readers.is_empty() {
         for &mb in &blocks {
-            for &r in &readers {
+            for &reader_count in &readers {
                 for i in 0..iters {
                     if cold {
                         split::drop_cache(&file);
                     }
-                    let t = Instant::now();
-                    split::read_parallel(&path, &sec, r, mb << 20, region_mb << 20)?;
-                    let secs = t.elapsed().as_secs_f64();
+                    let started = Instant::now();
+                    split::read_parallel(&path, &section, reader_count, mb << 20, region_mb << 20)?;
+                    let secs = started.elapsed().as_secs_f64();
                     println!(
-                        "readers {r:>2} block {mb:>2}MiB region {region_mb}MiB #{i}: {secs:7.3}s {:5.2} GB/s",
+                        "readers {reader_count:>2} block {mb:>2}MiB region {region_mb}MiB #{i}: {secs:7.3}s {:5.2} GB/s",
                         gb / secs
                     );
                 }
@@ -74,16 +74,16 @@ fn main() -> perf_bench::Result<()> {
             if cold {
                 split::drop_cache(&file);
             }
-            let t = Instant::now();
-            split::read_only(&file, &sec, block)?;
-            let ro = t.elapsed().as_secs_f64();
+            let started = Instant::now();
+            split::read_only(&file, &section, block)?;
+            let ro = started.elapsed().as_secs_f64();
 
             if cold {
                 split::drop_cache(&file);
             }
-            let t = Instant::now();
-            let chunks = split::split(&file, &sec, block, fast::CHUNK_BYTES as u64)?;
-            let sp = t.elapsed().as_secs_f64();
+            let started = Instant::now();
+            let chunks = split::split(&file, &section, block, fast::CHUNK_BYTES as u64)?;
+            let sp = started.elapsed().as_secs_f64();
             println!(
                 "block {mb:>3} MiB #{i}: read-only {ro:6.3}s {:5.2} GB/s | split {sp:6.3}s {:5.2} GB/s  ({} chunks)",
                 gb / ro,
@@ -91,10 +91,11 @@ fn main() -> perf_bench::Result<()> {
                 chunks.len()
             );
             if verify && i == 0 {
-                let want = fast::scan_chunks_file(&file, sec.start, sec.len, sec.big_endian)?;
+                let want =
+                    fast::scan_chunks_file(&file, section.start, section.len, section.big_endian)?;
                 let got: Vec<_> = chunks
                     .iter()
-                    .map(|&(a, b)| (a as usize, b as usize))
+                    .map(|&(start, end)| (start as usize, end as usize))
                     .collect();
                 assert_eq!(want, got, "split chunks differ from serial scan");
                 println!("  verified identical to the serial pread scan");

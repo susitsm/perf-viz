@@ -118,16 +118,16 @@ mod scripted {
                 .script
                 .steps()
                 .iter()
-                .map(|s| match s {
-                    ScriptStep::Click(p) => Step::Click(pos2(p.x, p.y)),
-                    ScriptStep::Hover(p) => Step::Hover(pos2(p.x, p.y)),
-                    ScriptStep::Drag(d) => {
-                        Step::Drag(pos2(d.from.x, d.from.y), pos2(d.to.x, d.to.y))
+                .map(|step| match step {
+                    ScriptStep::Click(point) => Step::Click(pos2(point.x, point.y)),
+                    ScriptStep::Hover(point) => Step::Hover(pos2(point.x, point.y)),
+                    ScriptStep::Drag(drag) => {
+                        Step::Drag(pos2(drag.from.x, drag.from.y), pos2(drag.to.x, drag.to.y))
                     }
                     ScriptStep::Pause(secs) => Step::Pause((secs * 1000.0) as u64),
                     ScriptStep::TuneWindow => Step::TuneWindow,
-                    ScriptStep::Open(p) => {
-                        files.push(p.clone());
+                    ScriptStep::Open(path) => {
+                        files.push(path.clone());
                         Step::Open(files.len() - 1)
                     }
                 })
@@ -199,27 +199,27 @@ mod scripted {
                 },
                 Some(Doing {
                     step: step @ Step::Click(pos),
-                    stage: n,
+                    stage,
                 }) => {
                     raw.events.push(egui::Event::PointerButton {
                         pos,
                         button: egui::PointerButton::Primary,
-                        pressed: n == 0,
+                        pressed: stage == 0,
                         modifiers: mods,
                     });
-                    sc.current = if n == 0 {
+                    sc.current = if stage == 0 {
                         Some(Doing { step, stage: 1 })
                     } else {
                         None
                     };
-                    sc.wait_until = pause(if n == 0 { 80 } else { 350 });
+                    sc.wait_until = pause(if stage == 0 { 80 } else { 350 });
                 }
                 Some(Doing {
                     step: step @ Step::Drag(from, to),
-                    stage: n,
+                    stage,
                 }) => {
                     let mid = pos2((from.x + to.x) / 2.0, (from.y + to.y) / 2.0);
-                    raw.events.push(match n {
+                    raw.events.push(match stage {
                         0 => egui::Event::PointerButton {
                             pos: from,
                             button: egui::PointerButton::Primary,
@@ -235,12 +235,15 @@ mod scripted {
                             modifiers: mods,
                         },
                     });
-                    sc.current = if n >= 3 {
+                    sc.current = if stage >= 3 {
                         None
                     } else {
-                        Some(Doing { step, stage: n + 1 })
+                        Some(Doing {
+                            step,
+                            stage: stage + 1,
+                        })
                     };
-                    sc.wait_until = pause(if n >= 3 { 350 } else { 80 });
+                    sc.wait_until = pause(if stage >= 3 { 350 } else { 80 });
                 }
                 Some(_) => sc.current = None,
             }
@@ -279,7 +282,7 @@ mod scripted {
                 None => frames == 8,
                 Some(sc) => sc
                     .finished
-                    .is_some_and(|t| t.elapsed() > Duration::from_millis(900)),
+                    .is_some_and(|finished_at| finished_at.elapsed() > Duration::from_millis(900)),
             };
             self.poll(ctx, &path, ready);
         }
@@ -299,8 +302,8 @@ mod scripted {
                 ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(egui::UserData::default()));
             }
             let shot = ctx.input(|i| {
-                i.events.iter().find_map(|e| {
-                    if let egui::Event::Screenshot { image, .. } = e {
+                i.events.iter().find_map(|event| {
+                    if let egui::Event::Screenshot { image, .. } = event {
                         Some(image.clone())
                     } else {
                         None
@@ -308,14 +311,22 @@ mod scripted {
                 })
             });
             if let Some(img) = shot {
-                let [w, h] = img.size;
-                let mut buf = Vec::with_capacity(w * h * 4);
+                let [width, height] = img.size;
+                let mut buffer = Vec::with_capacity(width * height * 4);
                 for px in &img.pixels {
-                    buf.extend_from_slice(&px.to_array());
+                    buffer.extend_from_slice(&px.to_array());
                 }
-                match image::save_buffer(path, &buf, w as u32, h as u32, image::ColorType::Rgba8) {
-                    Ok(()) => eprintln!("screenshot saved to {} ({w}x{h})", path.display()),
-                    Err(e) => eprintln!("screenshot failed: {e}"),
+                match image::save_buffer(
+                    path,
+                    &buffer,
+                    width as u32,
+                    height as u32,
+                    image::ColorType::Rgba8,
+                ) {
+                    Ok(()) => {
+                        eprintln!("screenshot saved to {} ({width}x{height})", path.display())
+                    }
+                    Err(error) => eprintln!("screenshot failed: {error}"),
                 }
                 self.finished = true;
                 ctx.send_viewport_cmd(egui::ViewportCommand::Close);

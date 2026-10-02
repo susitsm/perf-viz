@@ -45,52 +45,52 @@ pub struct Anchor {
 /// candidate, preferring `FinishedRound` anchors; `None` if the window has none.
 pub fn find(
     file: &File,
-    sec: &DataSection,
+    section: &DataSection,
     nominal: u64,
     window: usize,
     generic_only: bool,
 ) -> Result<Option<Anchor>> {
-    if sec.big_endian {
-        find_impl::<BigEndian>(file, sec, nominal, window, generic_only)
+    if section.big_endian {
+        find_impl::<BigEndian>(file, section, nominal, window, generic_only)
     } else {
-        find_impl::<LittleEndian>(file, sec, nominal, window, generic_only)
+        find_impl::<LittleEndian>(file, section, nominal, window, generic_only)
     }
 }
 
 fn find_impl<T: ByteOrder>(
     file: &File,
-    sec: &DataSection,
+    section: &DataSection,
     nominal: u64,
     window: usize,
     generic_only: bool,
 ) -> Result<Option<Anchor>> {
     let base = nominal.next_multiple_of(8);
-    if base >= sec.len {
+    if base >= section.len {
         return Ok(None);
     }
-    let n = window.min((sec.len - base) as usize);
-    let mut buf = vec![0u8; n];
-    file.read_exact_at(&mut buf, sec.start + base)?;
+    let read_len = window.min((section.len - base) as usize);
+    let mut buffer = vec![0u8; read_len];
+    file.read_exact_at(&mut buffer, section.start + base)?;
     // A chain that reaches the true end of the data section is complete; one that runs
     // off the end of the window is inconclusive.
-    let window_is_tail = base + n as u64 == sec.len;
+    let window_is_tail = base + read_len as u64 == section.len;
 
     let mut first_chain: Option<u64> = None;
     let mut i = 0usize;
-    while i + HEADER_LEN <= n {
-        let ty = T::read_u32(&buf[i..]);
-        let size = T::read_u16(&buf[i + 6..]) as usize;
+    while i + HEADER_LEN <= read_len {
+        let ty = T::read_u32(&buffer[i..]);
+        let size = T::read_u16(&buffer[i + 6..]) as usize;
         if !generic_only && ty == PERF_RECORD_FINISHED_ROUND && size == HEADER_LEN {
-            if let Some(at) = chain_ok::<T>(&buf, i + HEADER_LEN, window_is_tail) {
+            if let Some(at) = chain_ok::<T>(&buffer, i + HEADER_LEN, window_is_tail) {
                 // An anchor at the very end of the data can't split anything.
-                return Ok((base + (at as u64) < sec.len).then_some(Anchor {
+                return Ok((base + (at as u64) < section.len).then_some(Anchor {
                     offset: base + at as u64,
                     kind: Kind::FinishedRound,
                 }));
             }
         } else if first_chain.is_none() && (generic_only || i > 0) && valid_header(ty, size) {
             // Generic candidates are only worth their cost as a fallback; remember the first.
-            if let Some(at) = chain_ok::<T>(&buf, i, window_is_tail) {
+            if let Some(at) = chain_ok::<T>(&buffer, i, window_is_tail) {
                 first_chain = Some(base + at as u64);
                 if generic_only {
                     break;
@@ -99,10 +99,12 @@ fn find_impl<T: ByteOrder>(
         }
         i += 8;
     }
-    Ok(first_chain.filter(|&o| o < sec.len).map(|offset| Anchor {
-        offset,
-        kind: Kind::Chain,
-    }))
+    Ok(first_chain
+        .filter(|&offset| offset < section.len)
+        .map(|offset| Anchor {
+            offset,
+            kind: Kind::Chain,
+        }))
 }
 
 /// Plausible headers only: kernel record types (1..=24) or perf's synthesized user
@@ -115,10 +117,10 @@ fn valid_header(ty: u32, size: usize) -> bool {
 }
 
 /// If the headers from `start` form a valid chain covering `MIN_SPAN` bytes and
-/// `MIN_HEADERS` records, all inside `buf` (or ending exactly at the end of the data
+/// `MIN_HEADERS` records, all inside `buffer` (or ending exactly at the end of the data
 /// section), returns the position of the first header at least `RESUME_SPAN` along it.
 /// Running off the end of the window first is inconclusive, so it rejects.
-fn chain_ok<T: ByteOrder>(buf: &[u8], start: usize, buf_is_tail: bool) -> Option<usize> {
+fn chain_ok<T: ByteOrder>(buffer: &[u8], start: usize, buf_is_tail: bool) -> Option<usize> {
     let (mut at, mut k, mut resume) = (start, 0usize, None);
     loop {
         if resume.is_none() && at - start >= RESUME_SPAN {
@@ -127,15 +129,15 @@ fn chain_ok<T: ByteOrder>(buf: &[u8], start: usize, buf_is_tail: bool) -> Option
         if k >= MIN_HEADERS && at - start >= MIN_SPAN {
             return resume;
         }
-        if at == buf.len() && buf_is_tail {
+        if at == buffer.len() && buf_is_tail {
             return Some(resume.unwrap_or(at));
         }
-        if at + HEADER_LEN > buf.len() {
+        if at + HEADER_LEN > buffer.len() {
             return None;
         }
-        let ty = T::read_u32(&buf[at..]);
-        let size = T::read_u16(&buf[at + 6..]) as usize;
-        if !valid_header(ty, size) || at + size > buf.len() {
+        let ty = T::read_u32(&buffer[at..]);
+        let size = T::read_u16(&buffer[at + 6..]) as usize;
+        if !valid_header(ty, size) || at + size > buffer.len() {
             return None;
         }
         at += size;
@@ -152,45 +154,46 @@ const ROUND_WINDOW: usize = 16 << 20;
 /// interior bound is a *guessed* record boundary found near `len * k / regions` (see [`find`]).
 /// Bounds that couldn't be found or collapse into a neighbour are dropped, so fewer regions
 /// may come back. Searches run in parallel; each reads one small window.
-pub fn plan_regions(file: &File, sec: &DataSection, regions: usize) -> Result<Vec<u64>> {
+pub fn plan_regions(file: &File, section: &DataSection, regions: usize) -> Result<Vec<u64>> {
     use std::sync::{
         Mutex,
         atomic::{AtomicUsize, Ordering},
     };
     // A bounded pool: there can be thousands of boundaries, and each search is one small read.
-    let n = regions.max(1) - 1;
-    let slots: Vec<Mutex<Option<Result<Option<u64>>>>> = (0..n).map(|_| Mutex::new(None)).collect();
+    let boundary_count = regions.max(1) - 1;
+    let slots: Vec<Mutex<Option<Result<Option<u64>>>>> =
+        (0..boundary_count).map(|_| Mutex::new(None)).collect();
     let next = AtomicUsize::new(0);
-    let threads = n.clamp(1, 32);
-    std::thread::scope(|s| {
+    let threads = boundary_count.clamp(1, 32);
+    std::thread::scope(|scope| {
         for _ in 0..threads {
-            s.spawn(|| {
+            scope.spawn(|| {
                 loop {
                     let i = next.fetch_add(1, Ordering::Relaxed);
-                    if i >= n {
+                    if i >= boundary_count {
                         return;
                     }
-                    let nominal = (sec.len as u128 * (i as u128 + 1) / regions as u128) as u64;
-                    let r = (|| -> Result<Option<u64>> {
-                        let found = match find(file, sec, nominal, GENERIC_WINDOW, true)? {
-                            Some(a) => Some(a),
-                            None => find(file, sec, nominal, ROUND_WINDOW, false)?,
+                    let nominal = (section.len as u128 * (i as u128 + 1) / regions as u128) as u64;
+                    let search_result = (|| -> Result<Option<u64>> {
+                        let found = match find(file, section, nominal, GENERIC_WINDOW, true)? {
+                            Some(anchor) => Some(anchor),
+                            None => find(file, section, nominal, ROUND_WINDOW, false)?,
                         };
-                        Ok(found.map(|a| a.offset))
+                        Ok(found.map(|anchor| anchor.offset))
                     })();
-                    *slots[i].lock().unwrap() = Some(r);
+                    *slots[i].lock().unwrap() = Some(search_result);
                 }
             });
         }
     });
     let mut bounds = vec![0u64];
     for slot in slots {
-        if let Some(o) = slot.into_inner().unwrap().unwrap()? {
-            if o > *bounds.last().unwrap() && o < sec.len {
-                bounds.push(o);
+        if let Some(boundary) = slot.into_inner().unwrap().unwrap()? {
+            if boundary > *bounds.last().unwrap() && boundary < section.len {
+                bounds.push(boundary);
             }
         }
     }
-    bounds.push(sec.len);
+    bounds.push(section.len);
     Ok(bounds)
 }

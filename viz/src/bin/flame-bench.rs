@@ -18,35 +18,35 @@ fn synthetic(nodes_target: usize) -> Trie {
         x ^= x << 17;
         x
     };
-    let mut b = TrieBuilder::default();
+    let mut builder = TrieBuilder::default();
     let mut nodes = 1usize;
     let mut path = Vec::new();
     while nodes < nodes_target {
         path.clear();
         let depth = 5 + rnd() % 55;
-        for d in 0..depth {
+        for level in 0..depth {
             // Frame id: mostly from a small hot set near the root, more varied near the leaves.
-            let spread = 4 + d * d / 3;
-            path.push(((rnd() % spread) * 31 + d) as u32);
+            let spread = 4 + level * level / 3;
+            path.push(((rnd() % spread) * 31 + level) as u32);
         }
-        b.insert(path.iter().copied());
+        builder.insert(path.iter().copied());
         nodes += depth as usize / 3; // rough: much of each path is shared
     }
-    b.finish()
+    builder.finish()
 }
 
-fn time(label: &str, t: &Trie, focus: u32) {
+fn time(label: &str, trie: &Trie, focus: u32) {
     let mut out = Vec::new();
-    let totals = trie_totals(t);
-    for &(w, min_w) in &[(1600.0f32, 0.5f32), (1600.0, 0.0), (3840.0, 0.5)] {
+    let totals = trie_totals(trie);
+    for &(width, min_w) in &[(1600.0f32, 0.5f32), (1600.0, 0.0), (3840.0, 0.5)] {
         let mut best = f64::MAX;
         for _ in 0..5 {
-            let s = Instant::now();
-            layout(t, &totals, focus, w, min_w, 400, &mut out);
-            best = best.min(s.elapsed().as_secs_f64());
+            let started = Instant::now();
+            layout(trie, &totals, focus, width, min_w, 400, &mut out);
+            best = best.min(started.elapsed().as_secs_f64());
         }
         println!(
-            "{label:<34} width {w:>6} min_w {min_w:>3}: {:>9} rects in {:>8.3} ms",
+            "{label:<34} width {width:>6} min_w {min_w:>3}: {:>9} rects in {:>8.3} ms",
             out.len(),
             best * 1e3
         );
@@ -62,21 +62,22 @@ struct Cli {
 
 fn main() {
     let cli = <Cli as clap::Parser>::parse();
-    let t = synthetic(1_000_000);
+    let trie = synthetic(1_000_000);
     println!(
         "synthetic trie: {} nodes, {} samples",
-        t.nodes.len(),
-        t.total()
+        trie.nodes.len(),
+        trie.total()
     );
-    time("synthetic ~1M nodes", &t, ROOT);
+    time("synthetic ~1M nodes", &trie, ROOT);
     if let Some(path) = cli.path {
-        let p = perf_profile::load::load(path.as_ref(), Default::default(), &mut |_| {}).unwrap();
+        let profile =
+            perf_profile::load::load(path.as_ref(), Default::default(), &mut |_| {}).unwrap();
         println!(
             "\nreal profile: {} full nodes, {} truncated nodes",
-            p.full.nodes.len(),
-            p.truncated.nodes.len()
+            profile.full.nodes.len(),
+            profile.truncated.nodes.len()
         );
-        time("real (full)", &p.full, ROOT);
-        time("real (truncated)", &p.truncated, ROOT);
+        time("real (full)", &profile.full, ROOT);
+        time("real (truncated)", &profile.truncated, ROOT);
     }
 }

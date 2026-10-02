@@ -16,8 +16,8 @@ struct Aligned(*mut u8, Layout);
 unsafe impl Send for Aligned {}
 impl Aligned {
     fn new(len: usize) -> Self {
-        let l = Layout::from_size_align(len, 4096).unwrap();
-        Aligned(unsafe { alloc(l) }, l)
+        let layout = Layout::from_size_align(len, 4096).unwrap();
+        Aligned(unsafe { alloc(layout) }, layout)
     }
     fn slice(&mut self) -> &mut [u8] {
         unsafe { std::slice::from_raw_parts_mut(self.0, self.1.size()) }
@@ -84,10 +84,10 @@ fn main() {
     let (block, region) = ((block_mb as u64) << 20, region_mb << 20);
     let regions = total / region;
     {
-        let f = File::open(&path).unwrap();
+        let file = File::open(&path).unwrap();
         unsafe {
             libc::posix_fadvise(
-                std::os::fd::AsRawFd::as_raw_fd(&f),
+                std::os::fd::AsRawFd::as_raw_fd(&file),
                 0,
                 0,
                 libc::POSIX_FADV_DONTNEED,
@@ -99,9 +99,9 @@ fn main() {
     let bytes = AtomicU64::new(0);
     let finished = std::sync::atomic::AtomicBool::new(false);
     let read_secs = AtomicU64::new(0);
-    let t = Instant::now();
-    std::thread::scope(|s| {
-        s.spawn(|| {
+    let started = Instant::now();
+    std::thread::scope(|scope| {
+        scope.spawn(|| {
             let mut last = 0u64;
             while !finished.load(Ordering::Relaxed) {
                 std::thread::sleep(std::time::Duration::from_millis(1000));
@@ -109,7 +109,7 @@ fn main() {
                 if std::env::var_os("LAB_TRACE").is_some() {
                     println!(
                         "  t={:4.1}s {:5.2} GB/s (total {:.1} GB)",
-                        t.elapsed().as_secs_f32(),
+                        started.elapsed().as_secs_f32(),
                         (now - last) as f64 / 1e9,
                         now as f64 / 1e9
                     );
@@ -119,8 +119,8 @@ fn main() {
         });
         let handles: Vec<_> = (0..readers)
             .map(|_| {
-                s.spawn(|| {
-                    let f = if mode == "direct" {
+                scope.spawn(|| {
+                    let file = if mode == "direct" {
                         OpenOptions::new()
                             .read(true)
                             .custom_flags(libc::O_DIRECT)
@@ -133,16 +133,16 @@ fn main() {
                     let mut big = Aligned::new(region as usize);
                     let mut local = 0u64;
                     loop {
-                        let r = next.fetch_add(1, Ordering::Relaxed);
-                        if r >= regions {
+                        let region_index = next.fetch_add(1, Ordering::Relaxed);
+                        if region_index >= regions {
                             break;
                         }
-                        let base = (skip_gb << 30) + (r % file_regions) * region;
+                        let base = (skip_gb << 30) + (region_index % file_regions) * region;
                         match mode.as_str() {
                             "reuse" | "direct" | "reuse-drop" => {
                                 let mut pos = 0;
                                 while pos < region {
-                                    f.read_exact_at(small.slice(), base + pos).unwrap();
+                                    file.read_exact_at(small.slice(), base + pos).unwrap();
                                     bytes.fetch_add(block, Ordering::Relaxed);
                                     local ^= small.slice()[0] as u64;
                                     pos += block;
@@ -151,7 +151,7 @@ fn main() {
                                     // Buffered reads, but evict what was read so a repeat pass is cold too.
                                     unsafe {
                                         libc::posix_fadvise(
-                                            std::os::fd::AsRawFd::as_raw_fd(&f),
+                                            std::os::fd::AsRawFd::as_raw_fd(&file),
                                             base as i64,
                                             region as i64,
                                             libc::POSIX_FADV_DONTNEED,
@@ -163,24 +163,24 @@ fn main() {
                                 // Like the pipeline: each read starts where the last unit's whole records
                                 // ended, so offsets are unaligned and successive reads overlap a little.
                                 let mut pos = 0u64;
-                                let mut x = 0x9E3779B97F4A7C15u64 ^ r;
+                                let mut x = 0x9E3779B97F4A7C15u64 ^ region_index;
                                 while pos < region {
                                     x ^= x << 13;
                                     x ^= x >> 7;
                                     x ^= x << 17;
-                                    let n = block.min(region - pos) as usize;
-                                    f.read_exact_at(&mut small.slice()[..n], base + pos)
+                                    let read_len = block.min(region - pos) as usize;
+                                    file.read_exact_at(&mut small.slice()[..read_len], base + pos)
                                         .unwrap();
                                     local ^= small.slice()[0] as u64;
                                     pos += (block - (x % (block / 4))) & !7; // keep 8-byte alignment, like records
                                 }
                             }
                             "region" | "touch" => {
-                                let buf = big.slice();
+                                let buffer = big.slice();
                                 let mut pos = 0;
                                 while pos < region {
-                                    f.read_exact_at(
-                                        &mut buf[pos as usize..(pos + block) as usize],
+                                    file.read_exact_at(
+                                        &mut buffer[pos as usize..(pos + block) as usize],
                                         base + pos,
                                     )
                                     .unwrap();
@@ -188,23 +188,23 @@ fn main() {
                                 }
                                 if mode == "touch" {
                                     local = local.wrapping_add(
-                                        buf.chunks(64).map(|c| c[0] as u64).sum::<u64>(),
+                                        buffer.chunks(64).map(|chunk| chunk[0] as u64).sum::<u64>(),
                                     );
                                 }
                             }
                             "fresh" => {
                                 let mut fresh = Aligned::new(region as usize);
-                                let buf = fresh.slice();
+                                let buffer = fresh.slice();
                                 let mut pos = 0;
                                 while pos < region {
-                                    f.read_exact_at(
-                                        &mut buf[pos as usize..(pos + block) as usize],
+                                    file.read_exact_at(
+                                        &mut buffer[pos as usize..(pos + block) as usize],
                                         base + pos,
                                     )
                                     .unwrap();
                                     pos += block;
                                 }
-                                local ^= buf[0] as u64;
+                                local ^= buffer[0] as u64;
                             }
                             _ => panic!("mode"),
                         }
@@ -213,10 +213,10 @@ fn main() {
                 })
             })
             .collect();
-        for h in handles {
-            h.join().unwrap();
+        for handle in handles {
+            handle.join().unwrap();
         }
-        read_secs.store(t.elapsed().as_secs_f64().to_bits(), Ordering::Relaxed); // before the monitor's last sleep ends
+        read_secs.store(started.elapsed().as_secs_f64().to_bits(), Ordering::Relaxed); // before the monitor's last sleep ends
         finished.store(true, Ordering::Relaxed);
     });
     let secs = f64::from_bits(read_secs.load(Ordering::Relaxed));

@@ -49,26 +49,28 @@ impl EpochUnwind {
     pub fn build(maps: &[Mapping], bins: &BinaryCache) -> Self {
         let mut unwinder = Unw::new();
         let mut mods = Vec::new();
-        for m in maps {
-            let Some(path) = &m.path else { continue };
+        for mapping in maps {
+            let Some(path) = &mapping.path else { continue };
             let Some(bin) = bins.get(Path::new(&**path)) else {
                 continue;
             };
-            let Some(bias) = bin.bias_for_mapping(m.start, m.pgoff, m.end - m.start) else {
+            let Some(bias) =
+                bin.bias_for_mapping(mapping.start, mapping.pgoff, mapping.end - mapping.start)
+            else {
                 continue;
             };
             unwinder.add_module(Module::new(
                 path.to_string(),
-                m.start..m.end,
+                mapping.start..mapping.end,
                 bias,
                 bin.section_info(),
             ));
             mods.push(ModRange {
-                start: m.start,
-                end: m.end,
+                start: mapping.start,
+                end: mapping.end,
                 bias,
                 bin,
-                module: m.module,
+                module: mapping.module,
             });
         }
         Self { unwinder, mods }
@@ -77,24 +79,24 @@ impl EpochUnwind {
     pub fn find(&self, addr: u64) -> Option<&ModRange> {
         let i = self
             .mods
-            .partition_point(|m| m.start <= addr)
+            .partition_point(|module| module.start <= addr)
             .checked_sub(1)?;
-        let m = &self.mods[i];
-        (addr < m.end).then_some(m)
+        let module = &self.mods[i];
+        (addr < module.end).then_some(module)
     }
 }
 
 /// Do these 8 bytes (the ones just before a return address) end with a call instruction?
-pub fn follows_call(b: &[u8]) -> bool {
-    let n = b.len();
-    let modrm_call = |i: usize| b[i] == 0xff && (b[i + 1] & 0x38) == 0x10; // FF /2
-    b[n - 5] == 0xe8
-        || modrm_call(n - 2)
-        || modrm_call(n - 3)
-        || modrm_call(n - 4)
-        || modrm_call(n - 6)
-        || modrm_call(n - 7)
-        || modrm_call(n - 8)
+pub fn follows_call(bytes: &[u8]) -> bool {
+    let length = bytes.len();
+    let modrm_call = |i: usize| bytes[i] == 0xff && (bytes[i + 1] & 0x38) == 0x10; // FF /2
+    bytes[length - 5] == 0xe8
+        || modrm_call(length - 2)
+        || modrm_call(length - 3)
+        || modrm_call(length - 4)
+        || modrm_call(length - 6)
+        || modrm_call(length - 7)
+        || modrm_call(length - 8)
 }
 
 /// Reusable buffers, so unwinding a sample does not allocate.
@@ -124,7 +126,7 @@ pub fn unwind_sample(
         let off = addr.checked_sub(sp).ok_or(())? as usize;
         stack
             .get(off..off + 8)
-            .map(|b| u64::from_le_bytes(b.try_into().unwrap()))
+            .map(|bytes| u64::from_le_bytes(bytes.try_into().unwrap()))
             .filter(|_| off + 8 <= valid)
             .ok_or(())
     };
@@ -142,9 +144,9 @@ pub fn unwind_sample(
     loop {
         match iter.next() {
             Ok(Some(FrameAddress::InstructionPointer(_))) => {}
-            Ok(Some(FrameAddress::ReturnAddress(a))) => {
-                scratch.lookup.push(a.get() - 1);
-                scratch.ras.push(a.get());
+            Ok(Some(FrameAddress::ReturnAddress(address))) => {
+                scratch.lookup.push(address.get() - 1);
+                scratch.ras.push(address.get());
             }
             Ok(None) | Err(_) => break,
         }
@@ -152,9 +154,10 @@ pub fn unwind_sample(
     // A genuine return address is in a known module and follows a call instruction.
     let mut suspect_from = usize::MAX;
     for (k, &ra) in scratch.ras.iter().enumerate() {
-        let ok = eu.find(ra).is_some_and(|m| {
-            m.bin
-                .bytes_at_svma(ra.wrapping_sub(m.bias).wrapping_sub(8), 8)
+        let ok = eu.find(ra).is_some_and(|module| {
+            module
+                .bin
+                .bytes_at_svma(ra.wrapping_sub(module.bias).wrapping_sub(8), 8)
                 .is_some_and(follows_call)
         });
         if !ok {
@@ -162,12 +165,12 @@ pub fn unwind_sample(
             break;
         }
     }
-    for (i, &a) in scratch.lookup.iter().enumerate() {
+    for (i, &address) in scratch.lookup.iter().enumerate() {
         let suspect = i >= suspect_from;
-        out.push(match eu.find(a) {
-            Some(m) => Phys {
-                module: m.module,
-                svma: a.wrapping_sub(m.bias),
+        out.push(match eu.find(address) {
+            Some(module) => Phys {
+                module: module.module,
+                svma: address.wrapping_sub(module.bias),
                 suspect,
             },
             None => Phys {

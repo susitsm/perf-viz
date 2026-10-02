@@ -88,10 +88,10 @@ impl Pal {
         )
     }
     /// Fade a colour toward the background, for boxes that do not match the search.
-    pub fn dim(&self, c: Color32) -> Color32 {
+    pub fn dim(&self, color: Color32) -> Color32 {
         let bg = if self.dark { 40.0 } else { 240.0 };
-        let mix = |a: u8| (a as f32 * 0.3 + bg * 0.7) as u8;
-        Color32::from_rgb(mix(c.r()), mix(c.g()), mix(c.b()))
+        let mix = |channel: u8| (channel as f32 * 0.3 + bg * 0.7) as u8;
+        Color32::from_rgb(mix(color.r()), mix(color.g()), mix(color.b()))
     }
     /// The box for the flame graph's root ("all samples").
     pub fn root_box(&self) -> Color32 {

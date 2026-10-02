@@ -54,8 +54,8 @@ impl PhysTrie {
     /// Add one sample given leaf-first (the order unwinding produces). Returns the leaf's node.
     pub fn insert_leaf_first(&mut self, frames: &[Phys]) -> u32 {
         let mut cur = ROOT;
-        for &f in frames.iter().rev() {
-            cur = self.child(cur, f);
+        for &frame in frames.iter().rev() {
+            cur = self.child(cur, frame);
         }
         self.nodes[cur as usize].self_count += 1;
         cur
@@ -64,10 +64,10 @@ impl PhysTrie {
     /// Merge `other` into `self`; returns, for each node of `other`, its node in `self`.
     pub fn merge(&mut self, other: &PhysTrie) -> Vec<u32> {
         let mut map = vec![ROOT; other.nodes.len()];
-        for (i, n) in other.nodes.iter().enumerate().skip(1) {
-            let g = self.child(map[n.parent as usize], n.frame);
-            self.nodes[g as usize].self_count += n.self_count;
-            map[i] = g;
+        for (i, node) in other.nodes.iter().enumerate().skip(1) {
+            let mapped = self.child(map[node.parent as usize], node.frame);
+            self.nodes[mapped as usize].self_count += node.self_count;
+            map[i] = mapped;
         }
         map
     }
@@ -87,41 +87,44 @@ mod tests {
 
     #[test]
     fn stacks_sharing_a_root_share_nodes() {
-        let mut t = PhysTrie::default();
-        let a = t.insert_leaf_first(&[f(3), f(2), f(1)]); // root-first: 1, 2, 3
-        let b = t.insert_leaf_first(&[f(4), f(2), f(1)]);
-        let c = t.insert_leaf_first(&[f(3), f(2), f(1)]);
-        assert_eq!(a, c, "same stack, same node");
-        assert_ne!(a, b);
-        assert_eq!(t.nodes.len(), 1 + 4, "root + frames 1, 2, 3, 4");
-        assert_eq!(t.nodes[a as usize].self_count, 2);
+        let mut trie = PhysTrie::default();
+        let leaf_a = trie.insert_leaf_first(&[f(3), f(2), f(1)]); // root-first: 1, 2, 3
+        let leaf_b = trie.insert_leaf_first(&[f(4), f(2), f(1)]);
+        let leaf_c = trie.insert_leaf_first(&[f(3), f(2), f(1)]);
+        assert_eq!(leaf_a, leaf_c, "same stack, same node");
+        assert_ne!(leaf_a, leaf_b);
+        assert_eq!(trie.nodes.len(), 1 + 4, "root + frames 1, 2, 3, 4");
+        assert_eq!(trie.nodes[leaf_a as usize].self_count, 2);
     }
 
     #[test]
     fn suspect_flag_distinguishes_frames() {
-        let mut t = PhysTrie::default();
-        t.insert_leaf_first(&[f(1)]);
-        t.insert_leaf_first(&[Phys {
+        let mut trie = PhysTrie::default();
+        trie.insert_leaf_first(&[f(1)]);
+        trie.insert_leaf_first(&[Phys {
             suspect: true,
             ..f(1)
         }]);
-        assert_eq!(t.nodes.len(), 3);
+        assert_eq!(trie.nodes.len(), 3);
     }
 
     #[test]
     fn merge_adds_counts_and_maps_nodes() {
-        let (mut a, mut b) = (PhysTrie::default(), PhysTrie::default());
-        a.insert_leaf_first(&[f(2), f(1)]);
-        let leaf_b = b.insert_leaf_first(&[f(2), f(1)]);
-        b.insert_leaf_first(&[f(5), f(1)]);
-        let map = a.merge(&b);
-        assert_eq!(a.nodes.len(), 4);
-        let g = map[leaf_b as usize];
+        let (mut trie_a, mut trie_b) = (PhysTrie::default(), PhysTrie::default());
+        trie_a.insert_leaf_first(&[f(2), f(1)]);
+        let leaf_b = trie_b.insert_leaf_first(&[f(2), f(1)]);
+        trie_b.insert_leaf_first(&[f(5), f(1)]);
+        let map = trie_a.merge(&trie_b);
+        assert_eq!(trie_a.nodes.len(), 4);
+        let mapped = map[leaf_b as usize];
         assert_eq!(
-            a.nodes[g as usize].self_count, 2,
+            trie_a.nodes[mapped as usize].self_count, 2,
             "same stack in both tries adds up"
         );
-        assert!(map.iter().all(|&g| (g as usize) < a.nodes.len()));
+        assert!(
+            map.iter()
+                .all(|&mapped| (mapped as usize) < trie_a.nodes.len())
+        );
         assert_eq!(map[0], ROOT);
     }
 }

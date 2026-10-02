@@ -22,7 +22,7 @@ pub struct Record<'a> {
 /// that follows an `AUXTRACE` record is stepped over.
 pub fn for_each_record<T: ByteOrder>(
     chunk: &[u8],
-    mut f: impl FnMut(Record<'_>) -> Result<()>,
+    mut on_record: impl FnMut(Record<'_>) -> Result<()>,
 ) -> Result<()> {
     let mut off = 0;
     while off < chunk.len() {
@@ -37,7 +37,7 @@ pub fn for_each_record<T: ByteOrder>(
         if ty == PERF_RECORD_FINISHED_ROUND {
             continue;
         }
-        f(Record {
+        on_record(Record {
             ty,
             misc,
             size,

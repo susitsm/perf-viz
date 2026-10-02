@@ -62,11 +62,11 @@ impl Settings {
 
 impl Default for Settings {
     fn default() -> Self {
-        let c = Config::default();
+        let defaults = Config::default();
         Settings {
-            readers: c.readers,
-            region_mb: c.region_bytes >> 20,
-            in_flight: c.in_flight,
+            readers: defaults.readers,
+            region_mb: defaults.region_bytes >> 20,
+            in_flight: defaults.in_flight,
         }
     }
 }
@@ -91,7 +91,7 @@ pub struct Options {
 
 impl Default for Options {
     fn default() -> Self {
-        let cpus = std::thread::available_parallelism().map_or(4, |n| n.get());
+        let cpus = std::thread::available_parallelism().map_or(4, |cpu_count| cpu_count.get());
         Options {
             probe_secs: 8.0,
             sweep_secs: 3.0,
@@ -106,10 +106,10 @@ impl Default for Options {
 
 impl Options {
     /// The same plan with every duration multiplied by `f` (for quick runs and tests).
-    pub fn scaled(mut self, f: f64) -> Self {
-        self.probe_secs *= f;
-        self.sweep_secs *= f;
-        self.trial_secs *= f;
+    pub fn scaled(mut self, factor: f64) -> Self {
+        self.probe_secs *= factor;
+        self.sweep_secs *= factor;
+        self.trial_secs *= factor;
         self
     }
 }
@@ -185,25 +185,30 @@ pub struct Sample {
 
 /// The cheapest candidate whose speed is within [`TOLERANCE`] of the fastest. `None` if there are none.
 pub fn pick<T: Copy>(cands: &[Scored<T>], cost: impl Fn(&T) -> u64) -> Option<T> {
-    let top = cands.iter().map(|c| c.gbps).fold(f64::NAN, f64::max);
+    let top = cands
+        .iter()
+        .map(|candidate| candidate.gbps)
+        .fold(f64::NAN, f64::max);
     if top.is_nan() {
         return None;
     }
     cands
         .iter()
-        .filter(|c| c.gbps >= top * (1.0 - TOLERANCE))
+        .filter(|candidate| candidate.gbps >= top * (1.0 - TOLERANCE))
         .min_by(|a, b| {
             cost(&a.value)
                 .cmp(&cost(&b.value))
                 .then(b.gbps.total_cmp(&a.gbps))
         })
-        .map(|c| c.value)
+        .map(|candidate| candidate.value)
 }
 
 /// Among equally fast settings, prefer larger regions (they hold up on big files), then fewer
 /// readers, then fewer regions open.
-pub fn tie_break(s: &Settings) -> u64 {
-    ((1 << 20) - s.region_mb.min(1 << 20)) << 20 | (s.readers as u64) << 10 | s.in_flight as u64
+pub fn tie_break(settings: &Settings) -> u64 {
+    ((1 << 20) - settings.region_mb.min(1 << 20)) << 20
+        | (settings.readers as u64) << 10
+        | settings.in_flight as u64
 }
 
 /// The bytes a trial should read: what `speed_gbps` delivers in `secs` seconds, within sane limits.
@@ -220,15 +225,15 @@ pub fn windows(bounds: &[u64], want: u64) -> Vec<ByteRange> {
     };
     let mut out: Vec<ByteRange> = Vec::new();
     let mut start = first;
-    for &b in &bounds[1..] {
-        if b - start >= want {
-            out.push(ByteRange { start, end: b });
-            start = b;
+    for &bound in &bounds[1..] {
+        if bound - start >= want {
+            out.push(ByteRange { start, end: bound });
+            start = bound;
         }
     }
     if start < last {
         match out.last_mut() {
-            Some(w) if last - start < want / 2 => w.end = last,
+            Some(window) if last - start < want / 2 => window.end = last,
             _ => out.push(ByteRange { start, end: last }),
         }
     }
@@ -241,11 +246,12 @@ pub fn steady_speed(samples: &[Sample], total: u64) -> Option<f64> {
     let first_at = |frac: f64| {
         samples
             .iter()
-            .find(|s| s.bytes as f64 >= total as f64 * frac)
+            .find(|sample| sample.bytes as f64 >= total as f64 * frac)
             .copied()
     };
-    let (a, b) = (first_at(0.15)?, first_at(0.85)?);
-    (b.secs > a.secs && b.bytes > a.bytes).then(|| (b.bytes - a.bytes) as f64 / (b.secs - a.secs))
+    let (from, to) = (first_at(0.15)?, first_at(0.85)?);
+    (to.secs > from.secs && to.bytes > from.bytes)
+        .then(|| (to.bytes - from.bytes) as f64 / (to.secs - from.secs))
 }
 
 /// Evict `[start, start + len)` of the file from the page cache (no effect on dirty pages).
@@ -263,11 +269,12 @@ fn evict(file: &File, start: u64, len: u64) {
 fn is_ram_fs(path: &Path) -> bool {
     const TMPFS: i64 = 0x0102_1994;
     const RAMFS: i64 = 0x8584_58f6;
-    let Ok(c) = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()) else {
+    let Ok(c_path) = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()) else {
         return false;
     };
-    let mut s: libc::statfs = unsafe { std::mem::zeroed() };
-    (unsafe { libc::statfs(c.as_ptr(), &mut s) } == 0) && matches!(s.f_type as i64, TMPFS | RAMFS)
+    let mut filesystem: libc::statfs = unsafe { std::mem::zeroed() };
+    (unsafe { libc::statfs(c_path.as_ptr(), &mut filesystem) } == 0)
+        && matches!(filesystem.f_type as i64, TMPFS | RAMFS)
 }
 
 /// The trial consumer: walks every record header, as the loader's first stage does, and nothing else.
@@ -277,8 +284,8 @@ impl Consumer for Walk {
     type Local = u64;
     type Events = ();
 
-    fn extract(&self, _region: usize, local: &mut u64, buf: &[u8]) -> Result<()> {
-        records::for_each_record::<LittleEndian>(buf, |_| {
+    fn extract(&self, _region: usize, local: &mut u64, buffer: &[u8]) -> Result<()> {
+        records::for_each_record::<LittleEndian>(buffer, |_| {
             *local += 1;
             Ok(())
         })
@@ -300,35 +307,38 @@ struct Probe {
 /// evicted right after it is read. Reports the speed once a second.
 fn probe(
     path: &Path,
-    sec: &DataSection,
+    section: &DataSection,
     secs: f64,
     cancel: &AtomicBool,
     on_event: &mut dyn FnMut(Event),
 ) -> Result<Probe> {
-    let regions = sec.len.div_ceil(PROBE_REGION).max(1);
+    let regions = section.len.div_ceil(PROBE_REGION).max(1);
     let next = AtomicU64::new(0);
     let bytes = AtomicU64::new(0);
     let stop = AtomicBool::new(false);
     let deadline = Duration::from_secs_f64(secs);
     let t0 = Instant::now();
     let mut samples: Vec<Sample> = vec![Sample::default()];
-    let result: Result<()> = std::thread::scope(|s| {
+    let result: Result<()> = std::thread::scope(|scope| {
         let handles: Vec<_> = (0..PROBE_READERS)
             .map(|_| {
-                s.spawn(|| -> Result<()> {
-                    let f = File::open(path)?; // own handle: readahead state is per open file
-                    let mut buf = vec![0u8; PROBE_BLOCK];
+                scope.spawn(|| -> Result<()> {
+                    let file = File::open(path)?; // own handle: readahead state is per open file
+                    let mut buffer = vec![0u8; PROBE_BLOCK];
                     while !stop.load(Ordering::Relaxed) {
-                        let r = next.fetch_add(1, Ordering::Relaxed) % regions;
-                        let (lo, hi) = (r * PROBE_REGION, ((r + 1) * PROBE_REGION).min(sec.len));
+                        let region_index = next.fetch_add(1, Ordering::Relaxed) % regions;
+                        let (lo, hi) = (
+                            region_index * PROBE_REGION,
+                            ((region_index + 1) * PROBE_REGION).min(section.len),
+                        );
                         let mut pos = lo;
                         while pos < hi {
-                            let n = PROBE_BLOCK.min((hi - pos) as usize);
-                            f.read_exact_at(&mut buf[..n], sec.start + pos)?;
-                            bytes.fetch_add(n as u64, Ordering::Relaxed);
-                            pos += n as u64;
+                            let read_len = PROBE_BLOCK.min((hi - pos) as usize);
+                            file.read_exact_at(&mut buffer[..read_len], section.start + pos)?;
+                            bytes.fetch_add(read_len as u64, Ordering::Relaxed);
+                            pos += read_len as u64;
                         }
-                        evict(&f, sec.start + lo, hi - lo);
+                        evict(&file, section.start + lo, hi - lo);
                     }
                     Ok(())
                 })
@@ -337,47 +347,48 @@ fn probe(
         let mut last_report = 0.0;
         while t0.elapsed() < deadline && !cancel.load(Ordering::Relaxed) {
             std::thread::sleep(Duration::from_millis(100));
-            let t = t0.elapsed().as_secs_f64();
+            let elapsed_secs = t0.elapsed().as_secs_f64();
             samples.push(Sample {
-                secs: t,
+                secs: elapsed_secs,
                 bytes: bytes.load(Ordering::Relaxed),
             });
-            if t - last_report >= 1.0 {
+            if elapsed_secs - last_report >= 1.0 {
                 let before = samples
                     .iter()
                     .rev()
-                    .find(|s| s.secs <= t - 1.0 + 0.05)
+                    .find(|sample| sample.secs <= elapsed_secs - 1.0 + 0.05)
                     .copied()
                     .unwrap_or_default();
                 on_event(Event::Probe {
-                    secs: t as f32,
+                    secs: elapsed_secs as f32,
                     gbps: (samples.last().unwrap().bytes - before.bytes) as f64
-                        / (t - before.secs)
+                        / (elapsed_secs - before.secs)
                         / 1e9,
                 });
-                last_report = t;
+                last_report = elapsed_secs;
             }
         }
         stop.store(true, Ordering::Relaxed);
         handles
             .into_iter()
-            .try_for_each(|h| h.join().map_err(|_| "probe thread panicked")?)
+            .try_for_each(|handle| handle.join().map_err(|_| "probe thread panicked")?)
     });
     result?;
     if cancel.load(Ordering::Relaxed) {
         return Err("cancelled".into());
     }
     let end = *samples.last().unwrap();
-    let rate =
-        |a: Sample, b: Sample| (b.bytes - a.bytes) as f64 / (b.secs - a.secs).max(1e-6) / 1e9;
+    let rate = |from: Sample, to: Sample| {
+        (to.bytes - from.bytes) as f64 / (to.secs - from.secs).max(1e-6) / 1e9
+    };
     let mid = samples
         .iter()
-        .find(|s| s.secs >= end.secs / 2.0)
+        .find(|sample| sample.secs >= end.secs / 2.0)
         .copied()
         .unwrap_or_default();
     let one = samples
         .iter()
-        .find(|s| s.secs >= 1.0f64.min(end.secs))
+        .find(|sample| sample.secs >= 1.0f64.min(end.secs))
         .copied()
         .unwrap_or(end);
     Ok(Probe {
@@ -389,7 +400,7 @@ fn probe(
 struct Trials<'a> {
     path: &'a Path,
     file: File,
-    sec: DataSection,
+    section: DataSection,
     /// Record boundaries of the whole data section (planned once).
     bounds: Vec<u64>,
     workers: usize,
@@ -399,31 +410,37 @@ struct Trials<'a> {
 
 impl Trials<'_> {
     /// Read `bytes` of the file with settings `s` (windows in turn, evicted first), and return GB/s.
-    fn run(&mut self, s: Settings, bytes: u64) -> Result<f64> {
-        let wins = windows(&self.bounds, bytes.min(self.sec.len));
-        let (mut idx, mut read, mut spent) = (self.turn, 0u64, Duration::ZERO);
+    fn run(&mut self, settings: Settings, bytes: u64) -> Result<f64> {
+        let wins = windows(&self.bounds, bytes.min(self.section.len));
+        let (mut index, mut read, mut spent) = (self.turn, 0u64, Duration::ZERO);
         let (mut steady_bytes, mut steady_secs) = (0.0f64, 0.0f64);
         self.turn += 1;
         while read < bytes {
-            let w = wins[idx % wins.len()];
-            idx += 1;
+            let window = wins[index % wins.len()];
+            index += 1;
             let win = DataSection {
-                start: self.sec.start + w.start,
-                len: w.len(),
+                start: self.section.start + window.start,
+                len: window.len(),
                 big_endian: false,
             };
             evict(&self.file, win.start, win.len); // outside the timing
-            let cfg = Config {
+            let config = Config {
                 workers: self.workers,
-                readers: s.readers,
-                region_bytes: s.region_mb << 20,
-                in_flight: s.in_flight,
+                readers: settings.readers,
+                region_bytes: settings.region_mb << 20,
+                in_flight: settings.in_flight,
                 ..Config::default()
             };
-            let t = Instant::now();
-            let regions = (win.len / cfg.region_bytes.max(1)).max(1) as usize;
-            let rb = anchor::plan_regions(&self.file, &win, regions)?;
-            if rb.windows(2).map(|w| w[1] - w[0]).max().unwrap_or(0) > cfg.region_bytes * 4 {
+            let started = Instant::now();
+            let regions = (win.len / config.region_bytes.max(1)).max(1) as usize;
+            let region_bounds = anchor::plan_regions(&self.file, &win, regions)?;
+            if region_bounds
+                .windows(2)
+                .map(|pair| pair[1] - pair[0])
+                .max()
+                .unwrap_or(0)
+                > config.region_bytes * 4
+            {
                 return Err("region planning was too coarse".into());
             }
             // A sampler records how far reading has got, to measure the steady stretch of the pass.
@@ -441,20 +458,20 @@ impl Trials<'_> {
                         std::thread::sleep(Duration::from_millis(2));
                     }
                 });
-                let r = ordered::run_ordered(
+                let run_result = ordered::run_ordered(
                     &self.file,
                     Some(self.path),
                     &win,
-                    Some(&rb),
-                    cfg,
+                    Some(&region_bounds),
+                    config,
                     Some(progress.clone()),
                     &Walk,
                 );
                 done.store(true, Ordering::Relaxed);
-                r
+                run_result
             });
             run?;
-            spent += t.elapsed();
+            spent += started.elapsed();
             read += win.len;
             if let Some(rate) = steady_speed(&samples, win.len) {
                 // Weigh each pass by the bytes in its steady stretch (70% of it).
@@ -473,19 +490,19 @@ impl Trials<'_> {
 /// `cancel` to stop between trials.
 pub fn tune(
     source: &Path,
-    opts: &Options,
+    options: &Options,
     cancel: &AtomicBool,
     on_event: &mut dyn FnMut(Event),
 ) -> Result<Report> {
     let mut notes = Vec::new();
-    let (file, sec) = split::open(source)?;
-    if sec.big_endian {
+    let (file, section) = split::open(source)?;
+    if section.big_endian {
         return Err("big-endian perf.data files are not supported by the tuner".into());
     }
-    if sec.len < PLAN_REGION {
+    if section.len < PLAN_REGION {
         notes.push(format!(
             "the recording holds only {:.0} MB of records, so it is read repeatedly",
-            sec.len as f64 / 1e6
+            section.len as f64 / 1e6
         ));
     }
     if is_ram_fs(source) {
@@ -495,106 +512,101 @@ pub fn tune(
     // 1. Sustained speed.
     on_event(Event::Info(format!(
         "Measuring sustained read speed ({:.0} s)",
-        opts.probe_secs
+        options.probe_secs
     )));
-    let p = probe(source, &sec, opts.probe_secs, cancel, on_event)?;
+    let probe_result = probe(source, &section, options.probe_secs, cancel, on_event)?;
     on_event(Event::Info(format!(
         "  first second {:.2} GB/s; sustained {:.2} GB/s",
-        p.burst_gbps, p.sustained_gbps
+        probe_result.burst_gbps, probe_result.sustained_gbps
     )));
-    if p.sustained_gbps <= 0.0 {
+    if probe_result.sustained_gbps <= 0.0 {
         return Err("could not measure the read speed".into());
     }
 
     // 2. How much a trial reads, and the windows it reads from.
-    let long = trial_bytes(p.sustained_gbps, opts.trial_secs, opts.min_trial_bytes);
-    let short = trial_bytes(p.sustained_gbps, opts.sweep_secs, opts.min_trial_bytes);
+    let long = trial_bytes(
+        probe_result.sustained_gbps,
+        options.trial_secs,
+        options.min_trial_bytes,
+    );
+    let short = trial_bytes(
+        probe_result.sustained_gbps,
+        options.sweep_secs,
+        options.min_trial_bytes,
+    );
     on_event(Event::Info(format!(
         "Trials read {:.1} GB ({:.0} s at that speed); sweep trials {:.1} GB",
         long as f64 / 1e9,
-        opts.trial_secs,
+        options.trial_secs,
         short as f64 / 1e9
     )));
-    let regions = (sec.len / PLAN_REGION).max(1) as usize;
-    let bounds = anchor::plan_regions(&file, &sec, regions)?;
-    let mut t = Trials {
+    let regions = (section.len / PLAN_REGION).max(1) as usize;
+    let bounds = anchor::plan_regions(&file, &section, regions)?;
+    let mut trial_runner = Trials {
         path: source,
         file,
-        sec,
+        section,
         bounds,
-        workers: opts.workers,
+        workers: options.workers,
         turn: 0,
     };
-    if t.sec.len < long {
-        notes.push(format!("the recording ({:.1} GB) is shorter than a trial, so each trial reads it more than once", t.sec.len as f64 / 1e9));
+    if trial_runner.section.len < long {
+        notes.push(format!("the recording ({:.1} GB) is shorter than a trial, so each trial reads it more than once", trial_runner.section.len as f64 / 1e9));
     }
 
     // 3. Sweep, one setting at a time, on short trials.
     let mut trials: Vec<Trial> = Vec::new();
-    let run = |t: &mut Trials,
+    let run = |runner: &mut Trials,
                what: &'static str,
-               s: Settings,
+               settings: Settings,
                bytes: u64,
                is_long: bool,
                on_event: &mut dyn FnMut(Event),
                trials: &mut Vec<Trial>|
      -> Result<Option<f64>> {
-        if s.memory_mb() > opts.max_memory_mb {
+        if settings.memory_mb() > options.max_memory_mb {
             return Ok(None);
         }
-        if let Some(done) = trials.iter().find(|x| x.settings == s && x.long == is_long) {
+        if let Some(done) = trials
+            .iter()
+            .find(|x| x.settings == settings && x.long == is_long)
+        {
             return Ok(Some(done.gbps)); // already measured
         }
         if cancel.load(Ordering::Relaxed) {
             return Err("cancelled".into());
         }
-        match t.run(s, bytes) {
-            Ok(g) => {
+        match runner.run(settings, bytes) {
+            Ok(gbps) => {
                 on_event(Event::Trial {
                     what,
-                    settings: s,
-                    gbps: g,
+                    settings,
+                    gbps,
                     long: is_long,
                 });
                 trials.push(Trial {
-                    settings: s,
-                    gbps: g,
+                    settings,
+                    gbps,
                     long: is_long,
                 });
-                Ok(Some(g))
+                Ok(Some(gbps))
             }
-            Err(e) if e.to_string() == "cancelled" => Err(e),
-            Err(e) => {
-                on_event(Event::Info(format!("{what} {s:?} failed: {e}")));
+            Err(error) if error.to_string() == "cancelled" => Err(error),
+            Err(error) => {
+                on_event(Event::Info(format!("{what} {settings:?} failed: {error}")));
                 Ok(None)
             }
         }
     };
     let mut cur = Settings::default();
     on_event(Event::Info("Trying reader counts".into()));
-    let mut c = Vec::new();
-    for r in [1usize, 2, 3, 4, 6, 8] {
-        if let Some(g) = run(
-            &mut t,
+    let mut scored = Vec::new();
+    for reader_count in [1usize, 2, 3, 4, 6, 8] {
+        if let Some(gbps) = run(
+            &mut trial_runner,
             "readers",
-            Settings { readers: r, ..cur },
-            short,
-            false,
-            on_event,
-            &mut trials,
-        )? {
-            c.push(Scored { value: r, gbps: g });
-        }
-    }
-    cur.readers = pick(&c, |&r| r as u64).unwrap_or(cur.readers);
-    on_event(Event::Info("Trying region sizes".into()));
-    let mut c = Vec::new();
-    for m in [16u64, 32, 64, 128, 256] {
-        if let Some(g) = run(
-            &mut t,
-            "region_mb",
             Settings {
-                region_mb: m,
+                readers: reader_count,
                 ..cur
             },
             short,
@@ -602,30 +614,52 @@ pub fn tune(
             on_event,
             &mut trials,
         )? {
-            c.push(Scored { value: m, gbps: g });
+            scored.push(Scored {
+                value: reader_count,
+                gbps,
+            });
+        }
+    }
+    cur.readers = pick(&scored, |&reader_count| reader_count as u64).unwrap_or(cur.readers);
+    on_event(Event::Info("Trying region sizes".into()));
+    let mut scored = Vec::new();
+    for region_mb in [16u64, 32, 64, 128, 256] {
+        if let Some(gbps) = run(
+            &mut trial_runner,
+            "region_mb",
+            Settings { region_mb, ..cur },
+            short,
+            false,
+            on_event,
+            &mut trials,
+        )? {
+            scored.push(Scored {
+                value: region_mb,
+                gbps,
+            });
         }
     }
     // Larger regions are never slower in steady state and restart readahead less often, so they win ties.
-    cur.region_mb = pick(&c, |&m| u64::MAX - m).unwrap_or(cur.region_mb);
+    cur.region_mb = pick(&scored, |&region_mb| u64::MAX - region_mb).unwrap_or(cur.region_mb);
     on_event(Event::Info("Trying how many regions to keep open".into()));
-    let mut c = Vec::new();
-    for n in [2usize, 3, 4, 6, 8, 12] {
-        if let Some(g) = run(
-            &mut t,
+    let mut scored = Vec::new();
+    for in_flight in [2usize, 3, 4, 6, 8, 12] {
+        if let Some(gbps) = run(
+            &mut trial_runner,
             "in_flight",
-            Settings {
-                in_flight: n,
-                ..cur
-            },
+            Settings { in_flight, ..cur },
             short,
             false,
             on_event,
             &mut trials,
         )? {
-            c.push(Scored { value: n, gbps: g });
+            scored.push(Scored {
+                value: in_flight,
+                gbps,
+            });
         }
     }
-    cur.in_flight = pick(&c, |&n| n as u64).unwrap_or(cur.in_flight);
+    cur.in_flight = pick(&scored, |&in_flight| in_flight as u64).unwrap_or(cur.in_flight);
 
     // 4. Confirm the fastest few, and the defaults, on full-length trials.
     let mut ranked: Vec<Scored<Settings>> = trials
@@ -638,12 +672,12 @@ pub fn tune(
         .collect();
     ranked.sort_by(|a, b| b.gbps.total_cmp(&a.gbps));
     let mut finalists: Vec<Settings> = vec![cur];
-    for r in &ranked {
-        if finalists.len() >= opts.finalists {
+    for entry in &ranked {
+        if finalists.len() >= options.finalists {
             break;
         }
-        if !finalists.contains(&r.value) {
-            finalists.push(r.value);
+        if !finalists.contains(&entry.value) {
+            finalists.push(entry.value);
         }
     }
     let defaults = Settings::default();
@@ -655,23 +689,34 @@ pub fn tune(
         finalists.len()
     )));
     let mut confirmed: Vec<Scored<Settings>> = Vec::new();
-    for s in finalists {
-        if let Some(g) = run(&mut t, "confirm", s, long, true, on_event, &mut trials)? {
-            confirmed.push(Scored { value: s, gbps: g });
+    for settings in finalists {
+        if let Some(gbps) = run(
+            &mut trial_runner,
+            "confirm",
+            settings,
+            long,
+            true,
+            on_event,
+            &mut trials,
+        )? {
+            confirmed.push(Scored {
+                value: settings,
+                gbps,
+            });
         }
     }
     let best = pick(&confirmed, tie_break).ok_or("no setting could be measured")?;
     let best_gbps = confirmed
         .iter()
-        .find(|c| c.value == best)
-        .map_or(0.0, |c| c.gbps);
+        .find(|confirmation| confirmation.value == best)
+        .map_or(0.0, |confirmation| confirmation.gbps);
     let default_gbps = confirmed
         .iter()
-        .find(|c| c.value == defaults)
-        .map(|c| c.gbps);
+        .find(|confirmation| confirmation.value == defaults)
+        .map(|confirmation| confirmation.gbps);
     Ok(Report {
-        sustained_gbps: p.sustained_gbps,
-        burst_gbps: p.burst_gbps,
+        sustained_gbps: probe_result.sustained_gbps,
+        burst_gbps: probe_result.burst_gbps,
         best,
         best_gbps,
         default_gbps,
@@ -701,22 +746,29 @@ mod tests {
 
     #[test]
     fn pick_prefers_the_cheapest_within_tolerance() {
-        let c = [sc(1usize, 1.0), sc(2, 1.98), sc(3, 2.0), sc(4, 2.01)];
-        assert_eq!(pick(&c, |&r| r as u64), Some(2));
-        assert_eq!(pick(&[sc(1usize, 1.0), sc(2, 2.0)], |&r| r as u64), Some(2));
-        assert_eq!(pick::<usize>(&[], |&r| r as u64), None);
+        let scored = [sc(1usize, 1.0), sc(2, 1.98), sc(3, 2.0), sc(4, 2.01)];
+        assert_eq!(pick(&scored, |&reader_count| reader_count as u64), Some(2));
+        assert_eq!(
+            pick(&[sc(1usize, 1.0), sc(2, 2.0)], |&reader_count| reader_count
+                as u64),
+            Some(2)
+        );
+        assert_eq!(
+            pick::<usize>(&[], |&reader_count| reader_count as u64),
+            None
+        );
     }
 
     #[test]
     fn steady_speed_leaves_out_the_ramp_and_the_drain() {
         // 1000 bytes: slow start (0..150 in 1 s), steady 100 B/s from 150 to 850, then a slow drain.
-        let mut s: Vec<Sample> = vec![sm(0.0, 0), sm(1.0, 150)];
+        let mut samples: Vec<Sample> = vec![sm(0.0, 0), sm(1.0, 150)];
         for i in 1..=7 {
-            s.push(sm(1.0 + i as f64, 150 + 100 * i));
+            samples.push(sm(1.0 + i as f64, 150 + 100 * i));
         }
-        s.push(sm(12.0, 1000));
-        let v = steady_speed(&s, 1000).unwrap();
-        assert!((v - 100.0).abs() < 1e-9, "{v}");
+        samples.push(sm(12.0, 1000));
+        let speed = steady_speed(&samples, 1000).unwrap();
+        assert!((speed - 100.0).abs() < 1e-9, "{speed}");
         assert_eq!(
             steady_speed(&[sm(0.0, 0), sm(1.0, 50)], 1000),
             None,
@@ -727,18 +779,18 @@ mod tests {
 
     #[test]
     fn ties_go_to_larger_regions_then_fewer_readers() {
-        let s = |r, m, f| Settings {
-            readers: r,
-            region_mb: m,
-            in_flight: f,
+        let settings_for = |readers, region_mb, in_flight| Settings {
+            readers,
+            region_mb,
+            in_flight,
         };
         let cands = [
-            sc(s(4, 16, 6), 5.0),
-            sc(s(4, 128, 6), 4.9),
-            sc(s(3, 128, 6), 4.9),
-            sc(s(3, 128, 8), 4.95),
+            sc(settings_for(4, 16, 6), 5.0),
+            sc(settings_for(4, 128, 6), 4.9),
+            sc(settings_for(3, 128, 6), 4.9),
+            sc(settings_for(3, 128, 8), 4.95),
         ];
-        assert_eq!(pick(&cands, tie_break), Some(s(3, 128, 6)));
+        assert_eq!(pick(&cands, tie_break), Some(settings_for(3, 128, 6)));
     }
 
     #[test]
@@ -756,76 +808,79 @@ mod tests {
 
     #[test]
     fn windows_tile_the_data_on_given_boundaries() {
-        let b: Vec<u64> = (0..=10).map(|i| i * 100).collect();
+        let bounds: Vec<u64> = (0..=10).map(|i| i * 100).collect();
         assert_eq!(
-            windows(&b, 300),
+            windows(&bounds, 300),
             vec![br(0, 300), br(300, 600), br(600, 1000)],
             "the short tail joins the last window"
         );
-        assert_eq!(windows(&b, 1000), vec![br(0, 1000)]);
+        assert_eq!(windows(&bounds, 1000), vec![br(0, 1000)]);
         assert_eq!(
-            windows(&b, 5000),
+            windows(&bounds, 5000),
             vec![br(0, 1000)],
             "more wanted than there is: all of it"
         );
-        assert_eq!(windows(&b, 100).len(), 10);
+        assert_eq!(windows(&bounds, 100).len(), 10);
         assert!(windows(&[], 10).is_empty());
-        let w = windows(&b, 250);
-        assert_eq!(w.first().unwrap().start, 0);
-        assert_eq!(w.last().unwrap().end, 1000);
+        let windows = windows(&bounds, 250);
+        assert_eq!(windows.first().unwrap().start, 0);
+        assert_eq!(windows.last().unwrap().end, 1000);
         assert!(
-            w.windows(2).all(|p| p[0].end == p[1].start),
+            windows.windows(2).all(|pair| pair[0].end == pair[1].start),
             "no gaps or overlaps"
         );
     }
 
     /// A tiny perf.data: a 104-byte header and `n` records of `size` bytes each.
-    fn fake_file(dir: &Path, n: usize, size: usize) -> PathBuf {
-        let mut h = vec![0u8; 104];
-        h[..8].copy_from_slice(b"PERFILE2");
-        LittleEndian::write_u64(&mut h[8..], 104);
-        LittleEndian::write_u64(&mut h[40..], 104);
-        LittleEndian::write_u64(&mut h[48..], (n * size) as u64);
-        for i in 0..n {
-            let mut r = vec![0u8; size];
-            LittleEndian::write_u32(&mut r[0..], 9);
-            LittleEndian::write_u16(&mut r[6..], size as u16);
-            r[8] = i as u8;
-            h.extend_from_slice(&r);
+    fn fake_file(dir: &Path, record_count: usize, size: usize) -> PathBuf {
+        let mut header = vec![0u8; 104];
+        header[..8].copy_from_slice(b"PERFILE2");
+        LittleEndian::write_u64(&mut header[8..], 104);
+        LittleEndian::write_u64(&mut header[40..], 104);
+        LittleEndian::write_u64(&mut header[48..], (record_count * size) as u64);
+        for i in 0..record_count {
+            let mut record = vec![0u8; size];
+            LittleEndian::write_u32(&mut record[0..], 9);
+            LittleEndian::write_u16(&mut record[6..], size as u16);
+            record[8] = i as u8;
+            header.extend_from_slice(&record);
         }
-        let p = dir.join("fake.data");
-        std::fs::write(&p, h).unwrap();
-        p
+        let path = dir.join("fake.data");
+        std::fs::write(&path, header).unwrap();
+        path
     }
 
     fn temp_dir(tag: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!("tune-{tag}-{}", std::process::id()));
-        std::fs::create_dir_all(&d).unwrap();
-        d
+        let directory = std::env::temp_dir().join(format!("tune-{tag}-{}", std::process::id()));
+        std::fs::create_dir_all(&directory).unwrap();
+        directory
     }
 
     #[test]
     fn a_trial_reads_windows_of_the_real_file_and_repeats_a_short_one() {
         let dir = temp_dir("a");
         let path = fake_file(&dir, 20_000, 256); // 5 MB of records
-        let (file, sec) = split::open(&path).unwrap();
-        let bounds = anchor::plan_regions(&file, &sec, 5).unwrap();
-        let mut t = Trials {
+        let (file, section) = split::open(&path).unwrap();
+        let bounds = anchor::plan_regions(&file, &section, 5).unwrap();
+        let mut trials = Trials {
             path: &path,
             file,
-            sec,
+            section,
             bounds,
             workers: 2,
             turn: 0,
         };
-        let s = Settings {
+        let settings = Settings {
             readers: 2,
             region_mb: 1,
             in_flight: 4,
         };
-        assert!(t.run(s, 2_000_000).unwrap() > 0.0, "a window of the file");
         assert!(
-            t.run(s, 12_000_000).unwrap() > 0.0,
+            trials.run(settings, 2_000_000).unwrap() > 0.0,
+            "a window of the file"
+        );
+        assert!(
+            trials.run(settings, 12_000_000).unwrap() > 0.0,
             "more than the file holds: read again"
         );
         let _ = std::fs::remove_dir_all(&dir);
@@ -837,9 +892,9 @@ mod tests {
         let path = fake_file(&dir, 20_000, 256);
         let before: Vec<_> = std::fs::read_dir(&dir)
             .unwrap()
-            .map(|e| e.unwrap().file_name())
+            .map(|entry| entry.unwrap().file_name())
             .collect();
-        let opts = Options {
+        let options = Options {
             workers: 2,
             min_trial_bytes: 6_000_000,
             probe_secs: 0.3,
@@ -848,15 +903,24 @@ mod tests {
             ..Options::default()
         };
         let mut events = 0;
-        let r = tune(&path, &opts, &AtomicBool::new(false), &mut |_| events += 1).unwrap();
+        let report = tune(&path, &options, &AtomicBool::new(false), &mut |_| {
+            events += 1
+        })
+        .unwrap();
         let after: Vec<_> = std::fs::read_dir(&dir)
             .unwrap()
-            .map(|e| e.unwrap().file_name())
+            .map(|entry| entry.unwrap().file_name())
             .collect();
         assert_eq!(before, after, "nothing is written next to the recording");
-        assert!(r.sustained_gbps > 0.0 && r.best_gbps > 0.0 && !r.trials.is_empty() && events > 0);
         assert!(
-            r.trials.iter().any(|t| t.long) && r.trials.iter().any(|t| !t.long),
+            report.sustained_gbps > 0.0
+                && report.best_gbps > 0.0
+                && !report.trials.is_empty()
+                && events > 0
+        );
+        assert!(
+            report.trials.iter().any(|trial| trial.long)
+                && report.trials.iter().any(|trial| !trial.long),
             "short and full-length trials"
         );
         let _ = std::fs::remove_dir_all(&dir);

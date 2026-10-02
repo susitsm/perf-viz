@@ -38,8 +38,8 @@ impl Default for Options {
     }
 }
 
-pub fn read_all(path: &Path, cfg: Config, opts: Options) -> Result<(Stats, Report)> {
-    let (file, sec) = split::open(path)?;
+pub fn read_all(path: &Path, config: Config, options: Options) -> Result<(Stats, Report)> {
+    let (file, section) = split::open(path)?;
     // Header/attrs/feature sections only.
     let reader = PerfFileReader::parse_file(&file)?;
     let ctx = Ctx::new(
@@ -49,21 +49,21 @@ pub fn read_all(path: &Path, cfg: Config, opts: Options) -> Result<(Stats, Repor
     drop(reader);
 
     let sopts = stream::Options {
-        cold: opts.cold,
-        regions_per_reader: opts.regions_per_reader,
-        corrupt_bound: opts.corrupt_bound,
+        cold: options.cold,
+        regions_per_reader: options.regions_per_reader,
+        corrupt_bound: options.corrupt_bound,
     };
     let (states, report) =
-        stream::stream_open::<Stats, _>(&file, &sec, path, cfg, sopts, |stats, buf| {
-            if sec.big_endian {
-                parse_chunk::<BigEndian>(buf, &ctx, opts.touch, stats)
+        stream::stream_open::<Stats, _>(&file, &section, path, config, sopts, |stats, buffer| {
+            if section.big_endian {
+                parse_chunk::<BigEndian>(buffer, &ctx, options.touch, stats)
             } else {
-                parse_chunk::<LittleEndian>(buf, &ctx, opts.touch, stats)
+                parse_chunk::<LittleEndian>(buffer, &ctx, options.touch, stats)
             }
         })?;
     let mut total = Stats::default();
-    for s in &states {
-        total.merge(s);
+    for state in &states {
+        total.merge(state);
     }
     Ok((total, report))
 }

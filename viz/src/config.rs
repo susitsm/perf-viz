@@ -81,44 +81,44 @@ impl ReaderConfig {
     }
 
     fn validate(&self) -> Result<(), String> {
-        for (name, v) in [
-            ("readers", self.readers.map(|v| v as u64)),
-            ("threads", self.threads.map(|v| v as u64)),
+        for (name, value) in [
+            ("readers", self.readers.map(|value| value as u64)),
+            ("threads", self.threads.map(|value| value as u64)),
             ("region_mb", self.region_mb),
-            ("in_flight", self.in_flight.map(|v| v as u64)),
+            ("in_flight", self.in_flight.map(|value| value as u64)),
         ] {
-            if v == Some(0) {
+            if value == Some(0) {
                 return Err(format!("reader.{name} must be at least 1"));
             }
         }
         Ok(())
     }
 
-    /// Apply the configured values on top of `opts` (which holds the defaults).
-    pub fn apply(&self, opts: &mut load::Options) {
-        if let Some(v) = self.readers {
-            opts.readers = v;
+    /// Apply the configured values on top of `load_options` (which holds the defaults).
+    pub fn apply(&self, load_options: &mut load::Options) {
+        if let Some(value) = self.readers {
+            load_options.readers = value;
         }
-        if let Some(v) = self.threads {
-            opts.workers = v;
+        if let Some(value) = self.threads {
+            load_options.workers = value;
         }
-        if let Some(v) = self.region_mb {
-            opts.region_mb = v;
+        if let Some(value) = self.region_mb {
+            load_options.region_mb = value;
         }
-        if let Some(v) = self.in_flight {
-            opts.in_flight = v;
+        if let Some(value) = self.in_flight {
+            load_options.in_flight = value;
         }
-        if let Some(v) = self.lookahead {
-            opts.lookahead = v;
+        if let Some(value) = self.lookahead {
+            load_options.lookahead = value;
         }
-        if let Some(d) = self.dwarf {
-            opts.dwarf = match d {
+        if let Some(dwarf) = self.dwarf {
+            load_options.dwarf = match dwarf {
                 Dwarf::Auto => DwarfMode::Auto,
                 Dwarf::Never => DwarfMode::Never,
             };
         }
-        if let Some(c) = self.cold {
-            opts.cold = c;
+        if let Some(cold) = self.cold {
+            load_options.cold = cold;
         }
     }
 }
@@ -148,9 +148,9 @@ pub struct Config {
 
 impl Config {
     pub fn parse(text: &str) -> Result<Config, String> {
-        let c: Config = toml::from_str(text).map_err(|e| e.to_string())?;
-        c.reader.validate()?;
-        Ok(c)
+        let config: Config = toml::from_str(text).map_err(|error| error.to_string())?;
+        config.reader.validate()?;
+        Ok(config)
     }
 
     pub fn to_toml(&self) -> String {
@@ -165,16 +165,16 @@ impl Config {
 pub fn path() -> Option<PathBuf> {
     path_from(|k| {
         std::env::var_os(k)
-            .filter(|v| !v.is_empty())
+            .filter(|value| !value.is_empty())
             .map(PathBuf::from)
     })
 }
 
 fn path_from(var: impl Fn(&str) -> Option<PathBuf>) -> Option<PathBuf> {
-    if let Some(p) = var("PERF_VIZ_CONFIG") {
-        return Some(p);
+    if let Some(path) = var("PERF_VIZ_CONFIG") {
+        return Some(path);
     }
-    let base = var("XDG_CONFIG_HOME").or_else(|| var("HOME").map(|h| h.join(".config")))?;
+    let base = var("XDG_CONFIG_HOME").or_else(|| var("HOME").map(|home| home.join(".config")))?;
     Some(base.join("perf-viz").join("config.toml"))
 }
 
@@ -189,13 +189,13 @@ pub fn load() -> Config {
 
 pub fn load_from(path: &Path) -> Config {
     match fs::read_to_string(path) {
-        Ok(text) => Config::parse(&text).unwrap_or_else(|e| {
-            eprintln!("perf-viz: ignoring {}: {e}", path.display());
+        Ok(text) => Config::parse(&text).unwrap_or_else(|error| {
+            eprintln!("perf-viz: ignoring {}: {error}", path.display());
             Config::default()
         }),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Config::default(),
-        Err(e) => {
-            eprintln!("perf-viz: cannot read {}: {e}", path.display());
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Config::default(),
+        Err(error) => {
+            eprintln!("perf-viz: cannot read {}: {error}", path.display());
             Config::default()
         }
     }
@@ -213,8 +213,8 @@ pub fn save_to(path: &Path, config: &Config) -> std::io::Result<()> {
 
 pub fn save(config: &Config) {
     let Some(path) = path() else { return };
-    if let Err(e) = save_to(&path, config) {
-        eprintln!("perf-viz: cannot save {}: {e}", path.display());
+    if let Err(error) = save_to(&path, config) {
+        eprintln!("perf-viz: cannot save {}: {error}", path.display());
     }
 }
 
@@ -229,7 +229,7 @@ mod tests {
 
     #[test]
     fn settings_round_trip() {
-        let c = Config {
+        let config = Config {
             theme: Some(Theme::Light),
             cost: Some(Cost::Samples),
             truncate_suspect_tails: Some(true),
@@ -245,7 +245,7 @@ mod tests {
             },
             tuning_prompted: Some(true),
         };
-        assert_eq!(Config::parse(&c.to_toml()).unwrap(), c);
+        assert_eq!(Config::parse(&config.to_toml()).unwrap(), config);
         assert_eq!(
             Config::parse(&Config::default().to_toml()).unwrap(),
             Config::default(),
@@ -255,12 +255,17 @@ mod tests {
 
     #[test]
     fn values_are_lowercase_words() {
-        let c = Config::parse(
+        let config = Config::parse(
             "theme = \"dark\"\ncost = \"cycles\"\ntab = \"flame\"\ntruncate_suspect_tails = false",
         )
         .unwrap();
         assert_eq!(
-            (c.theme, c.cost, c.tab, c.truncate_suspect_tails),
+            (
+                config.theme,
+                config.cost,
+                config.tab,
+                config.truncate_suspect_tails
+            ),
             (
                 Some(Theme::Dark),
                 Some(Cost::Cycles),
@@ -272,16 +277,25 @@ mod tests {
 
     #[test]
     fn reader_table_is_parsed_and_applied_over_the_defaults() {
-        let c = Config::parse("theme = \"dark\"\n[reader]\nreaders = 2\nregion_mb = 32\ndwarf = \"never\"\ncold = true").unwrap();
-        let mut opts = load::Options::default();
-        let defaults = opts.clone();
-        c.reader.apply(&mut opts);
+        let config = Config::parse("theme = \"dark\"\n[reader]\nreaders = 2\nregion_mb = 32\ndwarf = \"never\"\ncold = true").unwrap();
+        let mut load_options = load::Options::default();
+        let defaults = load_options.clone();
+        config.reader.apply(&mut load_options);
         assert_eq!(
-            (opts.readers, opts.region_mb, opts.dwarf, opts.cold),
+            (
+                load_options.readers,
+                load_options.region_mb,
+                load_options.dwarf,
+                load_options.cold
+            ),
             (2, 32, DwarfMode::Never, true)
         );
         assert_eq!(
-            (opts.workers, opts.in_flight, opts.lookahead),
+            (
+                load_options.workers,
+                load_options.in_flight,
+                load_options.lookahead
+            ),
             (defaults.workers, defaults.in_flight, defaults.lookahead),
             "unset values keep the defaults"
         );
@@ -290,7 +304,7 @@ mod tests {
             Config::default()
                 .to_toml()
                 .lines()
-                .all(|l| l.starts_with('#')),
+                .all(|line| line.starts_with('#')),
             "an empty config writes only comments"
         );
     }
@@ -324,7 +338,12 @@ mod tests {
     #[test]
     fn location_prefers_the_override_then_xdg_then_home() {
         let env = |pairs: &'static [(&str, &str)]| {
-            move |k: &str| pairs.iter().find(|p| p.0 == k).map(|p| PathBuf::from(p.1))
+            move |k: &str| {
+                pairs
+                    .iter()
+                    .find(|pair| pair.0 == k)
+                    .map(|pair| PathBuf::from(pair.1))
+            }
         };
         assert_eq!(
             path_from(env(&[("PERF_VIZ_CONFIG", "/x/c.toml"), ("HOME", "/h")])),
@@ -345,12 +364,12 @@ mod tests {
     fn save_creates_directories_and_load_reads_it_back() {
         let dir = std::env::temp_dir().join(format!("perf-viz-test-{}", std::process::id()));
         let file = dir.join("nested").join("config.toml");
-        let c = Config {
+        let config = Config {
             theme: Some(Theme::Dark),
             ..Default::default()
         };
-        save_to(&file, &c).unwrap();
-        assert_eq!(load_from(&file), c);
+        save_to(&file, &config).unwrap();
+        assert_eq!(load_from(&file), config);
         assert_eq!(load_from(&dir.join("missing.toml")), Config::default());
         fs::write(&file, "theme = 3").unwrap();
         assert_eq!(

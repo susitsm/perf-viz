@@ -15,13 +15,13 @@ pub struct Item {
     pub depth: u32,
     /// Left edge and width, in pixels from the left of the graph.
     pub x: f32,
-    pub w: f32,
+    pub width: f32,
 }
 
 /// The trie's own inclusive totals, as a slice usable with [`layout`].
 #[allow(dead_code)] // used by the tests and by the flame-bench benchmark
 pub fn trie_totals(trie: &Trie) -> Vec<u64> {
-    trie.nodes.iter().map(|n| n.total as u64).collect()
+    trie.nodes.iter().map(|node| node.total as u64).collect()
 }
 
 /// Lay out the subtree under `focus` into `out` (cleared first). `totals[node]` is the inclusive
@@ -44,7 +44,7 @@ pub fn layout(
         node: focus,
         depth: 0,
         x: 0.0,
-        w: width,
+        width: width,
     }];
     while let Some(it) = stack.pop() {
         out.push(it);
@@ -53,19 +53,19 @@ pub fn layout(
         }
         let parent_total = totals[it.node as usize] as f32;
         let mut x = it.x;
-        for &c in trie.children(it.node) {
-            let w = it.w * totals[c as usize] as f32 / parent_total;
+        for &child in trie.children(it.node) {
+            let child_width = it.width * totals[child as usize] as f32 / parent_total;
             // Not `break`: with filtered totals the children are no longer sorted by width.
-            if w < min_w {
+            if child_width < min_w {
                 continue;
             }
             stack.push(Item {
-                node: c,
+                node: child,
                 depth: it.depth + 1,
                 x,
-                w,
+                width: child_width,
             });
-            x += w;
+            x += child_width;
         }
     }
 }
@@ -74,7 +74,7 @@ pub fn layout(
 pub fn hit(items: &[Item], x: f32, depth: u32) -> Option<&Item> {
     items
         .iter()
-        .find(|i| i.depth == depth && x >= i.x && x < i.x + i.w)
+        .find(|i| i.depth == depth && x >= i.x && x < i.x + i.width)
 }
 
 #[cfg(test)]
@@ -84,35 +84,46 @@ mod tests {
 
     fn trie() -> Trie {
         // root -> a(3) -> b(2), a -> c(1) ; root -> d(1)
-        let mut b = TrieBuilder::default();
-        b.insert([1, 2]);
-        b.insert([1, 2]);
-        b.insert([1, 3]);
-        b.insert([4]);
-        b.finish()
+        let mut builder = TrieBuilder::default();
+        builder.insert([1, 2]);
+        builder.insert([1, 2]);
+        builder.insert([1, 3]);
+        builder.insert([4]);
+        builder.finish()
     }
 
     #[test]
     fn widths_are_proportional_and_children_fit_inside_parent() {
-        let t = trie();
+        let sample_trie = trie();
         let mut out = Vec::new();
-        layout(&t, &trie_totals(&t), ROOT, 400.0, 0.0, 100, &mut out);
+        layout(
+            &sample_trie,
+            &trie_totals(&sample_trie),
+            ROOT,
+            400.0,
+            0.0,
+            100,
+            &mut out,
+        );
         assert_eq!(out.len(), 5); // root, a, b, c, d
-        let by_node = |n: u32| out.iter().find(|i| i.node == n).unwrap();
+        let by_node = |node: u32| out.iter().find(|i| i.node == node).unwrap();
         let root = by_node(ROOT);
-        assert_eq!((root.x, root.w), (0.0, 400.0));
-        let a = t.children(ROOT)[0];
-        let ia = by_node(a);
+        assert_eq!((root.x, root.width), (0.0, 400.0));
+        let first_child = sample_trie.children(ROOT)[0];
+        let ia = by_node(first_child);
         assert!(
-            (ia.w - 300.0).abs() < 1e-3 && ia.x == 0.0,
+            (ia.width - 300.0).abs() < 1e-3 && ia.x == 0.0,
             "a is 3/4 of the width, leftmost (heaviest)"
         );
-        let kids = t.children(a);
+        let kids = sample_trie.children(first_child);
         let (ib, ic) = (by_node(kids[0]), by_node(kids[1]));
-        assert!((ib.w - 200.0).abs() < 1e-3 && (ic.w - 100.0).abs() < 1e-3);
-        assert!((ic.x - (ib.x + ib.w)).abs() < 1e-3, "siblings are adjacent");
+        assert!((ib.width - 200.0).abs() < 1e-3 && (ic.width - 100.0).abs() < 1e-3);
         assert!(
-            ib.x >= ia.x && ic.x + ic.w <= ia.x + ia.w + 1e-3,
+            (ic.x - (ib.x + ib.width)).abs() < 1e-3,
+            "siblings are adjacent"
+        );
+        assert!(
+            ib.x >= ia.x && ic.x + ic.width <= ia.x + ia.width + 1e-3,
             "children stay inside the parent"
         );
         assert_eq!(ib.depth, 2);
@@ -120,9 +131,17 @@ mod tests {
 
     #[test]
     fn narrow_boxes_are_culled_with_their_subtree() {
-        let t = trie();
+        let sample_trie = trie();
         let mut out = Vec::new();
-        layout(&t, &trie_totals(&t), ROOT, 400.0, 150.0, 100, &mut out); // d is 100px, c is 100px: both culled
+        layout(
+            &sample_trie,
+            &trie_totals(&sample_trie),
+            ROOT,
+            400.0,
+            150.0,
+            100,
+            &mut out,
+        ); // d is 100px, c is 100px: both culled
         let mut nodes: Vec<u32> = out.iter().map(|i| i.node).collect();
         nodes.sort();
         assert_eq!(out.len(), 3, "root, a, b remain: {nodes:?}");
@@ -130,63 +149,95 @@ mod tests {
 
     #[test]
     fn depth_limit_and_focus() {
-        let t = trie();
+        let sample_trie = trie();
         let mut out = Vec::new();
-        layout(&t, &trie_totals(&t), ROOT, 400.0, 0.0, 2, &mut out);
+        layout(
+            &sample_trie,
+            &trie_totals(&sample_trie),
+            ROOT,
+            400.0,
+            0.0,
+            2,
+            &mut out,
+        );
         assert!(out.iter().all(|i| i.depth < 2));
         // Focusing on `a` makes it the full-width root of the layout.
-        let a = t.children(ROOT)[0];
-        layout(&t, &trie_totals(&t), a, 300.0, 0.0, 100, &mut out);
+        let first_child = sample_trie.children(ROOT)[0];
+        layout(
+            &sample_trie,
+            &trie_totals(&sample_trie),
+            first_child,
+            300.0,
+            0.0,
+            100,
+            &mut out,
+        );
         assert_eq!(
             out.iter().map(|i| i.depth).max(),
             Some(1),
             "a's children are one row above it"
         );
-        let root = out.iter().find(|i| i.node == a).unwrap();
-        assert_eq!((root.depth, root.x, root.w), (0, 0.0, 300.0));
+        let root = out.iter().find(|i| i.node == first_child).unwrap();
+        assert_eq!((root.depth, root.x, root.width), (0, 0.0, 300.0));
     }
 
     #[test]
     fn filtered_totals_reorder_children_without_losing_wide_ones() {
         // With the unfiltered order [a(3), d(1)], filtering leaves a with 0 and d with 1: the
         // wide child comes *after* a narrow (empty) one, so culling must not stop at the first.
-        let t = trie();
-        let a = t.children(ROOT)[0];
-        let d = t.children(ROOT)[1];
-        let mut totals = trie_totals(&t);
-        for n in 0..totals.len() {
-            totals[n] = 0;
+        let sample_trie = trie();
+        let first_child = sample_trie.children(ROOT)[0];
+        let last_child = sample_trie.children(ROOT)[1];
+        let mut totals = trie_totals(&sample_trie);
+        for node in 0..totals.len() {
+            totals[node] = 0;
         }
         totals[ROOT as usize] = 1;
-        totals[d as usize] = 1;
+        totals[last_child as usize] = 1;
         let mut out = Vec::new();
-        layout(&t, &totals, ROOT, 400.0, 0.5, 100, &mut out);
+        layout(&sample_trie, &totals, ROOT, 400.0, 0.5, 100, &mut out);
         assert!(
             out.iter()
-                .any(|i| i.node == d && (i.w - 400.0).abs() < 1e-3),
+                .any(|i| i.node == last_child && (i.width - 400.0).abs() < 1e-3),
             "d fills the whole width"
         );
         assert!(
-            out.iter().all(|i| i.node != a),
+            out.iter().all(|i| i.node != first_child),
             "the emptied subtree is not drawn"
         );
     }
 
     #[test]
     fn empty_and_hit_test() {
-        let t = TrieBuilder::default().finish();
+        let sample_trie = TrieBuilder::default().finish();
         let mut out = vec![Item {
             node: 9,
             depth: 9,
             x: 0.0,
-            w: 1.0,
+            width: 1.0,
         }];
-        layout(&t, &trie_totals(&t), ROOT, 400.0, 0.0, 10, &mut out);
+        layout(
+            &sample_trie,
+            &trie_totals(&sample_trie),
+            ROOT,
+            400.0,
+            0.0,
+            10,
+            &mut out,
+        );
         assert!(out.is_empty());
-        let t = trie();
-        layout(&t, &trie_totals(&t), ROOT, 400.0, 0.0, 100, &mut out);
-        let h = hit(&out, 10.0, 1).unwrap();
-        assert_eq!(h.node, t.children(ROOT)[0]);
+        let sample_trie = trie();
+        layout(
+            &sample_trie,
+            &trie_totals(&sample_trie),
+            ROOT,
+            400.0,
+            0.0,
+            100,
+            &mut out,
+        );
+        let hit_item = hit(&out, 10.0, 1).unwrap();
+        assert_eq!(hit_item.node, sample_trie.children(ROOT)[0]);
         assert!(hit(&out, 10.0, 9).is_none());
     }
 }

@@ -30,62 +30,66 @@ fn blaze(path: &PathBuf, addrs: &[u64]) -> Out {
         .enable_inlined_fns(true)
         .enable_demangling(true)
         .build();
-    let mut o = Out::default();
+    let mut outcome = Out::default();
     let Ok(res) = sym.symbolize(&Source::Elf(Elf::new(path)), Input::VirtOffset(addrs)) else {
-        return o;
+        return outcome;
     };
     let show = std::env::var("SHOW_UNRESOLVED")
         .ok()
-        .and_then(|v| v.parse::<usize>().ok())
+        .and_then(|text| text.parse::<usize>().ok())
         .unwrap_or(0);
     let mut shown = 0;
-    for (a, r) in addrs.iter().zip(res) {
-        if matches!(r, Symbolized::Unknown(_)) && shown < show {
+    for (address, symbolized) in addrs.iter().zip(res) {
+        if matches!(symbolized, Symbolized::Unknown(_)) && shown < show {
             shown += 1;
-            println!("   unresolved svma {a:#x}");
+            println!("   unresolved svma {address:#x}");
         }
-        if let Symbolized::Sym(s) = r {
-            o.resolved += 1;
-            o.with_line += s.code_info.is_some() as u64;
-            o.inline_frames += s.inlined.len() as u64;
+        if let Symbolized::Sym(symbol) = symbolized {
+            outcome.resolved += 1;
+            outcome.with_line += symbol.code_info.is_some() as u64;
+            outcome.inline_frames += symbol.inlined.len() as u64;
         }
     }
-    o
+    outcome
 }
 
 fn a2l(path: &PathBuf, addrs: &[u64]) -> Out {
-    let mut o = Out::default();
+    let mut outcome = Out::default();
     let Ok(loader) = addr2line::Loader::new(path) else {
-        return o;
+        return outcome;
     };
-    for &a in addrs {
+    for &address in addrs {
         let mut any = false;
         let mut line = false;
-        let mut n = 0u64;
-        if let Ok(mut frames) = loader.find_frames(a) {
-            while let Ok(Some(f)) = frames.next() {
-                any |= f.function.is_some();
-                line |= f.location.as_ref().is_some_and(|l| l.line.is_some());
-                n += 1;
+        let mut frame_count = 0u64;
+        if let Ok(mut frames) = loader.find_frames(address) {
+            while let Ok(Some(frame)) = frames.next() {
+                any |= frame.function.is_some();
+                line |= frame
+                    .location
+                    .as_ref()
+                    .is_some_and(|location_info| location_info.line.is_some());
+                frame_count += 1;
             }
         }
         if !any {
-            any = loader.find_symbol(a).is_some();
+            any = loader.find_symbol(address).is_some();
         }
-        o.resolved += any as u64;
-        o.with_line += line as u64;
-        o.inline_frames += n.saturating_sub(1);
+        outcome.resolved += any as u64;
+        outcome.with_line += line as u64;
+        outcome.inline_frames += frame_count.saturating_sub(1);
     }
-    o
+    outcome
 }
 
 fn rss_hwm_mb() -> f64 {
     fs::read_to_string("/proc/self/status")
         .ok()
-        .and_then(|s| {
-            s.lines()
-                .find(|l| l.starts_with("VmHWM"))
-                .and_then(|l| l.split_whitespace().nth(1)?.parse::<f64>().ok())
+        .and_then(|status| {
+            status
+                .lines()
+                .find(|line| line.starts_with("VmHWM"))
+                .and_then(|line| line.split_whitespace().nth(1)?.parse::<f64>().ok())
         })
         .unwrap_or(0.0)
         / 1024.0
@@ -121,7 +125,7 @@ fn main() {
     let synthetic: Option<(PathBuf, usize)> = cli.synthetic.zip(cli.count);
     let file = cli
         .addrs
-        .map(|p| p.display().to_string())
+        .map(|path| path.display().to_string())
         .unwrap_or_default();
     let (engine, threads, only, limit) = (cli.engine, cli.threads, cli.only, cli.limit);
     let mut by_module: BTreeMap<PathBuf, Vec<u64>> = BTreeMap::new();
@@ -132,31 +136,34 @@ fn main() {
         let text = obj.section_by_name(".text").unwrap();
         let (base, len) = (text.address(), text.size());
         let mut x = 0x9E3779B97F4A7C15u64;
-        let v = by_module.entry(elf.clone()).or_default();
+        let addresses = by_module.entry(elf.clone()).or_default();
         for _ in 0..*count {
             x ^= x << 13;
             x ^= x >> 7;
             x ^= x << 17;
-            v.push(base + x % len);
+            addresses.push(base + x % len);
         }
     }
-    for l in fs::read_to_string(&file).unwrap_or_default().lines() {
-        if let Some((p, a)) = l.split_once('\t') {
+    for line in fs::read_to_string(&file).unwrap_or_default().lines() {
+        if let Some((module_path, address_text)) = line.split_once('\t') {
             by_module
-                .entry(p.into())
+                .entry(module_path.into())
                 .or_default()
-                .push(u64::from_str_radix(a, 16).unwrap());
+                .push(u64::from_str_radix(address_text, 16).unwrap());
         }
     }
     let mut mods: Vec<_> = by_module
         .into_iter()
-        .filter(|(p, _)| {
+        .filter(|(module_path, _)| {
             only.as_ref()
-                .is_none_or(|o| p.to_string_lossy().contains(o.as_str()))
+                .is_none_or(|filter| module_path.to_string_lossy().contains(filter.as_str()))
         })
         .collect();
-    mods.sort_by_key(|(_, v)| std::cmp::Reverse(v.len()));
-    let total: usize = mods.iter().map(|(_, v)| v.len().min(limit)).sum();
+    mods.sort_by_key(|(_, addresses)| std::cmp::Reverse(addresses.len()));
+    let total: usize = mods
+        .iter()
+        .map(|(_, addresses)| addresses.len().min(limit))
+        .sum();
     println!("engine {engine}, {} modules, {total} addresses", mods.len());
 
     for &nt in &threads {
@@ -170,46 +177,48 @@ fn main() {
             addrs.truncate(limit);
             let name = path.file_name().unwrap().to_string_lossy();
             let chunk = addrs.len().div_ceil(nt);
-            let t = Instant::now();
-            let outs: Vec<(Out, f64)> = std::thread::scope(|s| {
+            let started = Instant::now();
+            let outs: Vec<(Out, f64)> = std::thread::scope(|scope| {
                 let hs: Vec<_> = addrs
                     .chunks(chunk.max(1))
-                    .map(|c| {
+                    .map(|chunk| {
                         let engine = engine.as_str();
                         let path = path;
-                        s.spawn(move || {
-                            let t = Instant::now();
-                            let o = if engine == "addr2line" {
-                                a2l(path, c)
+                        scope.spawn(move || {
+                            let started = Instant::now();
+                            let outcome = if engine == "addr2line" {
+                                a2l(path, chunk)
                             } else {
-                                blaze(path, c)
+                                blaze(path, chunk)
                             };
-                            (o, t.elapsed().as_secs_f64())
+                            (outcome, started.elapsed().as_secs_f64())
                         })
                     })
                     .collect();
-                hs.into_iter().map(|h| h.join().unwrap()).collect()
+                hs.into_iter()
+                    .map(|handle| handle.join().unwrap())
+                    .collect()
             });
-            let secs = t.elapsed().as_secs_f64();
-            let o = outs.iter().fold(Out::default(), |a, (b, _)| Out {
-                resolved: a.resolved + b.resolved,
-                with_line: a.with_line + b.with_line,
-                inline_frames: a.inline_frames + b.inline_frames,
+            let secs = started.elapsed().as_secs_f64();
+            let total = outs.iter().fold(Out::default(), |sum, (part, _)| Out {
+                resolved: sum.resolved + part.resolved,
+                with_line: sum.with_line + part.with_line,
+                inline_frames: sum.inline_frames + part.inline_frames,
             });
             let slowest = outs.iter().map(|x| x.1).fold(0.0, f64::max);
             println!(
                 "{name:<40.40} {:>6} addrs  {secs:7.2}s (slowest thread {slowest:.2}s) {:>7.0} addr/s | resolved {:>5.1}%, with line {:>5.1}%, +{:.2} inline frames/addr | peak RSS so far {:.0} MB",
                 addrs.len(),
                 addrs.len() as f64 / secs,
-                100.0 * o.resolved as f64 / addrs.len() as f64,
-                100.0 * o.with_line as f64 / addrs.len() as f64,
-                o.inline_frames as f64 / addrs.len() as f64,
+                100.0 * total.resolved as f64 / addrs.len() as f64,
+                100.0 * total.with_line as f64 / addrs.len() as f64,
+                total.inline_frames as f64 / addrs.len() as f64,
                 rss_hwm_mb()
             );
             sum = Out {
-                resolved: sum.resolved + o.resolved,
-                with_line: sum.with_line + o.with_line,
-                inline_frames: sum.inline_frames + o.inline_frames,
+                resolved: sum.resolved + total.resolved,
+                with_line: sum.with_line + total.with_line,
+                inline_frames: sum.inline_frames + total.inline_frames,
             };
         }
         println!(

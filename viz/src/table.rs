@@ -115,11 +115,11 @@ pub fn draw<'a>(
         }
     }
     let hp = ui.painter();
-    let head = |x: f32, s: &str, align: Align2| {
+    let head = |x: f32, text: &str, align: Align2| {
         hp.text(
             pos2(hrect.left() + x, hrect.center().y),
             align,
-            s,
+            text,
             FontId::proportional(12.0),
             weak,
         )
@@ -128,8 +128,8 @@ pub fn draw<'a>(
     head(module_x + 4.0, "Module", Align2::LEFT_CENTER);
     head(cost_x + NUM_W - 4.0, cols.cost, Align2::RIGHT_CENTER);
     head(cost_x + NUM_W + PCT_W - 4.0, "%", Align2::RIGHT_CENTER);
-    if let Some(s) = cols.self_cost {
-        head(self_x + NUM_W - 4.0, s, Align2::RIGHT_CENTER);
+    if let Some(self_label) = cols.self_cost {
+        head(self_x + NUM_W - 4.0, self_label, Align2::RIGHT_CENTER);
         head(self_x + NUM_W + PCT_W - 4.0, "%", Align2::RIGHT_CENTER);
     }
 
@@ -138,24 +138,24 @@ pub fn draw<'a>(
         .auto_shrink([false, false])
         .show_rows(ui, ROW_H, n_rows, |ui, range| {
             for i in range {
-                let r = row(i);
+                let row_data = row(i);
                 let (rect, resp) = ui.allocate_exact_size(vec2(width, ROW_H), Sense::click());
                 let painter = ui.painter();
                 let (left, cy) = (rect.left(), rect.center().y);
-                if r.selected {
+                if row_data.selected {
                     painter.rect_filled(rect, 0.0, pal.selected_row());
                 } else if i % 2 == 1 {
                     painter.rect_filled(rect, 0.0, pal.tint(8));
                 }
-                if resp.hovered() && !r.selected {
+                if resp.hovered() && !row_data.selected {
                     painter.rect_filled(rect, 0.0, pal.tint(14));
                 }
 
                 // Tree column: indent, arrow, name
-                let indent_x = 6.0 + r.depth as f32 * INDENT;
-                if r.arrow != Arrow::None {
+                let indent_x = 6.0 + row_data.depth as f32 * INDENT;
+                if row_data.arrow != Arrow::None {
                     let (ax, ay) = (left + indent_x + 4.0, cy);
-                    let pts = if r.arrow == Arrow::Collapsed {
+                    let pts = if row_data.arrow == Arrow::Collapsed {
                         vec![
                             pos2(ax - 2.0, ay - 4.5),
                             pos2(ax - 2.0, ay + 4.5),
@@ -174,9 +174,9 @@ pub fn draw<'a>(
                     pos2(left + indent_x + ARROW_ZONE, rect.top()),
                     pos2(left + name_w, rect.bottom()),
                 );
-                let color = if r.highlight {
+                let color = if row_data.highlight {
                     pal.highlight()
-                } else if r.suspect {
+                } else if row_data.suspect {
                     pal.suspect()
                 } else {
                     text
@@ -184,7 +184,7 @@ pub fn draw<'a>(
                 painter.with_clip_rect(name_rect).text(
                     pos2(name_rect.left(), cy),
                     Align2::LEFT_CENTER,
-                    r.name,
+                    row_data.name,
                     FontId::proportional(12.0),
                     color,
                 );
@@ -195,14 +195,14 @@ pub fn draw<'a>(
                 painter.with_clip_rect(module_rect).text(
                     pos2(module_rect.left() + 4.0, cy),
                     Align2::LEFT_CENTER,
-                    r.module,
+                    row_data.module,
                     FontId::proportional(12.0),
                     weak,
                 );
 
                 // Numeric columns, each a count and a percentage (with a bar behind the percentage)
-                let cell = |x: f32, v: u64, bar: Color32| {
-                    let frac = (v as f32 / total_f).clamp(0.0, 1.0);
+                let cell = |x: f32, value: u64, bar: Color32| {
+                    let frac = (value as f32 / total_f).clamp(0.0, 1.0);
                     let bar_rect = Rect::from_min_size(
                         pos2(left + x + NUM_W, rect.top() + 2.0),
                         vec2((PCT_W - 4.0) * frac, ROW_H - 4.0),
@@ -211,38 +211,43 @@ pub fn draw<'a>(
                     painter.text(
                         pos2(left + x + NUM_W - 4.0, cy),
                         Align2::RIGHT_CENTER,
-                        cols.unit.format(v),
+                        cols.unit.format(value),
                         FontId::monospace(11.5),
                         text,
                     );
                     painter.text(
                         pos2(left + x + NUM_W + PCT_W - 4.0, cy),
                         Align2::RIGHT_CENTER,
-                        crate::fmt::pct_of(v as f64, total as f64),
+                        crate::fmt::pct_of(value as f64, total as f64),
                         FontId::monospace(11.5),
                         text,
                     );
                 };
                 cell(
                     cost_x,
-                    r.cost,
+                    row_data.cost,
                     Color32::from_rgba_unmultiplied(70, 130, 200, 90),
                 );
-                if let Some(s) = r.self_cost {
-                    cell(self_x, s, Color32::from_rgba_unmultiplied(200, 130, 70, 90));
+                if let Some(self_cost) = row_data.self_cost {
+                    cell(
+                        self_x,
+                        self_cost,
+                        Color32::from_rgba_unmultiplied(200, 130, 70, 90),
+                    );
                 }
 
                 if resp.clicked() {
-                    let on_arrow = resp.interact_pointer_pos().is_some_and(|p| {
-                        p.x >= left + indent_x - 2.0 && p.x < left + indent_x + ARROW_ZONE
+                    let on_arrow = resp.interact_pointer_pos().is_some_and(|pointer| {
+                        pointer.x >= left + indent_x - 2.0
+                            && pointer.x < left + indent_x + ARROW_ZONE
                     });
-                    clicked = Some(if r.arrow != Arrow::None && on_arrow {
+                    clicked = Some(if row_data.arrow != Arrow::None && on_arrow {
                         Click::Toggle(i)
                     } else {
                         Click::Select(i)
                     });
                 }
-                if resp.double_clicked() && r.arrow != Arrow::None {
+                if resp.double_clicked() && row_data.arrow != Arrow::None {
                     clicked = Some(Click::Toggle(i));
                 }
             }

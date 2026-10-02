@@ -10,26 +10,26 @@ use perf_profile::{
     model::{Profile, ROOT},
 };
 
-fn depth_and_leaf(p: &Profile, node: u32) -> (usize, String, String) {
-    let t = &p.full;
-    let mut n = node;
-    let mut d = 0;
-    let leaf = p.frames[t.nodes[node as usize].frame as usize]
+fn depth_and_leaf(profile: &Profile, node: u32) -> (usize, String, String) {
+    let trie = &profile.full;
+    let mut current = node;
+    let mut depth = 0;
+    let leaf = profile.frames[trie.nodes[node as usize].frame as usize]
         .name
         .chars()
         .take(50)
         .collect::<String>();
     let mut root = String::new();
-    while n != ROOT {
-        root = p.frames[t.nodes[n as usize].frame as usize]
+    while current != ROOT {
+        root = profile.frames[trie.nodes[current as usize].frame as usize]
             .name
             .chars()
             .take(40)
             .collect();
-        n = t.nodes[n as usize].parent;
-        d += 1;
+        current = trie.nodes[current as usize].parent;
+        depth += 1;
     }
-    (d, leaf, root)
+    (depth, leaf, root)
 }
 
 /// Loads a recording with two region sizes and lists where the call trees differ.
@@ -60,44 +60,47 @@ fn main() {
         lookahead,
         ..Default::default()
     };
-    let a = load::load(path.as_ref(), mk(a_mb), &mut |_| {}).unwrap();
-    let b = load::load(path.as_ref(), mk(b_mb), &mut |_| {}).unwrap();
+    let profile_a = load::load(path.as_ref(), mk(a_mb), &mut |_| {}).unwrap();
+    let profile_b = load::load(path.as_ref(), mk(b_mb), &mut |_| {}).unwrap();
     let mut by_key: HashMap<(u64, i32), Vec<(usize, String, String)>> = HashMap::new();
-    for s in &a.samples {
+    for sample in &profile_a.samples {
         by_key
-            .entry((s.time, s.tid))
+            .entry((sample.time, sample.tid))
             .or_default()
-            .push(depth_and_leaf(&a, s.full));
+            .push(depth_and_leaf(&profile_a, sample.full));
     }
-    let t0 = a.samples.first().map_or(0, |s| s.time);
+    let t0 = profile_a.samples.first().map_or(0, |sample| sample.time);
     let (mut diff, mut shown) = (0usize, 0usize);
     let mut times = Vec::new();
-    for s in &b.samples {
-        let (d, leaf, root) = depth_and_leaf(&b, s.full);
-        let Some(v) = by_key.get(&(s.time, s.tid)) else {
+    for sample in &profile_b.samples {
+        let (depth, leaf, root) = depth_and_leaf(&profile_b, sample.full);
+        let Some(candidates) = by_key.get(&(sample.time, sample.tid)) else {
             continue;
         };
-        if !v.iter().any(|(da, la, _)| *da == d && *la == leaf) {
+        if !candidates
+            .iter()
+            .any(|(da, la, _)| *da == depth && *la == leaf)
+        {
             diff += 1;
-            times.push((s.time - t0) as f64 / 1e6);
+            times.push((sample.time - t0) as f64 / 1e6);
             if shown < 8 {
                 shown += 1;
-                let (da, la, ra) = &v[0];
+                let (da, la, ra) = &candidates[0];
                 println!(
-                    "t=+{:.1}ms tid {}: region {a_mb}MiB depth {da} leaf `{la}` root `{ra}`  |  region {b_mb}MiB depth {d} leaf `{leaf}` root `{root}`",
-                    (s.time - t0) as f64 / 1e6,
-                    s.tid
+                    "t=+{:.1}ms tid {}: region {a_mb}MiB depth {da} leaf `{la}` root `{ra}`  |  region {b_mb}MiB depth {depth} leaf `{leaf}` root `{root}`",
+                    (sample.time - t0) as f64 / 1e6,
+                    sample.tid
                 );
             }
         }
     }
-    println!("{diff} of {} samples differ", b.samples.len());
+    println!("{diff} of {} samples differ", profile_b.samples.len());
     if !times.is_empty() {
         println!(
             "times of differing samples (ms since first sample): min {:.1}, max {:.1}; recording spans {:.1} ms",
             times.iter().cloned().fold(f64::MAX, f64::min),
             times.iter().cloned().fold(0.0, f64::max),
-            (a.samples.last().unwrap().time - t0) as f64 / 1e6
+            (profile_a.samples.last().unwrap().time - t0) as f64 / 1e6
         );
     }
 }

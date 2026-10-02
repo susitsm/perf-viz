@@ -66,38 +66,42 @@ pub struct Binary {
 
 impl Binary {
     pub fn open(path: &Path) -> Result<Binary, String> {
-        let file = File::open(path).map_err(|e| e.to_string())?;
+        let file = File::open(path).map_err(|error| error.to_string())?;
         use std::os::unix::fs::MetadataExt;
-        let md = file.metadata().map_err(|e| e.to_string())?;
-        let mmap = Arc::new(unsafe { Mmap::map(&file) }.map_err(|e| e.to_string())?);
+        let md = file.metadata().map_err(|error| error.to_string())?;
+        let mmap = Arc::new(unsafe { Mmap::map(&file) }.map_err(|error| error.to_string())?);
 
-        let obj = object::File::parse(&**mmap).map_err(|e| e.to_string())?;
+        let obj = object::File::parse(&**mmap).map_err(|error| error.to_string())?;
         let mut sections = HashMap::new();
-        for s in obj.sections() {
-            let Ok(name) = s.name_bytes() else { continue };
-            let file = s.file_range().map(|(o, l)| o as usize..(o + l) as usize);
+        for section in obj.sections() {
+            let Ok(name) = section.name_bytes() else {
+                continue;
+            };
+            let file = section
+                .file_range()
+                .map(|(offset, length)| offset as usize..(offset + length) as usize);
             sections.insert(
                 name.to_vec(),
                 Section {
-                    svma: s.address()..s.address() + s.size(),
+                    svma: section.address()..section.address() + section.size(),
                     file,
                 },
             );
         }
 
         // Program headers give the vaddr <-> file offset mapping of each loadable segment.
-        let hdr = FileHeader64::<Endianness>::parse(&**mmap).map_err(|e| e.to_string())?;
-        let endian = hdr.endian().map_err(|e| e.to_string())?;
+        let hdr = FileHeader64::<Endianness>::parse(&**mmap).map_err(|error| error.to_string())?;
+        let endian = hdr.endian().map_err(|error| error.to_string())?;
         let loads = hdr
             .program_headers(endian, &**mmap)
-            .map_err(|e| e.to_string())?
+            .map_err(|error| error.to_string())?
             .iter()
-            .filter(|p| p.p_type(endian) == PT_LOAD)
-            .map(|p| Load {
-                vaddr: p.p_vaddr(endian),
-                offset: p.p_offset(endian),
-                filesz: p.p_filesz(endian),
-                executable: p.p_flags(endian).0 & PF_X.0 != 0,
+            .filter(|program_header| program_header.p_type(endian) == PT_LOAD)
+            .map(|program_header| Load {
+                vaddr: program_header.p_vaddr(endian),
+                offset: program_header.p_offset(endian),
+                filesz: program_header.p_filesz(endian),
+                executable: program_header.p_flags(endian).0 & PF_X.0 != 0,
             })
             .collect();
 
@@ -120,23 +124,30 @@ impl Binary {
     /// segment, two executable segments...), and a mapping's page offset can fall inside the
     /// page-rounded range of more than one of them.
     pub fn bias_for_mapping(&self, map_start: u64, pgoff: u64, map_len: u64) -> Option<u64> {
-        let l = self.loads.iter().filter(|l| l.executable).find(|l| {
-            let (seg_lo, seg_hi) = (l.offset & !0xfff, (l.offset + l.filesz + 0xfff) & !0xfff);
-            pgoff < seg_hi && pgoff + map_len > seg_lo
-        })?;
+        let load = self
+            .loads
+            .iter()
+            .filter(|segment| segment.executable)
+            .find(|segment| {
+                let (seg_lo, seg_hi) = (
+                    segment.offset & !0xfff,
+                    (segment.offset + segment.filesz + 0xfff) & !0xfff,
+                );
+                pgoff < seg_hi && pgoff + map_len > seg_lo
+            })?;
         // Anchor on the segment's own offset<->vaddr relation; `pgoff` may be before `l.offset`
         // by the sub-page part.
-        let svma = l.vaddr.wrapping_add(pgoff).wrapping_sub(l.offset);
+        let svma = load.vaddr.wrapping_add(pgoff).wrapping_sub(load.offset);
         Some(map_start.wrapping_sub(svma))
     }
 
     /// The bytes at static address `svma` (up to `len`), read from the file image.
     pub fn bytes_at_svma(&self, svma: u64, len: usize) -> Option<&[u8]> {
-        let l = self
+        let load = self
             .loads
             .iter()
-            .find(|l| svma >= l.vaddr && svma + len as u64 <= l.vaddr + l.filesz)?;
-        let off = (svma - l.vaddr + l.offset) as usize;
+            .find(|load| svma >= load.vaddr && svma + len as u64 <= load.vaddr + load.filesz)?;
+        let off = (svma - load.vaddr + load.offset) as usize;
         self.mmap.get(off..off + len)
     }
 
@@ -146,24 +157,26 @@ impl Binary {
             let Ok(obj) = object::File::parse(&**self.mmap) else {
                 return Vec::new();
             };
-            let mut v: Vec<_> = obj
+            let mut symbols: Vec<_> = obj
                 .symbols()
                 .chain(obj.dynamic_symbols())
-                .filter(|s| s.kind() == object::SymbolKind::Text && s.address() != 0)
-                .filter_map(|s| {
+                .filter(|symbol| symbol.kind() == object::SymbolKind::Text && symbol.address() != 0)
+                .filter_map(|symbol| {
                     Some(FuncSym {
-                        start: s.address(),
-                        size: s.size(),
-                        name: s.name().ok()?.to_string(),
+                        start: symbol.address(),
+                        size: symbol.size(),
+                        name: symbol.name().ok()?.to_string(),
                     })
                 })
                 .collect();
-            v.sort_by_key(|f| f.start);
-            v
+            symbols.sort_by_key(|function| function.start);
+            symbols
         });
-        let i = funcs.partition_point(|f| f.start <= svma).checked_sub(1)?;
-        let f = &funcs[i];
-        (svma < f.start + f.size.max(1)).then_some(f.name.as_str())
+        let i = funcs
+            .partition_point(|function| function.start <= svma)
+            .checked_sub(1)?;
+        let function = &funcs[i];
+        (svma < function.start + function.size.max(1)).then_some(function.name.as_str())
     }
 
     pub fn section_info(self: &Arc<Self>) -> ElfSections {
@@ -180,7 +193,10 @@ impl ModuleSectionInfo<SectionData> for ElfSections {
     }
 
     fn section_svma_range(&mut self, name: &[u8]) -> Option<Range<u64>> {
-        self.0.sections.get(name).map(|s| s.svma.clone())
+        self.0
+            .sections
+            .get(name)
+            .map(|section| section.svma.clone())
     }
 
     fn section_data(&mut self, name: &[u8]) -> Option<SectionData> {
@@ -211,11 +227,11 @@ impl BinaryCache {
         let mut map = self.map.lock().unwrap();
         map.entry(path.to_owned())
             .or_insert_with(|| match Binary::open(path) {
-                Ok(b) => Some(Arc::new(b)),
-                Err(e) => {
+                Ok(binary) => Some(Arc::new(binary)),
+                Err(error) => {
                     self.errors.lock().unwrap().push(BinaryError {
                         path: path.to_owned(),
-                        message: e,
+                        message: error,
                     });
                     None
                 }

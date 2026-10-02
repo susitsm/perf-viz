@@ -33,38 +33,39 @@ fn main() {
         },
     );
     let mut by_module: BTreeMap<PathBuf, Vec<u64>> = BTreeMap::new();
-    for l in fs::read_to_string(&file).unwrap().lines() {
-        if let Some((p, a)) = l.split_once('\t') {
+    for line in fs::read_to_string(&file).unwrap().lines() {
+        if let Some((module_path, address_text)) = line.split_once('\t') {
             by_module
-                .entry(p.into())
+                .entry(module_path.into())
                 .or_default()
-                .push(u64::from_str_radix(a, 16).unwrap());
+                .push(u64::from_str_radix(address_text, 16).unwrap());
         }
     }
     for elf in also {
-        let mut v = Vec::new();
+        let mut addresses = Vec::new();
         if let Ok(data) = fs::read(&elf) {
-            if let Some(text) = object::File::parse(&*data)
-                .ok()
-                .and_then(|o| o.section_by_name(".text").map(|s| (s.address(), s.size())))
-            {
+            if let Some(text) = object::File::parse(&*data).ok().and_then(|object| {
+                object
+                    .section_by_name(".text")
+                    .map(|section| (section.address(), section.size()))
+            }) {
                 let mut x = 0x9E3779B97F4A7C15u64;
                 for _ in 0..2000 {
                     x ^= x << 13;
                     x ^= x >> 7;
                     x ^= x << 17;
-                    v.push(text.0 + x % text.1);
+                    addresses.push(text.0 + x % text.1);
                 }
             }
         }
-        if v.is_empty() {
-            v = vec![0x1000, 0x2000, 0x3000]; // missing / unparsable file: exercises the raw fallback
+        if addresses.is_empty() {
+            addresses = vec![0x1000, 0x2000, 0x3000]; // missing / unparsable file: exercises the raw fallback
         }
-        by_module.insert(elf, v);
+        by_module.insert(elf, addresses);
     }
 
     let mut mods: Vec<_> = by_module.into_iter().collect();
-    mods.sort_by_key(|(_, v)| std::cmp::Reverse(v.len()));
+    mods.sort_by_key(|(_, addresses)| std::cmp::Reverse(addresses.len()));
     let (mut n_full, mut n_sym, mut n_raw, mut addrs_total, mut unresolved_total) =
         (0, 0, 0, 0usize, 0usize);
     let t_all = Instant::now();
@@ -75,41 +76,45 @@ fn main() {
     for (path, mut addrs) in mods {
         addrs.sort_unstable();
         addrs.dedup();
-        let t = Instant::now();
-        let r = symbolize_module(&path, &addrs, mode);
+        let started = Instant::now();
+        let result = symbolize_module(&path, &addrs, mode);
         let cap = Capability::detect(&path).ok();
-        let secs = t.elapsed().as_secs_f64();
-        match r.level {
+        let secs = started.elapsed().as_secs_f64();
+        match result.level {
             Level::Full => n_full += 1,
             Level::SymbolsOnly => n_sym += 1,
             Level::Raw => n_raw += 1,
         }
         addrs_total += addrs.len();
-        unresolved_total += r.unresolved;
-        let with_line = r
+        unresolved_total += result.unresolved;
+        let with_line = result
             .frames
             .iter()
-            .filter(|f| f.iter().any(|x| x.line.is_some()))
+            .filter(|frames| frames.iter().any(|x| x.line.is_some()))
             .count();
-        let inl = r.frames.iter().map(|f| f.len() - 1).sum::<usize>();
+        let inl = result
+            .frames
+            .iter()
+            .map(|frames| frames.len() - 1)
+            .sum::<usize>();
         println!(
             "{:<44.44} {:>7}  {:<12} {:>10} {:>8.3}s  {}{}",
             path.file_name()
-                .map(|n| n.to_string_lossy().to_string())
+                .map(|name| name.to_string_lossy().to_string())
                 .unwrap_or_default(),
             addrs.len(),
-            format!("{:?}", r.level),
-            r.unresolved,
+            format!("{:?}", result.level),
+            result.unresolved,
             secs,
-            if r.level == Level::Full {
+            if result.level == Level::Full {
                 format!("lines {with_line}, +{inl} inlined frames; ")
             } else {
                 String::new()
             },
-            r.notes.first().cloned().unwrap_or_else(|| cap
-                .map(|c| format!(
+            result.notes.first().cloned().unwrap_or_else(|| cap
+                .map(|capability| format!(
                     "dwarf: embedded={} separate={:?}",
-                    c.has_embedded_dwarf, c.separate_debug_file
+                    capability.has_embedded_dwarf, capability.separate_debug_file
                 ))
                 .unwrap_or_default()),
         );

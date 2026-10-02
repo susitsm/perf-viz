@@ -137,22 +137,22 @@ pub struct ReaderArgs {
 }
 
 impl ReaderArgs {
-    /// Put the given flags on top of `opts`.
-    pub fn apply(&self, opts: &mut load::Options) {
-        if let Some(v) = self.readers {
-            opts.readers = v as usize;
+    /// Put the given flags on top of `load_options`.
+    pub fn apply(&self, load_options: &mut load::Options) {
+        if let Some(value) = self.readers {
+            load_options.readers = value as usize;
         }
-        if let Some(v) = self.threads {
-            opts.workers = v as usize;
+        if let Some(value) = self.threads {
+            load_options.workers = value as usize;
         }
-        if let Some(v) = self.region_mb {
-            opts.region_mb = v;
+        if let Some(value) = self.region_mb {
+            load_options.region_mb = value;
         }
         if self.no_dwarf {
-            opts.dwarf = DwarfMode::Never;
+            load_options.dwarf = DwarfMode::Never;
         }
         if self.cold {
-            opts.cold = true;
+            load_options.cold = true;
         }
     }
 }
@@ -198,10 +198,10 @@ pub struct ScriptArgs {
 impl ScriptArgs {
     /// The loading-screen screenshot asked for with `--load-screenshot PNG SECS`, if any.
     pub fn load_screenshot(&self) -> Option<LoadScreenshot> {
-        let v = self.load_screenshot.as_ref()?;
+        let screenshot_args = self.load_screenshot.as_ref()?;
         Some(LoadScreenshot {
-            path: PathBuf::from(v.first()?),
-            after_secs: v.get(1)?.parse().unwrap_or(2.0),
+            path: PathBuf::from(screenshot_args.first()?),
+            after_secs: screenshot_args.get(1)?.parse().unwrap_or(2.0),
         })
     }
 
@@ -241,13 +241,13 @@ pub struct Cli {
     pub script: ScriptArgs,
 }
 
-fn parse_size(s: &str) -> Result<WindowSize, String> {
-    let (w, h) = s
+fn parse_size(text: &str) -> Result<WindowSize, String> {
+    let (width_text, height_text) = text
         .split_once(['x', 'X'])
         .ok_or("expected WIDTHxHEIGHT, e.g. 1500x900")?;
     let (width, height): (f32, f32) = (
-        w.trim().parse().map_err(|_| "bad width")?,
-        h.trim().parse().map_err(|_| "bad height")?,
+        width_text.trim().parse().map_err(|_| "bad width")?,
+        height_text.trim().parse().map_err(|_| "bad height")?,
     );
     if width < 200.0 || height < 150.0 {
         return Err("the window must be at least 200x150".into());
@@ -255,13 +255,13 @@ fn parse_size(s: &str) -> Result<WindowSize, String> {
     Ok(WindowSize { width, height })
 }
 
-fn parse_range(s: &str) -> Result<MsRange, String> {
-    let (a, b) = s
+fn parse_range(text: &str) -> Result<MsRange, String> {
+    let (start_text, end_text) = text
         .split_once(',')
         .ok_or("expected START,END in milliseconds")?;
     let (start_ms, end_ms): (f64, f64) = (
-        a.trim().parse().map_err(|_| "bad start")?,
-        b.trim().parse().map_err(|_| "bad end")?,
+        start_text.trim().parse().map_err(|_| "bad start")?,
+        end_text.trim().parse().map_err(|_| "bad end")?,
     );
     if end_ms <= start_ms {
         return Err("the end must be after the start".into());
@@ -270,8 +270,8 @@ fn parse_range(s: &str) -> Result<MsRange, String> {
 }
 
 #[cfg(any(test, feature = "scripted"))]
-fn floats(s: &str, n: usize) -> Result<Vec<f32>, String> {
-    let v: Vec<f32> = s
+fn floats(text: &str, count: usize) -> Result<Vec<f32>, String> {
+    let numbers: Vec<f32> = text
         .split(',')
         .map(|x| {
             x.trim()
@@ -279,61 +279,75 @@ fn floats(s: &str, n: usize) -> Result<Vec<f32>, String> {
                 .map_err(|_| format!("`{x}` is not a number"))
         })
         .collect::<Result<_, _>>()?;
-    if v.len() == n {
-        Ok(v)
+    if numbers.len() == count {
+        Ok(numbers)
     } else {
         Err(format!(
-            "expected {n} comma-separated numbers, got {}",
-            v.len()
+            "expected {count} comma-separated numbers, got {}",
+            numbers.len()
         ))
     }
 }
 
 #[cfg(any(test, feature = "scripted"))]
-fn parse_xy(s: &str) -> Result<Point, String> {
-    let v = floats(s, 2)?;
-    Ok(Point { x: v[0], y: v[1] })
+fn parse_xy(text: &str) -> Result<Point, String> {
+    let numbers = floats(text, 2)?;
+    Ok(Point {
+        x: numbers[0],
+        y: numbers[1],
+    })
 }
 
 #[cfg(any(test, feature = "scripted"))]
-fn parse_drag(s: &str) -> Result<DragPath, String> {
-    let v = floats(s, 4)?;
+fn parse_drag(text: &str) -> Result<DragPath, String> {
+    let numbers = floats(text, 4)?;
     Ok(DragPath {
-        from: Point { x: v[0], y: v[1] },
-        to: Point { x: v[2], y: v[3] },
+        from: Point {
+            x: numbers[0],
+            y: numbers[1],
+        },
+        to: Point {
+            x: numbers[2],
+            y: numbers[3],
+        },
     })
 }
 
 #[cfg(any(test, feature = "scripted"))]
 /// Merge the scripted flags into one list in the order they appeared (each flag's values keep their
 /// own order, and `indices_of` says where each one sat on the command line).
-fn steps_in_order(m: &ArgMatches) -> Vec<ScriptStep> {
+fn steps_in_order(matches: &ArgMatches) -> Vec<ScriptStep> {
     fn collect<T: Clone + Send + Sync + 'static>(
-        m: &ArgMatches,
+        matches: &ArgMatches,
         id: &str,
-        f: impl Fn(T) -> ScriptStep,
+        to_step: impl Fn(T) -> ScriptStep,
         out: &mut Vec<(usize, ScriptStep)>,
     ) {
-        if let (Some(vals), Some(idx)) = (m.get_many::<T>(id), m.indices_of(id)) {
-            out.extend(idx.zip(vals).map(|(i, v)| (i, f(v.clone()))));
+        if let (Some(vals), Some(index)) = (matches.get_many::<T>(id), matches.indices_of(id)) {
+            out.extend(
+                index
+                    .zip(vals)
+                    .map(|(i, value)| (i, to_step(value.clone()))),
+            );
         }
     }
-    let mut v = Vec::new();
-    collect::<Point>(m, "click", ScriptStep::Click, &mut v);
-    collect::<Point>(m, "hover", ScriptStep::Hover, &mut v);
-    collect::<DragPath>(m, "drag", ScriptStep::Drag, &mut v);
-    collect::<PathBuf>(m, "open", ScriptStep::Open, &mut v);
-    collect::<f64>(m, "pause", ScriptStep::Pause, &mut v);
-    if m.get_flag("tune_window") {
-        v.extend(
-            m.indices_of("tune_window")
+    let mut steps = Vec::new();
+    collect::<Point>(matches, "click", ScriptStep::Click, &mut steps);
+    collect::<Point>(matches, "hover", ScriptStep::Hover, &mut steps);
+    collect::<DragPath>(matches, "drag", ScriptStep::Drag, &mut steps);
+    collect::<PathBuf>(matches, "open", ScriptStep::Open, &mut steps);
+    collect::<f64>(matches, "pause", ScriptStep::Pause, &mut steps);
+    if matches.get_flag("tune_window") {
+        steps.extend(
+            matches
+                .indices_of("tune_window")
                 .into_iter()
                 .flatten()
                 .map(|i| (i, ScriptStep::TuneWindow)),
         );
     }
-    v.sort_by_key(|s| s.0);
-    v.into_iter().map(|s| s.1).collect()
+    steps.sort_by_key(|step| step.0);
+    steps.into_iter().map(|step| step.1).collect()
 }
 
 impl Cli {
@@ -354,12 +368,12 @@ impl Cli {
             .map(Self::from_matches)
     }
 
-    fn from_matches(m: clap::ArgMatches) -> Cli {
+    fn from_matches(matches: clap::ArgMatches) -> Cli {
         #[allow(unused_mut)]
-        let mut cli = Cli::from_arg_matches(&m).expect("clap parsed the arguments");
+        let mut cli = Cli::from_arg_matches(&matches).expect("clap parsed the arguments");
         #[cfg(any(test, feature = "scripted"))]
         {
-            cli.script.order = steps_in_order(&m);
+            cli.script.order = steps_in_order(&matches);
         }
         cli
     }
@@ -385,19 +399,19 @@ mod tests {
 
     #[test]
     fn no_arguments_means_the_start_screen() {
-        let c = parse(&[]);
+        let cli = parse(&[]);
         assert!(
-            c.file.is_none()
-                && c.show.view.is_none()
-                && c.show.cost.is_none()
-                && !c.reader.cold
-                && c.script.steps().is_empty()
+            cli.file.is_none()
+                && cli.show.view.is_none()
+                && cli.show.cost.is_none()
+                && !cli.reader.cold
+                && cli.script.steps().is_empty()
         );
     }
 
     #[test]
     fn a_file_and_the_initial_view_flags() {
-        let c = parse(&[
+        let cli = parse(&[
             "rec.data",
             "--view",
             "truncated",
@@ -418,9 +432,9 @@ mod tests {
             "--range",
             "10,250.5",
         ]);
-        assert_eq!(c.file, Some(PathBuf::from("rec.data")));
+        assert_eq!(cli.file, Some(PathBuf::from("rec.data")));
         assert_eq!(
-            (c.show.view, c.show.cost, c.theme, c.show.tab),
+            (cli.show.view, cli.show.cost, cli.theme, cli.show.tab),
             (
                 Some(View::Truncated),
                 Some(Cost::Samples),
@@ -429,7 +443,7 @@ mod tests {
             )
         );
         assert_eq!(
-            c.size,
+            cli.size,
             Some(WindowSize {
                 width: 1280.0,
                 height: 720.0
@@ -437,10 +451,10 @@ mod tests {
         );
         assert_eq!(
             (
-                c.show.process,
-                c.show.thread,
-                c.show.search.as_deref(),
-                c.show.range
+                cli.show.process,
+                cli.show.thread,
+                cli.show.search.as_deref(),
+                cli.show.range
             ),
             (
                 Some(42),
@@ -456,7 +470,7 @@ mod tests {
 
     #[test]
     fn reader_flags() {
-        let c = parse(&[
+        let cli = parse(&[
             "--readers",
             "4",
             "--threads",
@@ -466,9 +480,15 @@ mod tests {
             "--no-dwarf",
             "--cold",
         ]);
-        let r = &c.reader;
+        let reader = &cli.reader;
         assert_eq!(
-            (r.readers, r.threads, r.region_mb, r.no_dwarf, r.cold),
+            (
+                reader.readers,
+                reader.threads,
+                reader.region_mb,
+                reader.no_dwarf,
+                reader.cold
+            ),
             (Some(4), Some(8), Some(128), true, true)
         );
     }
@@ -476,10 +496,15 @@ mod tests {
     #[test]
     fn reader_flags_go_on_top_of_the_loader_defaults() {
         let defaults = load::Options::default();
-        let mut opts = load::Options::default();
-        parse(&[]).reader.apply(&mut opts);
+        let mut load_options = load::Options::default();
+        parse(&[]).reader.apply(&mut load_options);
         assert_eq!(
-            (opts.readers, opts.workers, opts.region_mb, opts.cold),
+            (
+                load_options.readers,
+                load_options.workers,
+                load_options.region_mb,
+                load_options.cold
+            ),
             (
                 defaults.readers,
                 defaults.workers,
@@ -498,14 +523,14 @@ mod tests {
             "--cold",
         ])
         .reader
-        .apply(&mut opts);
+        .apply(&mut load_options);
         assert_eq!(
             (
-                opts.readers,
-                opts.workers,
-                opts.region_mb,
-                opts.dwarf,
-                opts.cold
+                load_options.readers,
+                load_options.workers,
+                load_options.region_mb,
+                load_options.dwarf,
+                load_options.cold
             ),
             (5, 2, 64, DwarfMode::Never, true)
         );
@@ -527,12 +552,12 @@ mod tests {
 
     #[test]
     fn scripted_steps_keep_their_command_line_order() {
-        let c = parse(&[
+        let cli = parse(&[
             "--click", "1,2", "--pause", "3", "--open", "a.data", "--drag", "1,2,3,4", "--hover",
             "5,6", "--click", "7,8",
         ]);
         assert_eq!(
-            c.script.steps(),
+            cli.script.steps(),
             [
                 ScriptStep::Click(pt(1.0, 2.0)),
                 ScriptStep::Pause(3.0),

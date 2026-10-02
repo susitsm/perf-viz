@@ -50,11 +50,11 @@ impl Ctx {
         }
         let parse_infos = attrs
             .iter()
-            .map(|a| RecordParseInfo::new(&a.attr, endian))
+            .map(|attribute| RecordParseInfo::new(&attribute.attr, endian))
             .collect();
         let mut id_to_attr = FxHashMap::default();
-        for (i, a) in attrs.iter().enumerate() {
-            for &id in &a.event_ids {
+        for (i, attribute) in attrs.iter().enumerate() {
+            for &id in &attribute.event_ids {
                 id_to_attr.insert(id, i);
             }
         }
@@ -84,9 +84,9 @@ pub fn read_all(
     let ctx = Ctx::new(attrs, endian)?;
 
     // perf_file_header: magic[8] size attr_size attrs{off,size} data{off,size}
-    let u64_at = |o: usize| match endian {
-        Endianness::LittleEndian => LittleEndian::read_u64(&bytes[o..]),
-        Endianness::BigEndian => BigEndian::read_u64(&bytes[o..]),
+    let u64_at = |offset: usize| match endian {
+        Endianness::LittleEndian => LittleEndian::read_u64(&bytes[offset..]),
+        Endianness::BigEndian => BigEndian::read_u64(&bytes[offset..]),
     };
     let data_start = u64_at(40) as usize;
     let data_end = data_start + u64_at(48) as usize;
@@ -95,8 +95,8 @@ pub fn read_all(
     }
     let setup = t0.elapsed();
 
-    let t = Instant::now();
-    let populate_t = t.elapsed();
+    let started = Instant::now();
+    let populate_t = started.elapsed();
     let _ = populate;
     let data = &bytes[data_start..data_end];
 
@@ -108,10 +108,10 @@ pub fn read_all(
             &file, data_start, data, &ctx, threads, setup, populate_t, touch,
         )?,
     };
-    let t = Instant::now();
+    let started = Instant::now();
     drop(reader);
     drop(mmap); // munmap of everything the workers touched
-    timings.teardown = t.elapsed();
+    timings.teardown = started.elapsed();
     Ok((stats, timings))
 }
 
@@ -176,33 +176,36 @@ fn run<T: ByteOrder>(
     populate: Duration,
     touch: bool,
 ) -> Result<(Stats, Timings)> {
-    let t = Instant::now();
+    let started = Instant::now();
     let chunks = scan_chunks::<T>(file, data_start as u64, data.len() as u64)?;
-    let scan = t.elapsed();
+    let scan = started.elapsed();
 
-    let t = Instant::now();
+    let started = Instant::now();
     let next = AtomicUsize::new(0);
     let threads = threads.max(1).min(chunks.len().max(1));
     let mut total = Stats::default();
-    let results: Vec<Result<Stats>> = std::thread::scope(|s| {
+    let results: Vec<Result<Stats>> = std::thread::scope(|scope| {
         let handles: Vec<_> = (0..threads)
             .map(|_| {
-                s.spawn(|| -> Result<Stats> {
+                scope.spawn(|| -> Result<Stats> {
                     let mut stats = Stats::default();
                     loop {
                         let i = next.fetch_add(1, Ordering::Relaxed);
-                        let Some(&(a, b)) = chunks.get(i) else {
+                        let Some(&(start, end)) = chunks.get(i) else {
                             return Ok(stats);
                         };
-                        parse_chunk::<T>(&data[a..b], ctx, touch, &mut stats)?;
+                        parse_chunk::<T>(&data[start..end], ctx, touch, &mut stats)?;
                     }
                 })
             })
             .collect();
-        handles.into_iter().map(|h| h.join().unwrap()).collect()
+        handles
+            .into_iter()
+            .map(|handle| handle.join().unwrap())
+            .collect()
     });
-    for r in results {
-        total.merge(&r?);
+    for result in results {
+        total.merge(&result?);
     }
     Ok((
         total,
@@ -210,7 +213,7 @@ fn run<T: ByteOrder>(
             setup,
             populate,
             scan,
-            parse: t.elapsed(),
+            parse: started.elapsed(),
             teardown: Duration::ZERO,
         },
     ))
@@ -244,10 +247,14 @@ pub fn parse_chunk<T: ByteOrder>(
     touch: bool,
     stats: &mut Stats,
 ) -> Result<()> {
-    for_each_record::<T>(chunk, |r| {
-        stats.count(r.ty, r.size);
-        if RecordType(r.ty).is_builtin_type() {
-            stats.add_event(&ctx.raw_event::<T>(r.ty, r.misc, r.body).parse()?, touch);
+    for_each_record::<T>(chunk, |record| {
+        stats.count(record.ty, record.size);
+        if RecordType(record.ty).is_builtin_type() {
+            stats.add_event(
+                &ctx.raw_event::<T>(record.ty, record.misc, record.body)
+                    .parse()?,
+                touch,
+            );
         } // user records: nothing to parse in the benchmark
         Ok(())
     })

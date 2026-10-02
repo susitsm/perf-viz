@@ -64,16 +64,16 @@ pub struct Options {
 }
 
 /// Do these 8 bytes (the ones just before a return address) end with a call instruction?
-pub fn follows_call(b: &[u8]) -> bool {
-    let n = b.len();
-    let modrm_call = |i: usize| b[i] == 0xff && (b[i + 1] & 0x38) == 0x10; // FF /2
-    b[n - 5] == 0xe8
-        || modrm_call(n - 2)
-        || modrm_call(n - 3)
-        || modrm_call(n - 4)
-        || modrm_call(n - 6)
-        || modrm_call(n - 7)
-        || modrm_call(n - 8)
+pub fn follows_call(bytes: &[u8]) -> bool {
+    let length = bytes.len();
+    let modrm_call = |i: usize| bytes[i] == 0xff && (bytes[i + 1] & 0x38) == 0x10; // FF /2
+    bytes[length - 5] == 0xe8
+        || modrm_call(length - 2)
+        || modrm_call(length - 3)
+        || modrm_call(length - 4)
+        || modrm_call(length - 6)
+        || modrm_call(length - 7)
+        || modrm_call(length - 8)
 }
 
 /// A physical frame (module, static address, suspect-tail flag) whose logical frames are cached.
@@ -84,7 +84,11 @@ struct ChainKey {
     suspect: bool,
 }
 
-pub fn load_replay(path: &Path, opts: Options, progress: &mut dyn FnMut(&str)) -> Result<Profile> {
+pub fn load_replay(
+    path: &Path,
+    options: Options,
+    progress: &mut dyn FnMut(&str),
+) -> Result<Profile> {
     let mut stats = LoadStats::default();
     let cache = BinaryCache::default();
     let mut procs: HashMap<i32, Proc> = HashMap::new();
@@ -100,7 +104,7 @@ pub fn load_replay(path: &Path, opts: Options, progress: &mut dyn FnMut(&str)) -
 
     // ---- replay + unwind -------------------------------------------------------------------
     progress("replaying records and unwinding");
-    let t = Instant::now();
+    let started = Instant::now();
     let PerfFileReader {
         mut perf_file,
         mut record_iter,
@@ -110,63 +114,65 @@ pub fn load_replay(path: &Path, opts: Options, progress: &mut dyn FnMut(&str)) -
             continue;
         };
         match record.parse()? {
-            EventRecord::Mmap2(m) if m.protection & PROT_EXEC != 0 => {
-                let p = m.path.as_slice();
-                let Ok(p) = std::str::from_utf8(&p) else {
+            EventRecord::Mmap2(mmap) if mmap.protection & PROT_EXEC != 0 => {
+                let path = mmap.path.as_slice();
+                let Ok(path) = std::str::from_utf8(&path) else {
                     continue;
                 };
-                let p = p.trim_end_matches('\0');
-                if !crate::addrspace::is_file_backed(p) {
+                let path = path.trim_end_matches('\0');
+                if !crate::addrspace::is_file_backed(path) {
                     continue; // [vdso], //anon, [stack]...
                 }
-                let Some(bin) = cache.get(Path::new(p)) else {
+                let Some(bin) = cache.get(Path::new(path)) else {
                     continue;
                 };
-                let Some(bias) = bin.bias_for_mapping(m.address, m.page_offset, m.length) else {
+                let Some(bias) = bin.bias_for_mapping(mmap.address, mmap.page_offset, mmap.length)
+                else {
                     continue;
                 };
                 let next_id = module_ids.len() as u32;
-                let module = *module_ids.entry(PathBuf::from(p)).or_insert_with(|| {
-                    module_paths.push(PathBuf::from(p));
+                let module = *module_ids.entry(PathBuf::from(path)).or_insert_with(|| {
+                    module_paths.push(PathBuf::from(path));
                     next_id
                 });
                 cache_pid = i32::MIN; // this process's unwinder changes: the cache must not carry over
-                let (s, e) = (m.address, m.address + m.length);
-                let proc = procs.entry(m.pid).or_default();
+                let (start, end) = (mmap.address, mmap.address + mmap.length);
+                let proc = procs.entry(mmap.pid).or_default();
                 // Later mappings win: drop modules this one overlaps.
                 let unwinder = &mut proc.unwinder;
                 proc.mods.retain(|x| {
-                    let overlaps = x.start < e && s < x.end;
+                    let overlaps = x.start < end && start < x.end;
                     if overlaps {
                         unwinder.remove_module(x.start);
                     }
                     !overlaps
                 });
                 proc.unwinder.add_module(Module::new(
-                    p.to_string(),
-                    s..e,
+                    path.to_string(),
+                    start..end,
                     bias,
                     bin.section_info(),
                 ));
                 proc.mods.push(Mod {
-                    start: s,
-                    end: e,
+                    start,
+                    end,
                     bias,
                     bin,
                     module,
                 });
             }
-            EventRecord::Fork(f) if f.pid != f.ppid => {
-                let parent = procs.get(&f.ppid).cloned().unwrap_or_default();
-                procs.insert(f.pid, parent);
+            EventRecord::Fork(fork) if fork.pid != fork.ppid => {
+                let parent = procs.get(&fork.ppid).cloned().unwrap_or_default();
+                procs.insert(fork.pid, parent);
             }
-            EventRecord::Comm(c) if c.is_execve => {
+            EventRecord::Comm(comm) if comm.is_execve => {
                 cache_pid = i32::MIN;
-                procs.insert(c.pid, Proc::default());
+                procs.insert(comm.pid, Proc::default());
             }
-            EventRecord::Sample(s) => {
+            EventRecord::Sample(sample) => {
                 stats.samples += 1;
-                let (Some(regs), Some((stack, dyn_size))) = (&s.user_regs, &s.user_stack) else {
+                let (Some(regs), Some((stack, dyn_size))) = (&sample.user_regs, &sample.user_stack)
+                else {
                     stats.samples_without_stack += 1;
                     continue;
                 };
@@ -184,17 +190,17 @@ pub fn load_replay(path: &Path, opts: Options, progress: &mut dyn FnMut(&str)) -
                     let off = addr.checked_sub(sp).ok_or(())? as usize;
                     stack
                         .get(off..off + 8)
-                        .map(|b| u64::from_le_bytes(b.try_into().unwrap()))
+                        .map(|bytes| u64::from_le_bytes(bytes.try_into().unwrap()))
                         .filter(|_| off + 8 <= valid)
                         .ok_or(())
                 };
 
-                if cache_pid != s.pid.unwrap_or(-1) {
+                if cache_pid != sample.pid.unwrap_or(-1) {
                     unwind_cache = CacheX86_64::<_>::new();
-                    cache_pid = s.pid.unwrap_or(-1);
+                    cache_pid = sample.pid.unwrap_or(-1);
                 }
                 let empty = Proc::default();
-                let proc = s.pid.and_then(|p| procs.get(&p)).unwrap_or(&empty);
+                let proc = sample.pid.and_then(|pid| procs.get(&pid)).unwrap_or(&empty);
                 // Leaf ip, then return addresses; `lookup` is the address used to find the frame's
                 // function (return address minus one, so a call at the end of a function stays in it).
                 let mut lookup: Vec<u64> = vec![ip];
@@ -208,21 +214,26 @@ pub fn load_replay(path: &Path, opts: Options, progress: &mut dyn FnMut(&str)) -
                 loop {
                     match iter.next() {
                         Ok(Some(FrameAddress::InstructionPointer(_))) => {}
-                        Ok(Some(FrameAddress::ReturnAddress(a))) => {
-                            lookup.push(a.get() - 1);
-                            ras.push(a.get());
+                        Ok(Some(FrameAddress::ReturnAddress(address))) => {
+                            lookup.push(address.get() - 1);
+                            ras.push(address.get());
                         }
                         Ok(None) | Err(_) => break,
                     }
                 }
 
                 // Validate: a genuine return address is in a known module and follows a call.
-                let find = |a: u64| proc.mods.iter().find(|m| a >= m.start && a < m.end);
+                let find = |address: u64| {
+                    proc.mods
+                        .iter()
+                        .find(|module| address >= module.start && address < module.end)
+                };
                 let mut suspect_from = usize::MAX;
                 for (k, &ra) in ras.iter().enumerate() {
-                    let ok = find(ra).is_some_and(|m| {
-                        m.bin
-                            .bytes_at_svma(ra.wrapping_sub(m.bias).wrapping_sub(8), 8)
+                    let ok = find(ra).is_some_and(|module| {
+                        module
+                            .bin
+                            .bytes_at_svma(ra.wrapping_sub(module.bias).wrapping_sub(8), 8)
                             .is_some_and(follows_call)
                     });
                     if !ok {
@@ -231,12 +242,12 @@ pub fn load_replay(path: &Path, opts: Options, progress: &mut dyn FnMut(&str)) -
                     }
                 }
                 let before = stacks.len();
-                for (i, &a) in lookup.iter().enumerate() {
+                for (i, &address) in lookup.iter().enumerate() {
                     let suspect = i >= suspect_from;
-                    match find(a) {
-                        Some(m) => stacks.push(Phys {
-                            module: m.module,
-                            svma: a.wrapping_sub(m.bias),
+                    match find(address) {
+                        Some(module) => stacks.push(Phys {
+                            module: module.module,
+                            svma: address.wrapping_sub(module.bias),
                             suspect,
                         }),
                         None => stacks.push(Phys {
@@ -257,40 +268,43 @@ pub fn load_replay(path: &Path, opts: Options, progress: &mut dyn FnMut(&str)) -
             _ => {}
         }
     }
-    stats.secs_replay_unwind = t.elapsed().as_secs_f64();
+    stats.secs_replay_unwind = started.elapsed().as_secs_f64();
 
     // ---- symbolize unique (module, address) pairs, one module per task ------------------------
     progress("symbolizing");
-    let t = Instant::now();
+    let started = Instant::now();
     let mut per_module: HashMap<u32, BTreeSet<u64>> = HashMap::new();
-    for p in &stacks {
-        if p.module != NO_MODULE {
-            per_module.entry(p.module).or_default().insert(p.svma);
+    for physical in &stacks {
+        if physical.module != NO_MODULE {
+            per_module
+                .entry(physical.module)
+                .or_default()
+                .insert(physical.svma);
         }
     }
     let tasks: Vec<ModuleAddrs> = per_module
         .into_iter()
-        .map(|(module, s)| ModuleAddrs {
+        .map(|(module, addresses)| ModuleAddrs {
             module,
-            addrs: s.into_iter().collect(),
+            addrs: addresses.into_iter().collect(),
         })
         .collect();
-    stats.unique_addresses = tasks.iter().map(|t| t.addrs.len()).sum();
-    let results = symbolize_many(&module_paths, tasks, opts.dwarf);
+    stats.unique_addresses = tasks.iter().map(|task| task.addrs.len()).sum();
+    let results = symbolize_many(&module_paths, tasks, options.dwarf);
     for syms in results.values() {
-        let r = &syms.result;
-        match r.level {
+        let result = &syms.result;
+        match result.level {
             Level::Full => stats.modules_full += 1,
             Level::SymbolsOnly => stats.modules_symbols_only += 1,
             Level::Raw => stats.modules_raw += 1,
         }
-        stats.unresolved_addresses += r.unresolved;
+        stats.unresolved_addresses += result.unresolved;
     }
-    stats.secs_symbolize = t.elapsed().as_secs_f64();
+    stats.secs_symbolize = started.elapsed().as_secs_f64();
 
     // ---- build tries ------------------------------------------------------------------------
     progress("building call trees");
-    let t = Instant::now();
+    let started = Instant::now();
     let mut frames: Vec<FrameInfo> = Vec::new();
     let mut frame_ids: FxHashMap<FrameKey, u32> = FxHashMap::default();
     let mut intern = |lf: &LogicalFrame, module: u32, suspect: bool| -> u32 {
@@ -323,33 +337,33 @@ pub fn load_replay(path: &Path, opts: Options, progress: &mut dyn FnMut(&str)) -
     let (mut full, mut truncated) = (TrieBuilder::default(), TrieBuilder::default());
     let mut path_full: Vec<u32> = Vec::new();
     let mut path_trunc: Vec<u32> = Vec::new();
-    for w in offsets.windows(2) {
-        let sample = &stacks[w[0] as usize..w[1] as usize];
+    for pair in offsets.windows(2) {
+        let sample = &stacks[pair[0] as usize..pair[1] as usize];
         path_full.clear();
         path_trunc.clear();
-        for p in sample.iter().rev() {
+        for physical in sample.iter().rev() {
             let key = ChainKey {
-                module: p.module,
-                svma: p.svma,
-                suspect: p.suspect,
+                module: physical.module,
+                svma: physical.svma,
+                suspect: physical.suspect,
             };
             if !chains.contains_key(&key) {
-                let chain: Vec<u32> = if p.module == NO_MODULE {
-                    vec![intern(&unmapped, NO_MODULE, p.suspect)]
+                let chain: Vec<u32> = if physical.module == NO_MODULE {
+                    vec![intern(&unmapped, NO_MODULE, physical.suspect)]
                 } else {
-                    results[&p.module]
-                        .frames_of(p.svma)
+                    results[&physical.module]
+                        .frames_of(physical.svma)
                         .iter()
-                        .map(|lf| intern(lf, p.module, p.suspect))
+                        .map(|lf| intern(lf, physical.module, physical.suspect))
                         .collect()
                 };
                 chains.insert(key, chain);
             }
             // The chain is innermost-first; the path is root-first, so walk it backwards.
-            for &f in chains[&key].iter().rev() {
-                path_full.push(f);
-                if !p.suspect {
-                    path_trunc.push(f);
+            for &frame in chains[&key].iter().rev() {
+                path_full.push(frame);
+                if !physical.suspect {
+                    path_trunc.push(frame);
                 }
             }
         }
@@ -357,11 +371,11 @@ pub fn load_replay(path: &Path, opts: Options, progress: &mut dyn FnMut(&str)) -
         truncated.insert(path_trunc.iter().copied());
     }
     let (full, truncated) = (full.finish(), truncated.finish());
-    stats.secs_build = t.elapsed().as_secs_f64();
+    stats.secs_build = started.elapsed().as_secs_f64();
 
     let modules = module_paths
         .iter()
-        .map(|p| p.to_string_lossy().to_string())
+        .map(|path| path.to_string_lossy().to_string())
         .collect();
     Ok(Profile {
         modules,

@@ -76,20 +76,20 @@ fn viewport_id() -> egui::ViewportId {
     egui::ViewportId::from_hash_of("perf-viz tuner")
 }
 
-fn describe(e: &Event) -> String {
-    match e {
-        Event::Info(s) => s.clone(),
+fn describe(event: &Event) -> String {
+    match event {
+        Event::Info(message) => message.clone(),
         Event::Probe { secs, gbps } => format!("  {secs:.0} s: {gbps:.2} GB/s"),
         Event::Trial {
             what,
-            settings: s,
+            settings,
             gbps,
             long,
         } => format!(
             "  {what}: {} readers, {} MiB regions, {} open: {gbps:.2} GB/s{}",
-            s.readers,
-            s.region_mb,
-            s.in_flight,
+            settings.readers,
+            settings.region_mb,
+            settings.in_flight,
             if *long { " (full length)" } else { "" }
         ),
     }
@@ -156,8 +156,8 @@ impl Tuner {
             .or_else(|| {
                 self.source
                     .as_ref()
-                    .and_then(|p| p.canonicalize().ok())
-                    .and_then(|p| p.parent().map(Path::to_path_buf))
+                    .and_then(|path| path.canonicalize().ok())
+                    .and_then(|path| path.parent().map(Path::to_path_buf))
             })
             .or_else(|| std::env::var_os("HOME").map(PathBuf::from))
             .unwrap_or_else(|| PathBuf::from("."))
@@ -183,19 +183,19 @@ impl Tuner {
         };
         let (shared, cancel, ctx) = (self.shared.clone(), self.cancel.clone(), ctx.clone());
         std::thread::spawn(move || {
-            let say = |s: String| {
-                shared.lock().unwrap().lines.push(s);
+            let say = |text: String| {
+                shared.lock().unwrap().lines.push(text);
                 ctx.request_repaint();
             };
             #[cfg_attr(not(any(test, feature = "scripted")), allow(unused_mut))]
-            let mut opts = tune::Options::default();
+            let mut load_options = tune::Options::default();
             // A testing aid: scale every duration (0.1 makes a run about ten times shorter).
             #[cfg(any(test, feature = "scripted"))]
-            if let Some(f) = std::env::var("PERF_VIZ_TUNE_SCALE")
+            if let Some(factor) = std::env::var("PERF_VIZ_TUNE_SCALE")
                 .ok()
-                .and_then(|v| v.parse::<f64>().ok())
+                .and_then(|text| text.parse::<f64>().ok())
             {
-                opts = opts.scaled(f);
+                load_options = load_options.scaled(factor);
             }
             // Dropped at the end of the thread: a generated recording is deleted however the run ends.
             let mut generated: Option<synth::Temp> = None;
@@ -220,22 +220,22 @@ impl Tuner {
                             say(format!("  {:.1} GB written", done as f64 / 1e9))
                         })
                         .map(|_| path)
-                        .map_err(|e| e.to_string())
+                        .map_err(|error| error.to_string())
                     }
                 }
             } else {
                 source.ok_or_else(|| "no recording chosen".to_string())
             };
-            let r = target.and_then(|path| tune::tune(&path, &opts, &cancel, &mut |e| say(describe(&e))).map_err(|e| e.to_string())).map(|mut report| {
+            let outcome = target.and_then(|path| tune::tune(&path, &load_options, &cancel, &mut |event| say(describe(&event))).map_err(|error| error.to_string())).map(|mut report| {
                 if synthetic {
                     report.notes.push("tuned on a generated recording; a real one may behave a little differently".into());
                 }
                 report
             });
             drop(generated);
-            let mut s = shared.lock().unwrap();
-            s.running = false;
-            s.result = Some(r);
+            let mut shared_state = shared.lock().unwrap();
+            shared_state.running = false;
+            shared_state.result = Some(outcome);
             ctx.request_repaint();
         });
     }
@@ -244,45 +244,45 @@ impl Tuner {
         if self.dir_picker.is_some() {
             return;
         }
-        let (tx, rx) = mpsc::channel();
+        let (sender, receiver) = mpsc::channel();
         let ctx = ctx.clone();
         std::thread::spawn(move || {
-            let _ = tx.send(
+            let _ = sender.send(
                 rfd::FileDialog::new()
                     .set_title("Folder for the generated recording (on the disk to tune for)")
                     .pick_folder(),
             );
             ctx.request_repaint();
         });
-        self.dir_picker = Some(rx);
+        self.dir_picker = Some(receiver);
     }
 
     fn choose_file(&mut self, ctx: &egui::Context) {
         if self.picker.is_some() {
             return;
         }
-        let (tx, rx) = mpsc::channel();
+        let (sender, receiver) = mpsc::channel();
         let ctx = ctx.clone();
         std::thread::spawn(move || {
-            let _ = tx.send(
+            let _ = sender.send(
                 rfd::FileDialog::new()
                     .set_title("Choose a perf.data file to tune with")
                     .pick_file(),
             );
             ctx.request_repaint();
         });
-        self.picker = Some(rx);
+        self.picker = Some(receiver);
     }
 
     /// Draw the window if it is open. Returns the settings when "Apply, save and close" is clicked.
     pub fn show(&mut self, ctx: &egui::Context) -> Outcome {
         let mut out = Outcome::default();
-        if let Some(rx) = &self.picker {
-            match rx.try_recv() {
-                Ok(p) => {
+        if let Some(receiver) = &self.picker {
+            match receiver.try_recv() {
+                Ok(picked) => {
                     self.picker = None;
-                    if p.is_some() {
-                        self.source = p;
+                    if picked.is_some() {
+                        self.source = picked;
                         self.shared.lock().unwrap().result = None;
                         self.settled = false;
                     }
@@ -291,12 +291,12 @@ impl Tuner {
                 Err(_) => self.picker = None,
             }
         }
-        if let Some(rx) = &self.dir_picker {
-            match rx.try_recv() {
-                Ok(p) => {
+        if let Some(receiver) = &self.dir_picker {
+            match receiver.try_recv() {
+                Ok(picked) => {
                     self.dir_picker = None;
-                    if p.is_some() {
-                        self.synth_dir = p;
+                    if picked.is_some() {
+                        self.synth_dir = picked;
                     }
                 }
                 Err(mpsc::TryRecvError::Empty) => {}
@@ -368,7 +368,7 @@ impl Tuner {
             } else {
                 ui.horizontal(|ui| {
                     ui.label("Recording:");
-                    ui.label(RichText::new(self.source.as_ref().map_or("(none chosen)".to_string(), |p| p.display().to_string())).strong());
+                    ui.label(RichText::new(self.source.as_ref().map_or("(none chosen)".to_string(), |path| path.display().to_string())).strong());
                     if ui.add_enabled(!running && self.picker.is_none(), egui::Button::new("Choose…")).clicked() {
                         self.choose_file(ctx);
                     }
@@ -385,41 +385,41 @@ impl Tuner {
                 }
             });
             ui.add_space(4.0);
-            let s = self.shared.lock().unwrap();
-            if !s.lines.is_empty() {
+            let shared_state = self.shared.lock().unwrap();
+            if !shared_state.lines.is_empty() {
                 egui::ScrollArea::vertical().max_height(260.0).stick_to_bottom(true).auto_shrink([false, true]).show(ui, |ui| {
-                    for l in &s.lines {
-                        ui.label(RichText::new(l).monospace().size(12.0));
+                    for line in &shared_state.lines {
+                        ui.label(RichText::new(line).monospace().size(12.0));
                     }
                 });
             }
-            match &s.result {
-                Some(Ok(r)) => {
+            match &shared_state.result {
+                Some(Ok(report)) => {
                     ui.separator();
-                    ui.label(format!("Disk: {:.2} GB/s sustained (first second {:.2} GB/s). With the best settings the reader does {:.2} GB/s on a {:.0} GB read{}.", r.sustained_gbps, r.burst_gbps, r.best_gbps, r.trial_bytes as f64 / 1e9, {
+                    ui.label(format!("Disk: {:.2} GB/s sustained (first second {:.2} GB/s). With the best settings the reader does {:.2} GB/s on a {:.0} GB read{}.", report.sustained_gbps, report.burst_gbps, report.best_gbps, report.trial_bytes as f64 / 1e9, {
                         // Only when it makes sense: a read that is partly a fast burst can beat the sustained figure.
-                        let share = r.best_gbps / r.sustained_gbps.max(1e-9);
+                        let share = report.best_gbps / report.sustained_gbps.max(1e-9);
                         if share <= 1.05 { format!(" ({:.0}% of the disk)", 100.0 * share) } else { String::new() }
                     }));
-                    if let Some(d) = r.default_gbps {
-                        ui.label(format!("The built-in defaults do {d:.2} GB/s on the same read."));
+                    if let Some(default_gbps) = report.default_gbps {
+                        ui.label(format!("The built-in defaults do {default_gbps:.2} GB/s on the same read."));
                     }
-                    ui.label(RichText::new(format!("Best: {} readers, {} MiB regions, {} regions open (about {} MiB of memory)", r.best.readers, r.best.region_mb, r.best.in_flight, r.best.memory_mb())).strong());
-                    for n in &r.notes {
-                        ui.colored_label(pal.warning(), n);
+                    ui.label(RichText::new(format!("Best: {} readers, {} MiB regions, {} regions open (about {} MiB of memory)", report.best.readers, report.best.region_mb, report.best.in_flight, report.best.memory_mb())).strong());
+                    for note in &report.notes {
+                        ui.colored_label(pal.warning(), note);
                     }
                     ui.weak("This tunes reading only. Parsing and unwinding threads and DWARF depend on the CPU work of a real load and are left alone.");
                     if self.settled && saved_before {
                         ui.weak("Saved.");
                     } else if ui.button("Apply, save and close").on_hover_text("Saves these in the [reader] table of the config file (used the next time a file is opened) and closes this window").clicked() {
-                        out.apply = Some(r.best);
+                        out.apply = Some(report.best);
                         self.settled = true;
                         close_after_apply = true;
                     }
                 }
-                Some(Err(e)) => {
+                Some(Err(message)) => {
                     ui.separator();
-                    ui.colored_label(pal.suspect(), if e == "cancelled" { "Cancelled".to_string() } else { format!("Tuning failed: {e}") });
+                    ui.colored_label(pal.suspect(), if message == "cancelled" { "Cancelled".to_string() } else { format!("Tuning failed: {message}") });
                 }
                 None => {}
             }
@@ -456,17 +456,17 @@ impl Tuner {
     fn confirm_ui(&mut self, ctx: &egui::Context, out: &mut Outcome) {
         if let Some(ask) = self.confirm.take() {
             let best = match &self.shared.lock().unwrap().result {
-                Some(Ok(r)) => Some(r.best),
+                Some(Ok(report)) => Some(report.best),
                 _ => None,
             };
             let mut answer: Option<Answer> = None;
             egui::Modal::new(egui::Id::new("tuner_confirm")).show(ctx, |ui| {
                 ui.set_width(380.0);
                 ui.heading("Save the tuning results?");
-                if let Some(b) = best {
+                if let Some(best_settings) = best {
                     ui.label(format!(
                         "Best settings found: {} readers, {} MiB regions, {} regions open.",
-                        b.readers, b.region_mb, b.in_flight
+                        best_settings.readers, best_settings.region_mb, best_settings.in_flight
                     ));
                 }
                 ui.label(match ask {
@@ -496,8 +496,8 @@ impl Tuner {
             match answer {
                 None => self.confirm = Some(ask),
                 Some(Answer::Cancel) => {}
-                Some(a) => {
-                    if matches!(a, Answer::Save) {
+                Some(answer) => {
+                    if matches!(answer, Answer::Save) {
                         out.apply = best;
                     }
                     self.settled = true;
@@ -507,7 +507,7 @@ impl Tuner {
                             self.open = false;
                             out.quit = true;
                         }
-                        Ask::Open(p) => out.open_file = Some(p),
+                        Ask::Open(path) => out.open_file = Some(path),
                     }
                 }
             }

@@ -35,20 +35,20 @@ impl Rng {
 }
 
 fn header(data_len: u64) -> [u8; HEADER_LEN] {
-    let mut h = [0u8; HEADER_LEN];
-    h[..8].copy_from_slice(b"PERFILE2");
-    LittleEndian::write_u64(&mut h[8..], HEADER_LEN as u64); // header size
-    LittleEndian::write_u64(&mut h[40..], HEADER_LEN as u64); // data offset
-    LittleEndian::write_u64(&mut h[48..], data_len);
-    h
+    let mut header = [0u8; HEADER_LEN];
+    header[..8].copy_from_slice(b"PERFILE2");
+    LittleEndian::write_u64(&mut header[8..], HEADER_LEN as u64); // header size
+    LittleEndian::write_u64(&mut header[40..], HEADER_LEN as u64); // data offset
+    LittleEndian::write_u64(&mut header[48..], data_len);
+    header
 }
 
 /// Bytes available to an ordinary user on the file system holding `dir`.
 pub fn free_bytes(dir: &Path) -> Option<u64> {
-    let c = std::ffi::CString::new(dir.as_os_str().as_encoded_bytes()).ok()?;
-    let mut s: libc::statvfs = unsafe { std::mem::zeroed() };
-    (unsafe { libc::statvfs(c.as_ptr(), &mut s) } == 0)
-        .then(|| s.f_bavail as u64 * s.f_frsize as u64)
+    let c_path = std::ffi::CString::new(dir.as_os_str().as_encoded_bytes()).ok()?;
+    let mut filesystem: libc::statvfs = unsafe { std::mem::zeroed() };
+    (unsafe { libc::statvfs(c_path.as_ptr(), &mut filesystem) } == 0)
+        .then(|| filesystem.f_bavail as u64 * filesystem.f_frsize as u64)
 }
 
 /// Write a synthetic recording of about `bytes` bytes of records to `path`. Returns the length of the
@@ -88,10 +88,10 @@ pub fn write(
         len += size as u64;
         since_round += size as u64;
         if since_round >= ROUND_EVERY {
-            let mut m = [0u8; 8];
-            LittleEndian::write_u32(&mut m[0..], PERF_RECORD_FINISHED_ROUND);
-            LittleEndian::write_u16(&mut m[6..], 8);
-            out.write_all(&m)?;
+            let mut marker = [0u8; 8];
+            LittleEndian::write_u32(&mut marker[0..], PERF_RECORD_FINISHED_ROUND);
+            LittleEndian::write_u16(&mut marker[6..], 8);
+            out.write_all(&marker)?;
             len += 8;
             since_round = 0;
         }
@@ -107,14 +107,14 @@ pub fn write(
         }
     }
     out.flush()?;
-    let mut f = out.into_inner().map_err(|e| e.into_error())?;
-    f.seek(SeekFrom::Start(0))?;
-    f.write_all(&header(len))?;
-    f.sync_all()?;
+    let mut file = out.into_inner().map_err(|error| error.into_error())?;
+    file.seek(SeekFrom::Start(0))?;
+    file.write_all(&header(len))?;
+    file.sync_all()?;
     // Just written, the file sits in the page cache; a read test must start from the disk.
     unsafe {
         libc::posix_fadvise(
-            std::os::fd::AsRawFd::as_raw_fd(&f),
+            std::os::fd::AsRawFd::as_raw_fd(&file),
             0,
             0,
             libc::POSIX_FADV_DONTNEED,
@@ -135,18 +135,18 @@ pub fn remove_stale(dir: &Path) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };
-    for e in entries.flatten() {
-        let name = e.file_name();
+    for entry in entries.flatten() {
+        let name = entry.file_name();
         let Some(pid) = name
             .to_str()
-            .and_then(|n| n.strip_prefix(TEMP_PREFIX))
-            .and_then(|n| n.strip_suffix(".data"))
-            .and_then(|n| n.parse::<u32>().ok())
+            .and_then(|name| name.strip_prefix(TEMP_PREFIX))
+            .and_then(|name| name.strip_suffix(".data"))
+            .and_then(|name| name.parse::<u32>().ok())
         else {
             continue;
         };
         if !Path::new(&format!("/proc/{pid}")).exists() {
-            let _ = std::fs::remove_file(e.path());
+            let _ = std::fs::remove_file(entry.path());
         }
     }
 }
@@ -171,16 +171,16 @@ mod tests {
 
     #[test]
     fn the_file_is_a_valid_chain_of_records_that_ends_on_a_boundary() {
-        let t = temp("a");
-        let len = write(&t.0, 40 << 20, &AtomicBool::new(false), |_| {}).unwrap();
+        let recording = temp("a");
+        let len = write(&recording.0, 40 << 20, &AtomicBool::new(false), |_| {}).unwrap();
         assert!(len <= 40 << 20 && len > 30 << 20, "{len}");
-        let (file, sec) = split::open(&t.0).unwrap();
-        assert_eq!((sec.start, sec.len), (HEADER_LEN as u64, len));
-        let mut buf = vec![0u8; sec.len as usize];
-        std::os::unix::fs::FileExt::read_exact_at(&file, &mut buf, sec.start).unwrap();
+        let (file, section) = split::open(&recording.0).unwrap();
+        assert_eq!((section.start, section.len), (HEADER_LEN as u64, len));
+        let mut buffer = vec![0u8; section.len as usize];
+        std::os::unix::fs::FileExt::read_exact_at(&file, &mut buffer, section.start).unwrap();
         let (mut samples, mut other) = (0, 0);
-        records::for_each_record::<LittleEndian>(&buf, |r| {
-            if r.ty == PERF_RECORD_SAMPLE {
+        records::for_each_record::<LittleEndian>(&buffer, |record| {
+            if record.ty == PERF_RECORD_SAMPLE {
                 samples += 1
             } else {
                 other += 1
@@ -196,35 +196,35 @@ mod tests {
 
     #[test]
     fn the_anchor_finder_and_the_pipeline_can_read_it() {
-        let t = temp("b");
-        let len = write(&t.0, 64 << 20, &AtomicBool::new(false), |_| {}).unwrap();
-        let (file, sec) = split::open(&t.0).unwrap();
-        let bounds = crate::anchor::plan_regions(&file, &sec, 4).unwrap();
+        let recording = temp("b");
+        let len = write(&recording.0, 64 << 20, &AtomicBool::new(false), |_| {}).unwrap();
+        let (file, section) = split::open(&recording.0).unwrap();
+        let bounds = crate::anchor::plan_regions(&file, &section, 4).unwrap();
         assert_eq!((bounds[0], *bounds.last().unwrap()), (0, len));
         assert!(bounds.len() >= 3, "{bounds:?}");
     }
 
     #[test]
     fn payloads_are_not_compressible() {
-        let t = temp("c");
-        write(&t.0, 4 << 20, &AtomicBool::new(false), |_| {}).unwrap();
-        let data = std::fs::read(&t.0).unwrap();
+        let recording = temp("c");
+        write(&recording.0, 4 << 20, &AtomicBool::new(false), |_| {}).unwrap();
+        let data = std::fs::read(&recording.0).unwrap();
         let mut seen = [false; 256];
         data[1000..9000]
             .iter()
-            .for_each(|&b| seen[b as usize] = true);
+            .for_each(|&byte| seen[byte as usize] = true);
         assert!(
-            seen.iter().filter(|&&s| s).count() > 200,
+            seen.iter().filter(|&&seen_byte| seen_byte).count() > 200,
             "bytes are not varied enough"
         );
     }
 
     #[test]
     fn a_write_can_be_cancelled_and_free_space_is_reported() {
-        let t = temp("e");
-        let err = write(&t.0, 600 << 20, &AtomicBool::new(true), |_| {}).unwrap_err();
+        let recording = temp("e");
+        let err = write(&recording.0, 600 << 20, &AtomicBool::new(true), |_| {}).unwrap_err();
         assert_eq!(err.to_string(), "cancelled");
-        assert!(free_bytes(&std::env::temp_dir()).is_some_and(|b| b > 0));
+        assert!(free_bytes(&std::env::temp_dir()).is_some_and(|bytes| bytes > 0));
         assert_eq!(free_bytes(Path::new("/nonexistent-dir-for-test")), None);
     }
 
@@ -237,8 +237,8 @@ mod tests {
             temp_path(&dir),
             dir.join("keep.data"),
         );
-        for f in [&dead, &mine, &other] {
-            std::fs::write(f, b"x").unwrap();
+        for path in [&dead, &mine, &other] {
+            std::fs::write(path, b"x").unwrap();
         }
         remove_stale(&dir);
         assert!(!dead.exists() && mine.exists() && other.exists());
@@ -248,10 +248,10 @@ mod tests {
     #[test]
     fn the_temp_file_is_removed_on_drop() {
         let path = {
-            let t = temp("d");
-            write(&t.0, 1 << 20, &AtomicBool::new(false), |_| {}).unwrap();
-            assert!(t.0.exists());
-            t.0.clone()
+            let recording = temp("d");
+            write(&recording.0, 1 << 20, &AtomicBool::new(false), |_| {}).unwrap();
+            assert!(recording.0.exists());
+            recording.0.clone()
         };
         assert!(!path.exists());
     }

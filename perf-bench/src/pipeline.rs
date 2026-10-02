@@ -55,7 +55,7 @@ pub struct Metrics {
 }
 
 struct Unit {
-    buf: Vec<u8>,
+    buffer: Vec<u8>,
     /// Offset in the file (not the data section) of the first byte, and valid length.
     file_off: u64,
     len: usize,
@@ -74,23 +74,28 @@ fn evict_range(fd: i32, off: u64, len: usize) {
 pub struct BoundaryMismatch(pub String);
 
 impl std::fmt::Display for BoundaryMismatch {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "region boundary mismatch: {}", self.0)
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "region boundary mismatch: {}", self.0)
     }
 }
 impl std::error::Error for BoundaryMismatch {}
 
 /// Run the pipeline with a single reader over the whole data section. See [`run_regions`].
-pub fn run<S, W>(file: &File, sec: &DataSection, cfg: Config, work: W) -> Result<(Vec<S>, Metrics)>
+pub fn run<S, W>(
+    file: &File,
+    section: &DataSection,
+    config: Config,
+    work: W,
+) -> Result<(Vec<S>, Metrics)>
 where
     S: Default + Send,
     W: Fn(&mut S, &[u8]) -> Result<()> + Sync,
 {
-    run_regions(file, None, sec, &[0, sec.len], cfg, work)
+    run_regions(file, None, section, &[0, section.len], config, work)
 }
 
 /// Run the pipeline over the regions `[bounds[i], bounds[i+1])` of the data section
-/// (`bounds` strictly increasing, from 0 to `sec.len`). Up to `cfg.readers` reader
+/// (`bounds` strictly increasing, from 0 to `section.len`). Up to `cfg.readers` reader
 /// threads take regions from a shared counter; with more than one reader each opens
 /// `path` itself, because the kernel's readahead state is per open file.
 ///
@@ -105,54 +110,54 @@ where
 pub fn run_regions<S, W>(
     file: &File,
     path: Option<&Path>,
-    sec: &DataSection,
+    section: &DataSection,
     bounds: &[u64],
-    cfg: Config,
+    config: Config,
     work: W,
 ) -> Result<(Vec<S>, Metrics)>
 where
     S: Default + Send,
     W: Fn(&mut S, &[u8]) -> Result<()> + Sync,
 {
-    assert!(bounds.len() >= 2 && bounds[0] == 0 && *bounds.last().unwrap() == sec.len);
+    assert!(bounds.len() >= 2 && bounds[0] == 0 && *bounds.last().unwrap() == section.len);
     assert!(
-        bounds.windows(2).all(|w| w[0] < w[1]),
+        bounds.windows(2).all(|pair| pair[0] < pair[1]),
         "bounds must be strictly increasing"
     );
     let regions = bounds.len() - 1;
     let nreaders = if path.is_some() {
-        cfg.readers.clamp(1, regions)
+        config.readers.clamp(1, regions)
     } else {
         1
     };
 
-    let (free_tx, free_rx) = bounded::<Vec<u8>>(cfg.buffers);
-    for _ in 0..cfg.buffers {
-        free_tx.send(vec![0u8; cfg.block]).unwrap();
+    let (free_tx, free_rx) = bounded::<Vec<u8>>(config.buffers);
+    for _ in 0..config.buffers {
+        free_tx.send(vec![0u8; config.block]).unwrap();
     }
     let (work_tx, work_rx) = unbounded::<Unit>();
     let fd = file.as_raw_fd();
     let (next_region, abort) = (AtomicUsize::new(0), AtomicBool::new(false));
 
-    std::thread::scope(|s| {
-        let workers: Vec<_> = (0..cfg.workers)
+    std::thread::scope(|scope| {
+        let workers: Vec<_> = (0..config.workers)
             .map(|_| {
-                let (rx, free_tx, work) = (work_rx.clone(), free_tx.clone(), &work);
-                s.spawn(move || {
+                let (receiver, free_tx, work) = (work_rx.clone(), free_tx.clone(), &work);
+                scope.spawn(move || {
                     let (mut state, mut err, mut wait, mut busy) =
                         (S::default(), None, Duration::ZERO, Duration::ZERO);
                     loop {
-                        let t = Instant::now();
-                        let Ok(unit) = rx.recv() else { break };
-                        wait += t.elapsed();
-                        let t = Instant::now();
+                        let started = Instant::now();
+                        let Ok(unit) = receiver.recv() else { break };
+                        wait += started.elapsed();
+                        let started = Instant::now();
                         if err.is_none() {
-                            err = work(&mut state, &unit.buf[..unit.len]).err();
+                            err = work(&mut state, &unit.buffer[..unit.len]).err();
                         }
-                        busy += t.elapsed();
+                        busy += started.elapsed();
                         let (file_off, len) = (unit.file_off, unit.len);
-                        let _ = free_tx.send(unit.buf); // readers may be gone on error
-                        if cfg.evict == Evict::Worker {
+                        let _ = free_tx.send(unit.buffer); // readers may be gone on error
+                        if config.evict == Evict::Worker {
                             evict_range(fd, file_off, len);
                         }
                     }
@@ -167,32 +172,48 @@ where
             .map(|_| {
                 let (free_rx, work_tx) = (free_rx.clone(), work_tx.clone());
                 let (next_region, abort) = (&next_region, &abort);
-                s.spawn(move || -> Result<Metrics> {
+                scope.spawn(move || -> Result<Metrics> {
                     let own; // this reader's own open file (own readahead state)
-                    let f: &File = match path {
-                        Some(p) if nreaders > 1 => {
-                            own = File::open(p)?;
+                    let reader_file: &File = match path {
+                        Some(source_path) if nreaders > 1 => {
+                            own = File::open(source_path)?;
                             &own
                         }
                         _ => file,
                     };
-                    let mut m = Metrics::default();
+                    let mut metrics = Metrics::default();
                     loop {
-                        let r = next_region.fetch_add(1, Ordering::Relaxed);
-                        if r >= regions || abort.load(Ordering::Relaxed) {
-                            return Ok(m);
+                        let region_index = next_region.fetch_add(1, Ordering::Relaxed);
+                        if region_index >= regions || abort.load(Ordering::Relaxed) {
+                            return Ok(metrics);
                         }
-                        let (lo, hi) = (bounds[r], bounds[r + 1]);
-                        let res = if sec.big_endian {
-                            reader::<BigEndian>(f, sec, lo, hi, &free_rx, &work_tx, abort, &mut m)
+                        let (lo, hi) = (bounds[region_index], bounds[region_index + 1]);
+                        let res = if section.big_endian {
+                            reader::<BigEndian>(
+                                reader_file,
+                                section,
+                                lo,
+                                hi,
+                                &free_rx,
+                                &work_tx,
+                                abort,
+                                &mut metrics,
+                            )
                         } else {
                             reader::<LittleEndian>(
-                                f, sec, lo, hi, &free_rx, &work_tx, abort, &mut m,
+                                reader_file,
+                                section,
+                                lo,
+                                hi,
+                                &free_rx,
+                                &work_tx,
+                                abort,
+                                &mut metrics,
                             )
                         };
-                        if let Err(e) = res {
+                        if let Err(error) = res {
                             abort.store(true, Ordering::Relaxed);
-                            return Err(e);
+                            return Err(error);
                         }
                     }
                 })
@@ -201,48 +222,48 @@ where
         drop(work_tx); // lets workers drain and exit once every reader is done
         drop(free_rx);
 
-        let (mut m, mut read_err) = (Metrics::default(), None);
-        for r in readers {
-            match r.join().unwrap() {
+        let (mut metrics, mut read_err) = (Metrics::default(), None);
+        for reader_handle in readers {
+            match reader_handle.join().unwrap() {
                 Ok(rm) => {
-                    m.units += rm.units;
-                    m.bytes += rm.bytes;
-                    m.reader_wait += rm.reader_wait;
-                    m.reader_read += rm.reader_read;
+                    metrics.units += rm.units;
+                    metrics.bytes += rm.bytes;
+                    metrics.reader_wait += rm.reader_wait;
+                    metrics.reader_read += rm.reader_read;
                 }
-                Err(e) => {
+                Err(error) => {
                     // A mismatch explains other readers' failures, so it wins.
-                    if read_err.is_none() || e.is::<BoundaryMismatch>() {
-                        read_err = Some(e);
+                    if read_err.is_none() || error.is::<BoundaryMismatch>() {
+                        read_err = Some(error);
                     }
                 }
             }
         }
         let (mut states, mut first_err) = (Vec::new(), None);
-        for w in workers {
-            let (state, err, wait, busy) = w.join().unwrap();
+        for worker_handle in workers {
+            let (state, err, wait, busy) = worker_handle.join().unwrap();
             states.push(state);
             first_err = first_err.or(err);
-            m.worker_wait += wait;
-            m.worker_busy += busy;
+            metrics.worker_wait += wait;
+            metrics.worker_busy += busy;
         }
-        if let Some(e) = read_err.or(first_err) {
-            return Err(e);
+        if let Some(error) = read_err.or(first_err) {
+            return Err(error);
         }
-        Ok((states, m))
+        Ok((states, metrics))
     })
 }
 
 #[allow(clippy::too_many_arguments)]
 fn reader<T: ByteOrder>(
     file: &File,
-    sec: &DataSection,
+    section: &DataSection,
     lo: u64,
     hi: u64,
     free_rx: &Receiver<Vec<u8>>,
     work_tx: &Sender<Unit>,
     abort: &AtomicBool,
-    m: &mut Metrics,
+    metrics: &mut Metrics,
 ) -> Result<()> {
     let mismatch = |what: &str, off: u64| {
         BoundaryMismatch(format!(
@@ -255,29 +276,29 @@ fn reader<T: ByteOrder>(
             return Ok(());
         }
         // Take a free buffer; blocking here is the backpressure.
-        let mut buf = match free_rx.try_recv() {
-            Ok(b) => b,
+        let mut buffer = match free_rx.try_recv() {
+            Ok(buffer) => buffer,
             Err(_) => {
-                let t = Instant::now();
-                let b = free_rx.recv()?;
-                m.reader_wait += t.elapsed();
-                b
+                let started = Instant::now();
+                let buffer = free_rx.recv()?;
+                metrics.reader_wait += started.elapsed();
+                buffer
             }
         };
 
-        let mut want = buf.len();
+        let mut want = buffer.len();
         let len = loop {
-            let n = want.min((hi - off) as usize);
-            if buf.len() < n {
-                buf.resize(n, 0);
+            let read_len = want.min((hi - off) as usize);
+            if buffer.len() < read_len {
+                buffer.resize(read_len, 0);
             }
-            let t = Instant::now();
-            file.read_exact_at(&mut buf[..n], sec.start + off)?;
-            m.reader_read += t.elapsed();
+            let started = Instant::now();
+            file.read_exact_at(&mut buffer[..read_len], section.start + off)?;
+            metrics.reader_read += started.elapsed();
 
-            let reaches_end = n as u64 == hi - off;
-            match whole_records::<T>(&buf[..n], reaches_end) {
-                Whole::Len(l) => break l,
+            let reaches_end = read_len as u64 == hi - off;
+            match whole_records::<T>(&buffer[..read_len], reaches_end) {
+                Whole::Len(length) => break length,
                 // A single record (e.g. AUXTRACE payload) is bigger than the buffer: grow it.
                 Whole::NeedAtLeast(need) if !reaches_end => want = need,
                 // The last record runs past the region end: the end was not a boundary.
@@ -286,19 +307,19 @@ fn reader<T: ByteOrder>(
                 }
                 // Garbage headers: a guessed region start was inside a record. (At the true
                 // start of the data this is just a corrupt file.)
-                Whole::Bad(e) if lo > 0 => return Err(mismatch(e, off).into()),
-                Whole::Bad(e) => return Err(format!("{e} at data offset {off}").into()),
+                Whole::Bad(reason) if lo > 0 => return Err(mismatch(reason, off).into()),
+                Whole::Bad(reason) => return Err(format!("{reason} at data offset {off}").into()),
             }
         };
 
         let (unit_off, consumed) = (off, off + len as u64);
-        m.units += 1;
-        m.bytes += len as u64;
+        metrics.units += 1;
+        metrics.bytes += len as u64;
         off = consumed;
         if work_tx
             .send(Unit {
-                buf,
-                file_off: sec.start + unit_off,
+                buffer,
+                file_off: section.start + unit_off,
                 len,
             })
             .is_err()
@@ -315,13 +336,13 @@ pub(crate) enum Whole {
     Bad(&'static str),
 }
 
-/// Length of the longest prefix of `buf` made of complete records.
-/// `at_eof`: `buf` reaches the end of the data section, so there can be no more bytes.
-pub(crate) fn whole_records<T: ByteOrder>(buf: &[u8], at_eof: bool) -> Whole {
+/// Length of the longest prefix of `buffer` made of complete records.
+/// `at_eof`: `buffer` reaches the end of the data section, so there can be no more bytes.
+pub(crate) fn whole_records<T: ByteOrder>(buffer: &[u8], at_eof: bool) -> Whole {
     let mut off = 0usize;
-    while off + HEADER_LEN <= buf.len() {
-        let ty = T::read_u32(&buf[off..]);
-        let size = T::read_u16(&buf[off + 6..]) as usize;
+    while off + HEADER_LEN <= buffer.len() {
+        let ty = T::read_u32(&buffer[off..]);
+        let size = T::read_u16(&buffer[off + 6..]) as usize;
         if size < HEADER_LEN {
             return Whole::Bad("bad record size");
         }
@@ -329,16 +350,16 @@ pub(crate) fn whole_records<T: ByteOrder>(buf: &[u8], at_eof: bool) -> Whole {
         if ty == PERF_RECORD_AUXTRACE {
             // The payload length is the first u64 of the body. If it isn't in the buffer
             // yet, treat the record as incomplete (the caller re-reads from this record).
-            if off + HEADER_LEN + 8 > buf.len() {
+            if off + HEADER_LEN + 8 > buffer.len() {
                 return if off == 0 {
                     Whole::NeedAtLeast(HEADER_LEN + 8)
                 } else {
                     Whole::Len(off)
                 };
             }
-            total += T::read_u64(&buf[off + HEADER_LEN..]) as usize;
+            total += T::read_u64(&buffer[off + HEADER_LEN..]) as usize;
         }
-        if off + total > buf.len() {
+        if off + total > buffer.len() {
             return if off == 0 {
                 Whole::NeedAtLeast(total)
             } else {
@@ -347,24 +368,28 @@ pub(crate) fn whole_records<T: ByteOrder>(buf: &[u8], at_eof: bool) -> Whole {
         }
         off += total;
     }
-    if at_eof && off != buf.len() {
+    if at_eof && off != buffer.len() {
         return Whole::Bad("trailing bytes");
     }
     Whole::Len(off)
 }
 
 /// Dummy work: wrapping sum of every u64 word, so all bytes are read.
-pub fn touch_all(b: &[u8]) -> u64 {
+pub fn touch_all(bytes: &[u8]) -> u64 {
     let mut acc = [0u64; 4];
-    let mut it = b.chunks_exact(32);
-    for w in it.by_ref() {
-        for (i, a) in acc.iter_mut().enumerate() {
-            *a = a.wrapping_add(u64::from_ne_bytes(w[i * 8..i * 8 + 8].try_into().unwrap()));
+    let mut it = bytes.chunks_exact(32);
+    for word in it.by_ref() {
+        for (i, lane) in acc.iter_mut().enumerate() {
+            *lane = lane.wrapping_add(u64::from_ne_bytes(
+                word[i * 8..i * 8 + 8].try_into().unwrap(),
+            ));
         }
     }
-    let mut total = acc.iter().fold(0u64, |t, &a| t.wrapping_add(a));
-    for w in it.remainder().chunks_exact(8) {
-        total = total.wrapping_add(u64::from_ne_bytes(w.try_into().unwrap()));
+    let mut total = acc
+        .iter()
+        .fold(0u64, |total, &lane| total.wrapping_add(lane));
+    for word in it.remainder().chunks_exact(8) {
+        total = total.wrapping_add(u64::from_ne_bytes(word.try_into().unwrap()));
     }
     total
 }

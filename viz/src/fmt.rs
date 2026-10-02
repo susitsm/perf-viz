@@ -12,19 +12,22 @@ pub fn sig3(x: f64) -> String {
     }
     // Scientific notation with two decimals already rounds to three significant digits, carries
     // included (99.96 -> 1.00e2), so the digits and exponent can be trusted.
-    let s = format!("{:.2e}", x.abs());
-    let (mantissa, exp) = s
+    let scientific = format!("{:.2e}", x.abs());
+    let (mantissa, exp) = scientific
         .split_once('e')
         .expect("scientific notation has an exponent");
-    let e: i32 = exp.parse().expect("exponent is an integer");
-    let digits: String = mantissa.chars().filter(|&c| c != '.').collect();
-    let body = if e >= 2 {
-        format!("{digits}{}", "0".repeat((e - 2) as usize))
-    } else if e >= 0 {
-        let k = (e + 1) as usize;
+    let exponent: i32 = exp.parse().expect("exponent is an integer");
+    let digits: String = mantissa
+        .chars()
+        .filter(|&character| character != '.')
+        .collect();
+    let body = if exponent >= 2 {
+        format!("{digits}{}", "0".repeat((exponent - 2) as usize))
+    } else if exponent >= 0 {
+        let k = (exponent + 1) as usize;
         format!("{}.{}", &digits[..k], &digits[k..])
     } else {
-        format!("0.{}{digits}", "0".repeat((-e - 1) as usize))
+        format!("0.{}{digits}", "0".repeat((-exponent - 1) as usize))
     };
     if x < 0.0 { format!("-{body}") } else { body }
 }
@@ -51,10 +54,10 @@ pub enum Cost {
 
 impl Cost {
     /// A cost value for display: exact for samples, three significant digits with a unit for cycles.
-    pub fn format(self, v: u64) -> String {
+    pub fn format(self, value: u64) -> String {
         match self {
-            Cost::Samples => v.to_string(),
-            Cost::Cycles => si(v as f64),
+            Cost::Samples => value.to_string(),
+            Cost::Cycles => si(value as f64),
         }
     }
 }
@@ -65,17 +68,17 @@ pub fn si(x: f64) -> String {
         return format!("{}", x.round() as u64);
     }
     // Round first, so 999_600 (1000 K after rounding) is shown as 1.00 M.
-    let r: f64 = sig3(x).parse().unwrap_or(x);
-    let (scale, suffix) = if r >= 1e12 {
+    let rounded: f64 = sig3(x).parse().unwrap_or(x);
+    let (scale, suffix) = if rounded >= 1e12 {
         (1e12, "T")
-    } else if r >= 1e9 {
+    } else if rounded >= 1e9 {
         (1e9, "G")
-    } else if r >= 1e6 {
+    } else if rounded >= 1e6 {
         (1e6, "M")
     } else {
         (1e3, "K")
     };
-    format!("{} {suffix}", sig3(r / scale))
+    format!("{} {suffix}", sig3(rounded / scale))
 }
 
 /// A percentage: `fraction` of `whole`, as `sig3` digits (no `%` sign). Zero if `whole` is zero.
@@ -141,8 +144,8 @@ mod tests {
         for x in [0.00417, 0.0417, 0.417, 4.17, 41.7, 99.0, 12.0, 0.5] {
             let digits: Vec<char> = sig3(x)
                 .chars()
-                .filter(|c| c.is_ascii_digit())
-                .skip_while(|&c| c == '0')
+                .filter(|character| character.is_ascii_digit())
+                .skip_while(|&character| character == '0')
                 .collect();
             assert!(
                 digits.len() >= 3,

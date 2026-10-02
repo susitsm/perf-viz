@@ -57,26 +57,26 @@ fn main() -> perf_profile::Result<()> {
     let size = std::fs::metadata(&path)?.len() as f64;
 
     // ---- pass 1 ----
-    let cfg = Config {
+    let config = Config {
         block: 1 << 20,
         workers,
         buffers: workers * 2 + 2 + readers * 2,
         evict: Evict::Off,
         readers,
     };
-    let t = Instant::now();
+    let started = Instant::now();
     let src = perf_profile::meta::Source::open(&path)?;
     let (meta, rep) = read_meta(
         &src,
         &path,
-        cfg,
+        config,
         stream::Options {
             cold,
             corrupt_bound: corrupt,
             ..Default::default()
         },
     )?;
-    let pass1 = t.elapsed().as_secs_f64();
+    let pass1 = started.elapsed().as_secs_f64();
     println!(
         "pass 1: {pass1:.3}s ({:.2} GB/s), {} readers, {} regions{}: {} records -> {} events + {} samples; {} LOST records ({} events lost)",
         size / pass1 / 1e9,
@@ -94,8 +94,8 @@ fn main() -> perf_profile::Result<()> {
         meta.lost_events
     );
     let (mut nf, mut nc, mut ne, mut nm, mut nx) = (0, 0, 0, 0, 0);
-    for e in &meta.events {
-        match &e.kind {
+    for event in &meta.events {
+        match &event.kind {
             EventKind::Fork { .. } => nf += 1,
             EventKind::Comm { exec, .. } => {
                 nc += 1;
@@ -107,46 +107,66 @@ fn main() -> perf_profile::Result<()> {
     }
     println!(
         "  events: {nf} fork, {nc} comm ({ne} exec), {nm} exec-mmap, {nx} exit; {} samples carry a stack",
-        meta.samples.iter().filter(|s| s.has_stack).count()
+        meta.samples
+            .iter()
+            .filter(|sample| sample.has_stack)
+            .count()
     );
     assert!(
-        meta.events.windows(2).all(|w| w[0].time <= w[1].time),
+        meta.events
+            .windows(2)
+            .all(|pair| pair[0].time <= pair[1].time),
         "events must be time-sorted"
     );
 
     // ---- address spaces ----
-    let t = Instant::now();
+    let started = Instant::now();
     let spaces = AddressSpaces::build(&meta.events);
     let mut per_pid: HashMap<i32, u64> = HashMap::new();
-    for s in &meta.samples {
-        *per_pid.entry(s.pid).or_default() += 1;
+    for sample in &meta.samples {
+        *per_pid.entry(sample.pid).or_default() += 1;
     }
-    let total_epochs: usize = spaces.pids().map(|&p| spaces.epochs(p).len()).sum();
+    let total_epochs: usize = spaces.pids().map(|&pid| spaces.epochs(pid).len()).sum();
     let total_maps: usize = spaces
         .pids()
-        .map(|&p| spaces.epochs(p).iter().map(|e| e.maps.len()).sum::<usize>())
+        .map(|&pid| {
+            spaces
+                .epochs(pid)
+                .iter()
+                .map(|epoch| epoch.maps.len())
+                .sum::<usize>()
+        })
         .sum();
     println!("address-space fingerprint {:016x}", spaces.fingerprint());
     println!(
         "address spaces: {} processes, {total_epochs} epochs, {total_maps} mappings, built in {:.1} ms",
         spaces.pids().count(),
-        t.elapsed().as_secs_f64() * 1e3
+        started.elapsed().as_secs_f64() * 1e3
     );
     let mut top: Vec<_> = per_pid.iter().collect();
     top.sort_by_key(|x| std::cmp::Reverse(*x.1));
-    for (pid, n) in top.iter().take(6) {
+    for (pid, count) in top.iter().take(6) {
         let eps = spaces.epochs(**pid);
         println!(
-            "  pid {pid:<7} {:<14} {n:>6} samples, {} epoch(s), {} mappings in the last",
-            spaces.comm.get(pid).map_or("?", |s| s.as_str()),
+            "  pid {pid:<7} {:<14} {count:>6} samples, {} epoch(s), {} mappings in the last",
+            spaces
+                .comm
+                .get(pid)
+                .map_or("?", |comm_name| comm_name.as_str()),
             eps.len(),
-            eps.last().map_or(0, |e| e.maps.len())
+            eps.last().map_or(0, |epoch| epoch.maps.len())
         );
     }
-    let model = |s: &perf_profile::meta::SampleRow| -> Ident {
+    let model = |sample_row: &perf_profile::meta::SampleRow| -> Ident {
         spaces
-            .lookup(s.pid, s.time, s.ip)
-            .map(|m| (m.path.as_deref().map(str::to_string), m.start, m.pgoff))
+            .lookup(sample_row.pid, sample_row.time, sample_row.ip)
+            .map(|mapping| {
+                (
+                    mapping.path.as_deref().map(str::to_string),
+                    mapping.start,
+                    mapping.pgoff,
+                )
+            })
     };
 
     if !verify {
@@ -154,7 +174,7 @@ fn main() -> perf_profile::Result<()> {
     }
 
     // ---- exact reference: time-ordered replay with live maps ----
-    let t = Instant::now();
+    let started = Instant::now();
     #[derive(Clone)]
     struct M {
         start: u64,
@@ -173,43 +193,46 @@ fn main() -> perf_profile::Result<()> {
             continue;
         };
         match record.parse()? {
-            EventRecord::Mmap2(m) if m.protection & 4 != 0 => {
-                let p = m.path.as_slice();
-                let p = String::from_utf8_lossy(&p)
+            EventRecord::Mmap2(mmap) if mmap.protection & 4 != 0 => {
+                let path = mmap.path.as_slice();
+                let path = String::from_utf8_lossy(&path)
                     .trim_end_matches('\0')
                     .to_string();
-                let (s, e) = (m.address, m.address + m.length);
-                let v = live.entry(m.pid).or_default();
-                v.retain(|x| !(x.start < e && s < x.end));
-                v.push(M {
-                    start: s,
-                    end: e,
-                    pgoff: m.page_offset,
-                    path: is_file_backed(&p).then_some(p),
+                let (start, end) = (mmap.address, mmap.address + mmap.length);
+                let live_maps = live.entry(mmap.pid).or_default();
+                live_maps.retain(|x| !(x.start < end && start < x.end));
+                live_maps.push(M {
+                    start,
+                    end,
+                    pgoff: mmap.page_offset,
+                    path: is_file_backed(&path).then_some(path),
                 });
             }
-            EventRecord::Fork(f) if f.pid != f.ppid => {
-                let parent = live.get(&f.ppid).cloned().unwrap_or_default();
-                live.insert(f.pid, parent);
+            EventRecord::Fork(fork) if fork.pid != fork.ppid => {
+                let parent = live.get(&fork.ppid).cloned().unwrap_or_default();
+                live.insert(fork.pid, parent);
             }
-            EventRecord::Comm(c) if c.is_execve => {
-                live.insert(c.pid, Vec::new());
+            EventRecord::Comm(comm) if comm.is_execve => {
+                live.insert(comm.pid, Vec::new());
             }
-            EventRecord::Sample(s) => {
-                let (pid, ip) = (s.pid.unwrap_or(-1), s.ip.unwrap_or(0));
+            EventRecord::Sample(sample) => {
+                let (pid, ip) = (sample.pid.unwrap_or(-1), sample.ip.unwrap_or(0));
                 let id = live
                     .get(&pid)
-                    .and_then(|v| v.iter().find(|x| ip >= x.start && ip < x.end))
-                    .map(|m| (m.path.clone(), m.start, m.pgoff));
-                reference.push(((s.timestamp.unwrap_or(0), s.tid.unwrap_or(-1), ip), id));
+                    .and_then(|mappings| mappings.iter().find(|x| ip >= x.start && ip < x.end))
+                    .map(|mapping| (mapping.path.clone(), mapping.start, mapping.pgoff));
+                reference.push((
+                    (sample.timestamp.unwrap_or(0), sample.tid.unwrap_or(-1), ip),
+                    id,
+                ));
             }
             _ => {}
         }
     }
-    reference.sort_by_key(|r| r.0);
+    reference.sort_by_key(|entry| entry.0);
     println!(
         "\nreference replay: {:.2}s, {} samples",
-        t.elapsed().as_secs_f64(),
+        started.elapsed().as_secs_f64(),
         reference.len()
     );
     if reference.len() != meta.samples.len() {
@@ -222,13 +245,17 @@ fn main() -> perf_profile::Result<()> {
     }
     let (mut same, mut model_missing, mut ref_missing, mut other) = (0u64, 0u64, 0u64, 0u64);
     let mut examples = 0;
-    for (s, (key, r)) in meta.samples.iter().zip(&reference) {
-        assert_eq!((s.time, s.tid, s.ip), *key, "sample order differs");
-        let m = model(s);
-        if m == *r {
+    for (sample, (key, entry)) in meta.samples.iter().zip(&reference) {
+        assert_eq!(
+            (sample.time, sample.tid, sample.ip),
+            *key,
+            "sample order differs"
+        );
+        let modeled = model(sample);
+        if modeled == *entry {
             same += 1;
         } else {
-            match (&m, r) {
+            match (&modeled, entry) {
                 (None, Some(_)) => model_missing += 1,
                 (Some(_), None) => ref_missing += 1,
                 _ => other += 1,
@@ -236,18 +263,18 @@ fn main() -> perf_profile::Result<()> {
             if examples < 5 {
                 examples += 1;
                 println!(
-                    "  differs: pid {} tid {} t={} ip={:#x}\n     epoch model: {m:?}\n     exact replay: {r:?}",
-                    s.pid, s.tid, s.time, s.ip
+                    "  differs: pid {} tid {} t={} ip={:#x}\n     epoch model: {modeled:?}\n     exact replay: {entry:?}",
+                    sample.pid, sample.tid, sample.time, sample.ip
                 );
             }
         }
     }
-    let n = meta.samples.len() as f64;
+    let sample_count = meta.samples.len() as f64;
     println!(
         "leaf-ip mapping, epoch model vs exact replay: {same} identical ({:.3}%); model has none but replay has one: {model_missing}; replay has none but model has one: {ref_missing}; both differ: {other}",
-        100.0 * same as f64 / n
+        100.0 * same as f64 / sample_count
     );
-    if same as f64 / n < 0.99 {
+    if same as f64 / sample_count < 0.99 {
         std::process::exit(1);
     }
     Ok(())

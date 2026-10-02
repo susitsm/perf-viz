@@ -99,7 +99,8 @@ fn sum_words(data: &RawData<'_>) -> u64 {
     let sum = |bytes: &[u8]| {
         let mut acc = [0u64; 4];
         let mut total = 0u64;
-        for word in bytes.chunks_exact(32) {
+        let (words, remainder) = bytes.as_chunks::<32>();
+        for word in words {
             for (i, lane) in acc.iter_mut().enumerate() {
                 *lane = lane.wrapping_add(u64::from_ne_bytes(
                     word[i * 8..i * 8 + 8].try_into().unwrap(),
@@ -109,8 +110,8 @@ fn sum_words(data: &RawData<'_>) -> u64 {
         for lane in acc {
             total = total.wrapping_add(lane);
         }
-        for word in bytes.chunks_exact(32).remainder().chunks_exact(8) {
-            total = total.wrapping_add(u64::from_ne_bytes(word.try_into().unwrap()));
+        for word in remainder.as_chunks::<8>().0 {
+            total = total.wrapping_add(u64::from_ne_bytes(*word));
         }
         total
     };

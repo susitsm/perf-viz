@@ -183,7 +183,6 @@ fn main() {
                     .chunks(chunk.max(1))
                     .map(|chunk| {
                         let engine = engine.as_str();
-                        let path = path;
                         scope.spawn(move || {
                             let started = Instant::now();
                             let outcome = if engine == "addr2line" {

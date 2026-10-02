@@ -436,8 +436,8 @@ pub(crate) fn whole_records<T: ByteOrder>(buffer: &[u8], at_eof: bool) -> Whole 
 /// Dummy work: wrapping sum of every u64 word, so all bytes are read.
 pub fn touch_all(bytes: &[u8]) -> u64 {
     let mut acc = [0u64; 4];
-    let mut it = bytes.chunks_exact(32);
-    for word in it.by_ref() {
+    let (words, remainder) = bytes.as_chunks::<32>();
+    for word in words {
         for (i, lane) in acc.iter_mut().enumerate() {
             *lane = lane.wrapping_add(u64::from_ne_bytes(
                 word[i * 8..i * 8 + 8].try_into().unwrap(),
@@ -447,8 +447,8 @@ pub fn touch_all(bytes: &[u8]) -> u64 {
     let mut total = acc
         .iter()
         .fold(0u64, |total, &lane| total.wrapping_add(lane));
-    for word in it.remainder().chunks_exact(8) {
-        total = total.wrapping_add(u64::from_ne_bytes(word.try_into().unwrap()));
+    for word in remainder.as_chunks::<8>().0 {
+        total = total.wrapping_add(u64::from_ne_bytes(*word));
     }
     total
 }

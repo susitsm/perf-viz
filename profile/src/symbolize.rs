@@ -95,35 +95,35 @@ impl Capability {
         // Separate debug file: by build id, then by .gnu_debuglink name.
         let mut separate_debug_file = None;
         if !has_embedded_dwarf {
-            if let Ok(Some(id)) = obj.build_id() {
-                if id.len() > 1 {
-                    let hex: String = id.iter().map(|byte| format!("{byte:02x}")).collect();
-                    for directory in DEBUG_DIRS {
-                        let candidate = Path::new(directory)
-                            .join(".build-id")
-                            .join(&hex[..2])
-                            .join(format!("{}.debug", &hex[2..]));
-                        if candidate.is_file() {
-                            separate_debug_file = Some(candidate);
-                            break;
-                        }
+            if let Ok(Some(id)) = obj.build_id()
+                && id.len() > 1
+            {
+                let hex: String = id.iter().map(|byte| format!("{byte:02x}")).collect();
+                for directory in DEBUG_DIRS {
+                    let candidate = Path::new(directory)
+                        .join(".build-id")
+                        .join(&hex[..2])
+                        .join(format!("{}.debug", &hex[2..]));
+                    if candidate.is_file() {
+                        separate_debug_file = Some(candidate);
+                        break;
                     }
                 }
             }
-            if separate_debug_file.is_none() {
-                if let Ok(Some((name, _crc))) = obj.gnu_debuglink() {
-                    let name = String::from_utf8_lossy(name).to_string();
-                    let dir = path.parent().unwrap_or(Path::new("/"));
-                    let mut cands = vec![dir.join(&name), dir.join(".debug").join(&name)];
-                    for directory in DEBUG_DIRS {
-                        cands.push(
-                            Path::new(directory)
-                                .join(dir.strip_prefix("/").unwrap_or(dir))
-                                .join(&name),
-                        );
-                    }
-                    separate_debug_file = cands.into_iter().find(|candidate| candidate.is_file());
+            if separate_debug_file.is_none()
+                && let Ok(Some((name, _crc))) = obj.gnu_debuglink()
+            {
+                let name = String::from_utf8_lossy(name).to_string();
+                let dir = path.parent().unwrap_or(Path::new("/"));
+                let mut cands = vec![dir.join(&name), dir.join(".debug").join(&name)];
+                for directory in DEBUG_DIRS {
+                    cands.push(
+                        Path::new(directory)
+                            .join(dir.strip_prefix("/").unwrap_or(dir))
+                            .join(&name),
+                    );
                 }
+                separate_debug_file = cands.into_iter().find(|candidate| candidate.is_file());
             }
         }
         Ok(Capability {

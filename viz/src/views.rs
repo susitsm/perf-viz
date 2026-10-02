@@ -178,10 +178,7 @@ pub fn expand_to_depth(trie: &Trie, totals: &[u64], depth: u32) -> HashSet<u32> 
 pub fn hottest_path(trie: &Trie, totals: &[u64], min_share: f32) -> Vec<u32> {
     let mut path = Vec::new();
     let mut current = ROOT;
-    loop {
-        let Some(&best) = kids_by_cost(trie, totals, current).first() else {
-            break;
-        };
+    while let Some(&best) = kids_by_cost(trie, totals, current).first() {
         if (totals[best as usize] as f32) < min_share * totals[current as usize] as f32 {
             break;
         }

@@ -443,6 +443,8 @@ impl App {
             thread: None,
             search: String::new(),
             range_ms: None,
+            // A unit struct unless the `scripted` feature is on.
+            #[allow(clippy::default_constructed_unit_structs)]
             harness: Harness::default(),
             ..args.clone()
         };
@@ -844,8 +846,7 @@ impl eframe::App for App {
         let dropped = ctx.input(|i| {
             i.raw
                 .dropped_files
-                .iter()
-                .next()
+                .first()
                 .map(|file| file.path().to_path_buf())
         });
         let picked = self
@@ -1371,10 +1372,12 @@ impl eframe::App for App {
                         funcs,
                         &self.costs,
                         cost,
-                        totals[ROOT as usize],
-                        self.grand_total,
+                        SummaryScope {
+                            total: totals[ROOT as usize],
+                            grand_total: self.grand_total,
+                            filtered,
+                        },
                         &self.summary,
-                        filtered,
                     ) {
                         self.cc.selected = Some(function);
                         self.tab = Tab::CallerCallee;
@@ -1777,19 +1780,18 @@ fn draw_caller_callee(
     state: &mut CcState,
     version: u64,
 ) {
-    if let Some(func) = state.selected {
-        if !state
+    if let Some(func) = state.selected
+        && !state
             .lists
             .as_ref()
             .is_some_and(|lists| lists.func == func && lists.version == version)
-        {
-            state.lists = Some(CallLists {
-                func,
-                version,
-                callers: views::callers_of(trie, totals, funcs, func),
-                callees: views::callees_of(trie, totals, funcs, func),
-            });
-        }
+    {
+        state.lists = Some(CallLists {
+            func,
+            version,
+            callers: views::callers_of(trie, totals, funcs, func),
+            callees: views::callees_of(trie, totals, funcs, func),
+        });
     }
     let mut next: Option<u32> = None;
 
@@ -1916,6 +1918,13 @@ fn draw_caller_callee(
     }
 }
 
+/// The cost the summary covers, and whether a filter narrowed it from the whole recording.
+struct SummaryScope {
+    total: u64,
+    grand_total: u64,
+    filtered: bool,
+}
+
 /// An overview: what the recording is, the hottest functions and modules. Returns a function to
 /// show in the caller/callee view if one of the hotspots was clicked.
 fn draw_summary(
@@ -1924,11 +1933,14 @@ fn draw_summary(
     funcs: &Functions,
     costs: &views::Costs,
     cost: Cost,
-    total: u64,
-    grand_total: u64,
+    scope: SummaryScope,
     info: &SummaryInfo,
-    filtered: bool,
 ) -> Option<u32> {
+    let SummaryScope {
+        total,
+        grand_total,
+        filtered,
+    } = scope;
     let mut nav = None;
     let state = &profile.stats;
     egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {

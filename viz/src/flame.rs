@@ -44,7 +44,7 @@ pub fn layout(
         node: focus,
         depth: 0,
         x: 0.0,
-        width: width,
+        width,
     }];
     while let Some(it) = stack.pop() {
         out.push(it);
@@ -189,9 +189,7 @@ mod tests {
         let first_child = sample_trie.children(ROOT)[0];
         let last_child = sample_trie.children(ROOT)[1];
         let mut totals = trie_totals(&sample_trie);
-        for node in 0..totals.len() {
-            totals[node] = 0;
-        }
+        totals.fill(0);
         totals[ROOT as usize] = 1;
         totals[last_child as usize] = 1;
         let mut out = Vec::new();

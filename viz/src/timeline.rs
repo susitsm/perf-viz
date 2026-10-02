@@ -362,61 +362,59 @@ pub fn draw(ui: &mut egui::Ui, options: &Options<'_>, drag: &mut Option<XDrag>) 
                 },
             );
 
-        if resp.drag_started() {
-            if let Some(pointer) = resp
+        if resp.drag_started()
+            && let Some(pointer) = resp
                 .interact_pointer_pos()
                 .filter(|point| plot.contains(*point))
-            {
-                *drag = Some(XDrag {
-                    from_x: pointer.x,
-                    to_x: pointer.x,
-                });
+        {
+            *drag = Some(XDrag {
+                from_x: pointer.x,
+                to_x: pointer.x,
+            });
+        }
+        if resp.dragged()
+            && let (Some(active_drag), Some(pointer)) = (drag.as_mut(), resp.interact_pointer_pos())
+        {
+            active_drag.to_x = pointer.x;
+        }
+        if resp.drag_stopped()
+            && let Some(finished_drag) = drag.take()
+        {
+            if (finished_drag.from_x - finished_drag.to_x).abs() >= 4.0 {
+                let (ta, tb) = (
+                    to_time(finished_drag.from_x.min(finished_drag.to_x), plot.left()),
+                    to_time(finished_drag.from_x.max(finished_drag.to_x), plot.left()),
+                );
+                actions.push(Action::SetRange(TimeRange {
+                    start: ta,
+                    end: tb.max(ta + 1),
+                }));
+            } else {
+                actions.push(Action::ClearRange);
             }
         }
-        if resp.dragged() {
-            if let (Some(active_drag), Some(pointer)) = (drag.as_mut(), resp.interact_pointer_pos())
-            {
-                active_drag.to_x = pointer.x;
+        if resp.clicked()
+            && let Some(pointer) = resp.interact_pointer_pos()
+        {
+            if label_rect.contains(pointer) {
+                actions.extend(label_action);
+            } else if plot.contains(pointer) {
+                actions.push(Action::ClearRange);
             }
         }
-        if resp.drag_stopped() {
-            if let Some(finished_drag) = drag.take() {
-                if (finished_drag.from_x - finished_drag.to_x).abs() >= 4.0 {
-                    let (ta, tb) = (
-                        to_time(finished_drag.from_x.min(finished_drag.to_x), plot.left()),
-                        to_time(finished_drag.from_x.max(finished_drag.to_x), plot.left()),
-                    );
-                    actions.push(Action::SetRange(TimeRange {
-                        start: ta,
-                        end: tb.max(ta + 1),
-                    }));
-                } else {
-                    actions.push(Action::ClearRange);
-                }
-            }
-        }
-        if resp.clicked() {
-            if let Some(pointer) = resp.interact_pointer_pos() {
-                if label_rect.contains(pointer) {
-                    actions.extend(label_action);
-                } else if plot.contains(pointer) {
-                    actions.push(Action::ClearRange);
-                }
-            }
-        }
-        if drag.is_none() {
-            if let Some(pointer) = resp.hover_pos().filter(|point| plot.contains(*point)) {
-                let bin = (((pointer.x - plot.left()) / plot_w) * bins.len() as f32) as usize;
-                let bin = bin.min(bins.len().saturating_sub(1));
-                let time = to_time(pointer.x, plot.left());
-                resp.on_hover_ui_at_pointer(|ui| {
-                    ui.label(format!(
-                        "+{}",
-                        duration(time.saturating_sub(timeline_data.t0))
-                    ));
-                    ui.label(tip(bin));
-                });
-            }
+        if drag.is_none()
+            && let Some(pointer) = resp.hover_pos().filter(|point| plot.contains(*point))
+        {
+            let bin = (((pointer.x - plot.left()) / plot_w) * bins.len() as f32) as usize;
+            let bin = bin.min(bins.len().saturating_sub(1));
+            let time = to_time(pointer.x, plot.left());
+            resp.on_hover_ui_at_pointer(|ui| {
+                ui.label(format!(
+                    "+{}",
+                    duration(time.saturating_sub(timeline_data.t0))
+                ));
+                ui.label(tip(bin));
+            });
         }
         id
     };

@@ -159,13 +159,18 @@ struct Pending {
     max_sample_time: u64,
 }
 
+struct VersionedUnwinder {
+    version: u32,
+    unwinder: Arc<EpochUnwind>,
+}
+
 struct Loader {
     ctx: Ctx,
     big_endian: bool,
     spaces: RwLock<AddressSpaces>,
     pending: Mutex<Pending>,
     /// Latest unwinder per epoch id, with the epoch version it was built for; sharded by id.
-    unwinders: Vec<Mutex<HashMap<u32, (u32, Arc<EpochUnwind>)>>>,
+    unwinders: Vec<Mutex<HashMap<u32, VersionedUnwinder>>>,
     empty: Arc<EpochUnwind>,
     bins: BinaryCache,
 }
@@ -189,13 +194,19 @@ impl Loader {
         let mut shard = self.unwinders[snap.id as usize % UNWINDER_SHARDS]
             .lock()
             .unwrap();
-        if let Some((version, eu)) = shard.get(&snap.id) {
-            if *version == snap.version {
-                return eu.clone();
-            }
+        if let Some(cached) = shard.get(&snap.id)
+            && cached.version == snap.version
+        {
+            return cached.unwinder.clone();
         }
         let eu = Arc::new(EpochUnwind::build(&snap.maps, &self.bins));
-        shard.insert(snap.id, (snap.version, eu.clone()));
+        shard.insert(
+            snap.id,
+            VersionedUnwinder {
+                version: snap.version,
+                unwinder: eu.clone(),
+            },
+        );
         eu
     }
 

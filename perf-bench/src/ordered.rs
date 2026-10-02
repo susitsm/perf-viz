@@ -211,10 +211,7 @@ impl<C: Consumer> Shared<'_, C> {
         self.ns[which].fetch_add(since.elapsed().as_nanos() as u64, Ordering::Relaxed);
     }
 
-    fn region<'t>(
-        table: &'t mut Table<C::Events>,
-        region_index: usize,
-    ) -> &'t mut Region<C::Events> {
+    fn region(table: &mut Table<C::Events>, region_index: usize) -> &mut Region<C::Events> {
         table.regions.entry(region_index).or_insert_with(|| Region {
             total: None,
             extracted: 0,
@@ -243,10 +240,10 @@ impl<C: Consumer> Shared<'_, C> {
                 let events =
                     std::mem::take(&mut table.regions.get_mut(&region_index).unwrap().events);
                 drop(table);
-                if !self.aborted() {
-                    if let Err(error) = self.consumer.commit(region_index, events) {
-                        self.fail(error);
-                    }
+                if !self.aborted()
+                    && let Err(error) = self.consumer.commit(region_index, events)
+                {
+                    self.fail(error);
                 }
                 table = self.table.lock().unwrap();
                 table.next_commit += 1;
@@ -259,10 +256,10 @@ impl<C: Consumer> Shared<'_, C> {
             if end && !table.finished {
                 table.finished = true;
                 drop(table);
-                if !self.aborted() {
-                    if let Err(error) = self.consumer.finish() {
-                        self.fail(error);
-                    }
+                if !self.aborted()
+                    && let Err(error) = self.consumer.finish()
+                {
+                    self.fail(error);
                 }
                 table = self.table.lock().unwrap();
             }

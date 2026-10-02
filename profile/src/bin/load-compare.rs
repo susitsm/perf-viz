@@ -231,12 +231,6 @@ fn main() {
             .all(|pair| pair[0].time <= pair[1].time),
         "sample refs are time-sorted"
     );
-    let leaf_sum: u64 = new
-        .samples
-        .iter()
-        .map(|sample| new.full.nodes[sample.full as usize].self_count as u64)
-        .count() as u64;
-    let _ = leaf_sum;
     println!(
         "{}",
         if ok {

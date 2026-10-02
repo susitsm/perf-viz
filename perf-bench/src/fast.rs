@@ -98,15 +98,20 @@ pub fn read_all(
     let started = Instant::now();
     let populate_t = started.elapsed();
     let _ = populate;
+    let timings = Timings {
+        setup,
+        populate: populate_t,
+        ..Timings::default()
+    };
     let data = &bytes[data_start..data_end];
 
     let (stats, mut timings) = match endian {
-        Endianness::LittleEndian => run::<LittleEndian>(
-            &file, data_start, data, &ctx, threads, setup, populate_t, touch,
-        )?,
-        Endianness::BigEndian => run::<BigEndian>(
-            &file, data_start, data, &ctx, threads, setup, populate_t, touch,
-        )?,
+        Endianness::LittleEndian => {
+            run::<LittleEndian>(&file, data_start, data, &ctx, threads, timings, touch)?
+        }
+        Endianness::BigEndian => {
+            run::<BigEndian>(&file, data_start, data, &ctx, threads, timings, touch)?
+        }
     };
     let started = Instant::now();
     drop(reader);
@@ -172,8 +177,7 @@ fn run<T: ByteOrder>(
     data: &[u8],
     ctx: &Ctx,
     threads: usize,
-    setup: Duration,
-    populate: Duration,
+    timings: Timings,
     touch: bool,
 ) -> Result<(Stats, Timings)> {
     let started = Instant::now();
@@ -210,11 +214,10 @@ fn run<T: ByteOrder>(
     Ok((
         total,
         Timings {
-            setup,
-            populate,
             scan,
             parse: started.elapsed(),
             teardown: Duration::ZERO,
+            ..timings
         },
     ))
 }

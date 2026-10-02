@@ -93,21 +93,17 @@ fn parse_reference(reader: impl BufRead) -> HashMap<(i32, u64), Vec<Vec<u64>>> {
         if trimmed.is_empty() {
             continue;
         }
-        if let Some((ids, rest)) = trimmed.split_once(char::is_whitespace) {
-            if let (Some((_pid, tid)), Some(time)) =
+        if let Some((ids, rest)) = trimmed.split_once(char::is_whitespace)
+            && let (Some((_pid, tid)), Some(time)) =
                 (ids.split_once('/'), rest.trim().strip_suffix(':'))
-            {
-                if let (Ok(tid), Some((seconds_text, us))) =
-                    (tid.parse::<i32>(), time.trim().split_once('.'))
-                {
-                    flush(&mut key, &mut frames);
-                    if let (Ok(seconds), Ok(us)) = (seconds_text.parse::<u64>(), us.parse::<u64>())
-                    {
-                        key = Some((tid, seconds * 1_000_000 + us));
-                    }
-                    continue;
-                }
+            && let (Ok(tid), Some((seconds_text, us))) =
+                (tid.parse::<i32>(), time.trim().split_once('.'))
+        {
+            flush(&mut key, &mut frames);
+            if let (Ok(seconds), Ok(us)) = (seconds_text.parse::<u64>(), us.parse::<u64>()) {
+                key = Some((tid, seconds * 1_000_000 + us));
             }
+            continue;
         }
         // Frame line: an address, optionally followed by an annotation. Inlined frames
         // are extra lines that share their physical frame's address; we compare physical frames.
@@ -117,10 +113,10 @@ fn parse_reference(reader: impl BufRead) -> HashMap<(i32, u64), Vec<Vec<u64>>> {
         if note.contains("(inlined)") {
             continue;
         }
-        if let Ok(address) = u64::from_str_radix(addr, 16) {
-            if address < KERNEL_START {
-                frames.push(address);
-            }
+        if let Ok(address) = u64::from_str_radix(addr, 16)
+            && address < KERNEL_START
+        {
+            frames.push(address);
         }
     }
     flush(&mut key, &mut frames);
@@ -279,10 +275,10 @@ fn main() -> perf_profile::Result<()> {
                     modules_missing += 1;
                     continue;
                 };
-                if let Mmap2FileId::InodeAndVersion(i) = &mmap.file_id {
-                    if i.inode != bin.ino {
-                        inode_mismatch += 1;
-                    }
+                if let Mmap2FileId::InodeAndVersion(i) = &mmap.file_id
+                    && i.inode != bin.ino
+                {
+                    inode_mismatch += 1;
                 }
                 let Some(bias) = bin.bias_for_mapping(mmap.address, mmap.page_offset, mmap.length)
                 else {
@@ -457,9 +453,8 @@ fn main() -> perf_profile::Result<()> {
                             );
                             for i in 0..(k + 2).min(ours.len()) {
                                 let address = if i == 0 { ip } else { ras[i - 1] - 1 };
-                                let ok = if i >= 1 && i - 1 < ras.len() { "" } else { "" };
                                 println!(
-                                    "   [{i}] {address:#x} {}{ok}{}",
+                                    "   [{i}] {address:#x} {}{}",
                                     name_at(address).chars().take(110).collect::<String>(),
                                     if i == k {
                                         "   <== this frame's unwind gave a bad return address"

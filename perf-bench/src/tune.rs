@@ -174,6 +174,10 @@ impl ByteRange {
     pub fn len(&self) -> u64 {
         self.end - self.start
     }
+
+    pub fn is_empty(&self) -> bool {
+        self.end == self.start
+    }
 }
 
 /// How far reading had got at a moment: bytes read after this many seconds.

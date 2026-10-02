@@ -71,10 +71,8 @@ fn main() -> perf_bench::Result<()> {
     let gbps = |secs: f64| size / secs / 1e9;
     let ms = |duration: std::time::Duration| duration.as_secs_f64() * 1e3;
     let drop_cache = || {
-        if cold {
-            if let Ok(file) = std::fs::File::open(&path) {
-                split::drop_cache(&file);
-            }
+        if cold && let Ok(file) = std::fs::File::open(&path) {
+            split::drop_cache(&file);
         }
     };
 

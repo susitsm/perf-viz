@@ -113,7 +113,7 @@ fn find_impl<T: ByteOrder>(
 fn valid_header(ty: u32, size: usize) -> bool {
     let type_ok = matches!(ty, 1..=24 | 64..=90);
     let marker = ty == PERF_RECORD_FINISHED_ROUND || ty == PERF_RECORD_FINISHED_INIT;
-    type_ok && size >= HEADER_LEN && size % 8 == 0 && (!marker || size == HEADER_LEN)
+    type_ok && size >= HEADER_LEN && size.is_multiple_of(8) && (!marker || size == HEADER_LEN)
 }
 
 /// If the headers from `start` form a valid chain covering `MIN_SPAN` bytes and
@@ -188,10 +188,11 @@ pub fn plan_regions(file: &File, section: &DataSection, regions: usize) -> Resul
     });
     let mut bounds = vec![0u64];
     for slot in slots {
-        if let Some(boundary) = slot.into_inner().unwrap().unwrap()? {
-            if boundary > *bounds.last().unwrap() && boundary < section.len {
-                bounds.push(boundary);
-            }
+        if let Some(boundary) = slot.into_inner().unwrap().unwrap()?
+            && boundary > *bounds.last().unwrap()
+            && boundary < section.len
+        {
+            bounds.push(boundary);
         }
     }
     bounds.push(section.len);

@@ -159,7 +159,6 @@ fn main() -> perf_bench::Result<()> {
         corrupt_bound: mode == Mode::Corrupt,
         force_sequential: mode == Mode::Sequential,
         progress: trace.then(|| progress.clone()),
-        ..Default::default()
     };
     let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let monitor = trace.then(|| {

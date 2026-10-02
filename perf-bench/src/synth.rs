@@ -81,7 +81,7 @@ pub fn write(
         rec.resize(size, 0);
         LittleEndian::write_u32(&mut rec[0..], ty);
         LittleEndian::write_u16(&mut rec[6..], size as u16);
-        for chunk in rec[8..].chunks_exact_mut(8) {
+        for chunk in rec[8..].as_chunks_mut::<8>().0 {
             LittleEndian::write_u64(chunk, rng.next());
         }
         out.write_all(&rec)?;

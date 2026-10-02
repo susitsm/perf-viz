@@ -43,19 +43,19 @@ fn main() {
     }
     for elf in also {
         let mut addresses = Vec::new();
-        if let Ok(data) = fs::read(&elf) {
-            if let Some(text) = object::File::parse(&*data).ok().and_then(|object| {
+        if let Ok(data) = fs::read(&elf)
+            && let Some(text) = object::File::parse(&*data).ok().and_then(|object| {
                 object
                     .section_by_name(".text")
                     .map(|section| (section.address(), section.size()))
-            }) {
-                let mut x = 0x9E3779B97F4A7C15u64;
-                for _ in 0..2000 {
-                    x ^= x << 13;
-                    x ^= x >> 7;
-                    x ^= x << 17;
-                    addresses.push(text.0 + x % text.1);
-                }
+            })
+        {
+            let mut x = 0x9E3779B97F4A7C15u64;
+            for _ in 0..2000 {
+                x ^= x << 13;
+                x ^= x >> 7;
+                x ^= x << 17;
+                addresses.push(text.0 + x % text.1);
             }
         }
         if addresses.is_empty() {

@@ -10,7 +10,13 @@ use perf_profile::{
     model::{Profile, ROOT},
 };
 
-fn depth_and_leaf(profile: &Profile, node: u32) -> (usize, String, String) {
+struct StackSummary {
+    depth: usize,
+    leaf: String,
+    root: String,
+}
+
+fn summarize_stack(profile: &Profile, node: u32) -> StackSummary {
     let trie = &profile.full;
     let mut current = node;
     let mut depth = 0;
@@ -29,7 +35,7 @@ fn depth_and_leaf(profile: &Profile, node: u32) -> (usize, String, String) {
         current = trie.nodes[current as usize].parent;
         depth += 1;
     }
-    (depth, leaf, root)
+    StackSummary { depth, leaf, root }
 }
 
 /// Loads a recording with two region sizes and lists where the call trees differ.
@@ -62,30 +68,34 @@ fn main() {
     };
     let profile_a = load::load(path.as_ref(), mk(a_mb), &mut |_| {}).unwrap();
     let profile_b = load::load(path.as_ref(), mk(b_mb), &mut |_| {}).unwrap();
-    let mut by_key: HashMap<(u64, i32), Vec<(usize, String, String)>> = HashMap::new();
+    let mut by_key: HashMap<(u64, i32), Vec<StackSummary>> = HashMap::new();
     for sample in &profile_a.samples {
         by_key
             .entry((sample.time, sample.tid))
             .or_default()
-            .push(depth_and_leaf(&profile_a, sample.full));
+            .push(summarize_stack(&profile_a, sample.full));
     }
     let t0 = profile_a.samples.first().map_or(0, |sample| sample.time);
     let (mut diff, mut shown) = (0usize, 0usize);
     let mut times = Vec::new();
     for sample in &profile_b.samples {
-        let (depth, leaf, root) = depth_and_leaf(&profile_b, sample.full);
+        let StackSummary { depth, leaf, root } = summarize_stack(&profile_b, sample.full);
         let Some(candidates) = by_key.get(&(sample.time, sample.tid)) else {
             continue;
         };
         if !candidates
             .iter()
-            .any(|(da, la, _)| *da == depth && *la == leaf)
+            .any(|other| other.depth == depth && other.leaf == leaf)
         {
             diff += 1;
             times.push((sample.time - t0) as f64 / 1e6);
             if shown < 8 {
                 shown += 1;
-                let (da, la, ra) = &candidates[0];
+                let StackSummary {
+                    depth: da,
+                    leaf: la,
+                    root: ra,
+                } = &candidates[0];
                 println!(
                     "t=+{:.1}ms tid {}: region {a_mb}MiB depth {da} leaf `{la}` root `{ra}`  |  region {b_mb}MiB depth {depth} leaf `{leaf}` root `{root}`",
                     (sample.time - t0) as f64 / 1e6,

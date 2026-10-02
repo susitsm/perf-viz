@@ -44,11 +44,11 @@ How it gets there:
 
 Progress is the share of the file read so far; the later phases are short.
 
-![The loading screen: a progress bar over the file while it is read and unwound](perf-viz/docs/images/loading.png)
+![The loading screen: a progress bar over the file while it is read and unwound][loading]
 
 When the load finishes, the **Summary** tab reports what happened, including the read speed:
 
-![The Summary tab, with the read speed of the load](perf-viz/docs/images/summary.png)
+![The Summary tab, with the read speed of the load][summary]
 
 ## Views
 
@@ -57,7 +57,7 @@ loaded profile. A time range selected on the timeline, a process or thread, and 
 apply to every view. Costs are in cycles by default (each sample weighted by its period) or in
 sample counts; see **Options**.
 
-![The flame graph](perf-viz/docs/images/flame.png)
+![The flame graph][flame]
 
 Frames that come after the first return address that failed validation are drawn in red (a *suspect
 tail*); **Options → Truncate suspect tails** drops them.
@@ -68,7 +68,7 @@ How many readers, how big a region and how many regions to keep open depend on t
 time you open a file, perf-viz offers to tune them; later it is **Options → Tune reader…**, which
 opens in its own window so you can keep working in the loaded profile.
 
-![The first-run question: tune the reader now, or skip](perf-viz/docs/images/prompt.png)
+![The first-run question: tune the reader now, or skip][prompt]
 
 The tuner only reads your recording; it writes nothing and needs no extra disk space.
 
@@ -81,7 +81,7 @@ The tuner only reads your recording; it writes nothing and needs no extra disk s
    and the built-in defaults, on full-length reads. Among settings within 5% of the fastest it prefers
    larger regions, then fewer readers.
 
-![The tuner window while it runs, and its result](perf-viz/docs/images/tuning.png)
+![The tuner window while it runs, and its result][tuning]
 
 The result is saved in the `[reader]` table of the settings file, and the same values can be edited by
 hand or in **Options**. Parse threads and DWARF are left alone: they depend on the CPU work of a real
@@ -114,3 +114,9 @@ dwarf = "auto"                  # auto | never
 builds with link-time optimisation. The `scripted` feature adds flags for checking the GUI without a
 person (clicks, screenshots); it is off in normal builds, and `perf-viz/docs/screenshots.sh` uses it to make
 the images on this page.
+
+[loading]: perf-viz/docs/images/loading.png
+[summary]: perf-viz/docs/images/summary.png
+[flame]: perf-viz/docs/images/flame.png
+[prompt]: perf-viz/docs/images/prompt.png
+[tuning]: perf-viz/docs/images/tuning.png

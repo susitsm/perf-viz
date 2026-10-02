@@ -1,3 +1,8 @@
+#![cfg_attr(doc, doc = ::embed_doc_image::embed_image!("loading", "docs/images/loading.png"))]
+#![cfg_attr(doc, doc = ::embed_doc_image::embed_image!("summary", "docs/images/summary.png"))]
+#![cfg_attr(doc, doc = ::embed_doc_image::embed_image!("flame", "docs/images/flame.png"))]
+#![cfg_attr(doc, doc = ::embed_doc_image::embed_image!("prompt", "docs/images/prompt.png"))]
+#![cfg_attr(doc, doc = ::embed_doc_image::embed_image!("tuning", "docs/images/tuning.png"))]
 #![doc = include_str!("../../README.md")]
 
 mod cli;

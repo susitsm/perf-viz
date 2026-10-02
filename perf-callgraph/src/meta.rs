@@ -7,7 +7,7 @@ use std::path::Path;
 use byteorder::{BigEndian, LittleEndian};
 use linux_perf_data::PerfFileReader;
 use linux_perf_event_reader::EventRecord;
-use perf_reader::{Report, ctx::Ctx, readers::pipeline::Config, records::for_each_record};
+use perf_reader::{Ctx, Report, readers::pipeline::Config, records::for_each_record};
 
 use crate::Result;
 

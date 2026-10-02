@@ -17,7 +17,7 @@ use byteorder::{BigEndian, LittleEndian};
 use linux_perf_data::PerfFileReader;
 
 use perf_reader::{
-    ctx::Ctx,
+    Ctx,
     readers::ordered::{self, Config, Consumer, Options},
     synth,
 };

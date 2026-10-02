@@ -29,7 +29,7 @@ use std::{
 use byteorder::{BigEndian, ByteOrder, LittleEndian};
 use linux_perf_event_reader::EventRecord;
 use perf_reader::{
-    ctx::Ctx,
+    Ctx,
     readers::ordered::{self, Consumer},
     records::for_each_record,
 };

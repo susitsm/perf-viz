@@ -5,7 +5,7 @@ use std::path::Path;
 use byteorder::{BigEndian, LittleEndian};
 use linux_perf_data::PerfFileReader;
 
-use perf_reader::{ctx::Ctx, readers::pipeline::Config, split};
+use perf_reader::{Ctx, readers::pipeline::Config, split};
 
 use crate::{Result, fast::parse_chunk, stats::Stats};
 

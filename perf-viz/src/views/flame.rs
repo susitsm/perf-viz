@@ -3,7 +3,7 @@
 use eframe::egui::{
     self, Align2, Color32, FontId, Key, Rect, Sense, Stroke, StrokeKind, pos2, vec2,
 };
-use perf_callgraph::model::{FrameInfo, ModuleId, NodeId, Profile, ROOT};
+use perf_callgraph::model::{FrameInfo, ModuleId, NodeId, Profile, ROOT, Trie};
 
 use super::{ViewContext, flame_layout, flame_layout::Item};
 use crate::{
@@ -46,6 +46,18 @@ pub(crate) struct ScrollKey {
     truncated: bool,
     focus: NodeId,
     totals_version: u64,
+}
+
+/// Two Escape presses within this many seconds zoom all the way out.
+const DOUBLE_ESCAPE_SECS: f64 = 0.2;
+
+/// Where Escape moves the zoom: one level up, or all the way out on a quick second press.
+fn zoom_out(trie: &Trie, focus: NodeId, double_press: bool) -> NodeId {
+    if double_press {
+        ROOT
+    } else {
+        trie.nodes[focus].parent.unwrap_or(focus)
+    }
 }
 
 pub(crate) const ROW_H: f32 = 18.0;
@@ -95,10 +107,13 @@ pub(crate) fn flame_box_rect(rect: Rect, bottom: f32, item: &Item) -> Rect {
 impl App {
     pub(crate) fn draw_flame_graph(&mut self, ui: &mut egui::Ui, view_context: &ViewContext<'_>) {
         let (trie, view) = (view_context.trie, view_context.view);
-        if ui.input(|i| i.key_pressed(Key::Escape))
-            && let Some(parent) = trie.nodes[self.focus[view]].parent
-        {
-            self.focus[view] = parent;
+        let escape_time = ui.input(|input| input.key_pressed(Key::Escape).then_some(input.time));
+        if let Some(now) = escape_time {
+            let double_press = self
+                .last_escape
+                .is_some_and(|last| now - last < DOUBLE_ESCAPE_SECS);
+            self.focus[view] = zoom_out(trie, self.focus[view], double_press);
+            self.last_escape = Some(now);
         }
         let focus = self.focus[view];
         let available = ui.available_size();
@@ -305,5 +320,43 @@ impl App {
             ));
             ui.label(format!("{} {unit} self", cost.format(self_count)));
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use perf_callgraph::{
+        index::Idx,
+        model::{FrameId, TrieBuilder},
+    };
+
+    /// root > a > b > c
+    fn chain() -> (Trie, [NodeId; 3]) {
+        let mut builder = TrieBuilder::default();
+        builder.insert([0, 1, 2].map(FrameId::new));
+        let trie = builder.finish();
+        let a = trie.children(ROOT)[0];
+        let b = trie.children(a)[0];
+        let c = trie.children(b)[0];
+        (trie, [a, b, c])
+    }
+
+    #[test]
+    fn one_escape_zooms_out_one_level() {
+        let (trie, [a, b, c]) = chain();
+        assert_eq!(zoom_out(&trie, c, false), b);
+        assert_eq!(zoom_out(&trie, b, false), a);
+        assert_eq!(
+            zoom_out(&trie, ROOT, false),
+            ROOT,
+            "the root has nowhere further out"
+        );
+    }
+
+    #[test]
+    fn a_quick_second_escape_zooms_all_the_way_out() {
+        let (trie, [_, _, c]) = chain();
+        assert_eq!(zoom_out(&trie, c, true), ROOT);
     }
 }

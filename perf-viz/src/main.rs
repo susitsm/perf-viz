@@ -264,6 +264,8 @@ struct App {
     items_key: Option<ItemsKey>,
     /// Where the flame graph is scrolled to.
     flame_scroll: FlameScroll,
+    /// When Escape was last pressed in the flame graph (egui time, seconds).
+    last_escape: Option<f64>,
 
     harness: Harness,
 }
@@ -382,6 +384,7 @@ impl App {
             items: Vec::new(),
             items_key: None,
             flame_scroll: FlameScroll::default(),
+            last_escape: None,
             harness: args.harness,
         };
         if app.path.is_some() && !app.pending_load {
@@ -1257,7 +1260,9 @@ impl App {
                         self.focus[view] = node;
                     }
                 }
-                ui.weak("(click a box to zoom, Esc to zoom out)");
+                ui.weak(
+                    "(click a box to zoom, Esc to zoom out, Esc twice to zoom all the way out)",
+                );
                 if searching {
                     ui.separator();
                     let Coverage {

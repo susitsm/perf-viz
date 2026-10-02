@@ -8,7 +8,6 @@ workspace = true
 
 [dependencies]
 byteorder = "1.5.0"
-clap = { version = "4.6.7", features = ["derive"] }
 crossbeam-channel = "0.5.17"
 libc = "0.2.189"
 linux-perf-data = "0.13.0"

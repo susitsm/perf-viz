@@ -1,4 +1,4 @@
-//! Getting the records of a `perf.data` file off the disk fast, and tuning how.
+//! Getting the records of a `perf.data` file off the disk fast.
 //!
 //! - [`readers`]: the pipelines that read the file: [`readers::ordered`] (what the viewer loads
 //!   through: regions claimed in file order, committed in order, then processed in parallel) and
@@ -8,15 +8,13 @@
 //!   regions, run the multi-reader pipeline with a caller-supplied worker, and fall back to one
 //!   reader if the region bounds don't verify. Every consumer that needs only the small task and
 //!   mmap records goes through here, so the guessing/verification/fallback logic exists once.
-//! - [`tune`] and [`synth`]: measure the disk and pick reader settings, on the recording or on a
-//!   generated one.
+//! - [`synth`]: writes a generated recording, for tests and for tuning without a real one.
 //! - [`for_each_record`] and [`Ctx`]: walk records and parse kernel events.
 
 pub mod anchor;
 pub mod readers;
 pub mod split;
 pub mod synth;
-pub mod tune;
 
 use std::{
     path::Path,

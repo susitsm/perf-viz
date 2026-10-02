@@ -30,7 +30,7 @@ use std::{
 
 use byteorder::LittleEndian;
 
-use crate::{
+use perf_reader::{
     Result, anchor,
     readers::ordered::{self, Config, Consumer},
     split,
@@ -106,6 +106,7 @@ impl Default for Options {
 
 impl Options {
     /// The same plan with every duration multiplied by `f` (for quick runs and tests).
+    #[cfg(any(test, feature = "scripted"))]
     pub fn scaled(mut self, factor: f64) -> Self {
         self.probe_secs *= factor;
         self.sweep_secs *= factor;
@@ -141,7 +142,8 @@ pub struct Report {
     pub default_gbps: Option<f64>,
     /// Bytes read by a full-length trial.
     pub trial_bytes: u64,
-    /// Every trial run, in the order run.
+    /// Every trial run, in the order run (only the tests read it).
+    #[cfg_attr(not(test), allow(dead_code))]
     pub trials: Vec<Trial>,
     /// Things the user should know about how reliable this is.
     pub notes: Vec<String>,
@@ -173,10 +175,6 @@ pub struct ByteRange {
 impl ByteRange {
     pub fn len(&self) -> u64 {
         self.end - self.start
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.end == self.start
     }
 }
 
@@ -289,7 +287,7 @@ impl Consumer for Walk {
     type Events = ();
 
     fn extract(&self, _region: usize, local: &mut u64, buffer: &[u8]) -> Result<()> {
-        crate::for_each_record::<LittleEndian>(buffer, |_| {
+        perf_reader::for_each_record::<LittleEndian>(buffer, |_| {
             *local += 1;
             Ok(())
         })

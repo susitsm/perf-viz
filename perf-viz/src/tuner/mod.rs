@@ -1,5 +1,5 @@
-//! The reader tuner window: measures the disk, tries reader settings, and offers the best ones.
-//! The measuring itself is `perf_reader::tune`; this is the window around it.
+//! The reader tuner: measures the disk, tries reader settings, and offers the best ones. This file
+//! is the window; the measuring is in [`tune`].
 
 use std::{
     path::{Path, PathBuf},
@@ -10,13 +10,12 @@ use std::{
     },
 };
 
-use eframe::egui::{self, RichText, vec2};
-use perf_reader::{
-    synth,
-    tune::{self, Event, Report, Settings},
-};
-
+use self::tune::{Event, Report, Settings};
 use crate::theme::Pal;
+use eframe::egui::{self, RichText, vec2};
+use perf_reader::synth;
+
+mod tune;
 
 #[derive(Default)]
 struct Shared {

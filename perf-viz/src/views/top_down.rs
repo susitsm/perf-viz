@@ -3,10 +3,13 @@
 use std::collections::HashSet;
 
 use eframe::egui::{self};
-use perf_callgraph::model::{Profile, ROOT, Trie};
+use perf_callgraph::{
+    index::IndexVec,
+    model::{FrameId, NodeId, Profile, ROOT, Trie},
+};
 
 use super::{
-    RowsKey, TdRow,
+    NodeCounts, RowsKey, TdRow,
     table::{self, Arrow, Click, Columns, RowData},
 };
 use crate::{fmt::Cost, views};
@@ -14,14 +17,14 @@ use crate::{fmt::Cost, views};
 /// State of the top-down tree. Node ids differ between the full and truncated tries, so per view.
 #[derive(Default)]
 pub(crate) struct TdState {
-    expanded: [HashSet<u32>; 2],
+    expanded: [HashSet<NodeId>; 2],
     /// The user (or the first draw) has set this view's expansion.
     touched: [bool; 2],
     rows: Vec<TdRow>,
     rows_key: Option<RowsKey>,
     /// Bumped whenever `expanded` changes.
     version: u64,
-    selected: [Option<u32>; 2],
+    selected: [Option<NodeId>; 2],
 }
 
 /// The top-down call tree: every frame with inclusive and self cost, heaviest first.
@@ -30,10 +33,10 @@ pub(crate) fn draw_top_down(
     ui: &mut egui::Ui,
     profile: &Profile,
     trie: &Trie,
-    totals: &[u64],
-    selfs: &[u64],
+    totals: &NodeCounts,
+    selfs: &NodeCounts,
     cost: Cost,
-    matches: &[bool],
+    matches: &IndexVec<FrameId, bool>,
     searching: bool,
     state: &mut TdState,
     view: usize,
@@ -84,11 +87,12 @@ pub(crate) fn draw_top_down(
             sort: None,
         },
         rows.len(),
-        totals[ROOT as usize],
+        totals[ROOT],
         |i| {
             let row = rows[i];
-            let node = trie.nodes[row.node as usize];
-            let frame = &profile.frames[node.frame as usize];
+            let node = trie.nodes[row.node];
+            let frame_id = node.frame.expect("a row is never the root");
+            let frame = &profile.frames[frame_id];
             RowData {
                 depth: row.depth,
                 arrow: if !row.expandable {
@@ -100,9 +104,9 @@ pub(crate) fn draw_top_down(
                 },
                 name: &frame.name,
                 module: profile.module_name(frame.module),
-                cost: totals[row.node as usize],
-                self_cost: Some(selfs[row.node as usize]),
-                highlight: searching && matches[node.frame as usize],
+                cost: totals[row.node],
+                self_cost: Some(selfs[row.node]),
+                highlight: searching && matches[frame_id],
                 suspect: frame.suspect,
                 selected: selected == Some(row.node),
             }

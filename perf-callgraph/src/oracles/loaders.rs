@@ -9,17 +9,24 @@ use std::{
 use super::{recording, replay};
 use crate::{
     load::{self, Options},
-    model::{Profile, ROOT, Trie},
+    model::{FrameId, NodeId, Profile, ROOT, Trie},
 };
 
 struct CanonNode {
     total: u32,
     self_count: u32,
-    node: u32,
+    node: NodeId,
 }
 
-fn extend_path_hash(path_hash: u64, profile: &Profile, child_frame: u32) -> u64 {
-    let frame = &profile.frames[child_frame as usize];
+/// The frame of a node other than the root.
+fn frame_of(trie: &Trie, node: NodeId) -> FrameId {
+    trie.nodes[node]
+        .frame
+        .expect("a node other than the root has a frame")
+}
+
+fn extend_path_hash(path_hash: u64, profile: &Profile, child_frame: FrameId) -> u64 {
+    let frame = &profile.frames[child_frame];
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     (
         path_hash,
@@ -36,7 +43,7 @@ fn canon(profile: &Profile, trie: &Trie) -> HashMap<u64, CanonNode> {
     let mut out = HashMap::new();
     let mut stack = vec![(ROOT, 0u64)];
     while let Some((node_id, hash)) = stack.pop() {
-        let node = trie.nodes[node_id as usize];
+        let node = trie.nodes[node_id];
         out.insert(
             hash,
             CanonNode {
@@ -46,48 +53,52 @@ fn canon(profile: &Profile, trie: &Trie) -> HashMap<u64, CanonNode> {
             },
         );
         for &child in trie.children(node_id) {
-            let child_frame = trie.nodes[child as usize].frame;
+            let child_frame = frame_of(trie, child);
             stack.push((child, extend_path_hash(hash, profile, child_frame)));
         }
     }
     out
 }
 
-fn hash_of_node_path(profile: &Profile, trie: &Trie, node: u32) -> u64 {
+fn hash_of_node_path(profile: &Profile, trie: &Trie, node: NodeId) -> u64 {
     let mut chain = Vec::new();
     let mut current = node;
     while current != ROOT {
         chain.push(current);
-        current = trie.nodes[current as usize].parent;
+        current = trie.nodes[current]
+            .parent
+            .expect("a node other than the root has a parent");
     }
     chain.iter().rev().fold(0u64, |hash, &step| {
-        extend_path_hash(hash, profile, trie.nodes[step as usize].frame)
+        extend_path_hash(hash, profile, frame_of(trie, step))
     })
 }
 
-fn path_of(profile: &Profile, trie: &Trie, mut node: u32) -> String {
+fn path_of(profile: &Profile, trie: &Trie, mut node: NodeId) -> String {
     let mut names = Vec::new();
     while node != ROOT {
         names.push(
-            profile.frames[trie.nodes[node as usize].frame as usize]
+            profile.frames[frame_of(trie, node)]
                 .name
                 .chars()
                 .take(40)
                 .collect::<String>(),
         );
-        node = trie.nodes[node as usize].parent;
+        node = trie.nodes[node]
+            .parent
+            .expect("a node other than the root has a parent");
     }
     names.reverse();
     let tail: Vec<_> = names.iter().rev().take(4).rev().cloned().collect();
     format!("depth {} ... {}", names.len(), tail.join(" > "))
 }
 
-fn children_of(profile: &Profile, trie: &Trie, node: u32) -> Vec<String> {
+fn children_of(profile: &Profile, trie: &Trie, node: NodeId) -> Vec<String> {
     trie.children(node)
         .iter()
         .map(|&child| {
-            let node = trie.nodes[child as usize];
-            let frame = &profile.frames[node.frame as usize];
+            let node = trie.nodes[child];
+            let frame = &profile.frames[frame_of(trie, child)];
             format!(
                 "{} [{}]{} total {} self {}",
                 frame.name.chars().take(48).collect::<String>(),
@@ -111,7 +122,9 @@ fn describe_divergence(
 ) -> String {
     let (new, new_trie) = streaming;
     let (old, old_trie) = replay;
-    let parent = new_trie.nodes[differing.node as usize].parent;
+    let parent = new_trie.nodes[differing.node]
+        .parent
+        .expect("a node other than the root has a parent");
     let replay_children = replay_nodes
         .get(&hash_of_node_path(new, new_trie, parent))
         .map(|old_parent| children_of(old, old_trie, old_parent.node));

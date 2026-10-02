@@ -681,7 +681,7 @@ impl App {
                     self.timeline_data.as_ref().unwrap(),
                     TimelineSelection {
                         range: self.range,
-                        shown_total: self.totals[ROOT as usize],
+                        shown_total: self.totals[ROOT],
                         selected_tid: self.sel_tid,
                     },
                     view_context,
@@ -716,7 +716,7 @@ impl App {
             self.timeline_data.as_ref().unwrap(),
             TimelineSelection {
                 range: self.range,
-                shown_total: self.totals[ROOT as usize],
+                shown_total: self.totals[ROOT],
                 selected_tid: self.sel_tid,
             },
             view_context,
@@ -738,8 +738,8 @@ mod tests {
 
     fn profile(samples: &[(u64, i32, i32)]) -> Profile {
         Profile {
-            modules: vec![],
-            frames: vec![],
+            modules: Default::default(),
+            frames: Default::default(),
             full: Trie::default(),
             truncated: Trie::default(),
             samples: samples
@@ -749,8 +749,8 @@ mod tests {
                     period: 1,
                     pid,
                     tid,
-                    full: 0,
-                    truncated: 0,
+                    full: ROOT,
+                    truncated: ROOT,
                 })
                 .collect(),
             comm: Default::default(),

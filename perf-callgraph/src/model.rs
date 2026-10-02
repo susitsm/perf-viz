@@ -5,25 +5,45 @@
 //! - `full`: every unwound frame, including the *suspect tail* (see [`FrameInfo::suspect`]);
 //! - `truncated`: the same samples with suspect frames dropped.
 
+use std::num::NonZeroU32;
+
 use rustc_hash::FxHashMap;
 
-/// Module index for frames that lie in no known module.
-pub const NO_MODULE: u32 = u32::MAX;
-pub const ROOT: u32 = 0;
+use crate::{
+    define_index,
+    index::{Idx, IndexVec},
+};
+
+define_index!(
+    /// A module (executable or shared library): an index into [`Profile::modules`].
+    pub ModuleId
+);
+define_index!(
+    /// A logical frame: an index into [`Profile::frames`].
+    pub FrameId
+);
+define_index!(
+    /// A node of a call [`Trie`]; node ids of the full and the truncated trie are unrelated.
+    pub NodeId
+);
+
+/// The synthetic root of every trie.
+pub const ROOT: NodeId = NodeId(NonZeroU32::MIN);
 
 /// What makes two logical frames the same one: the function name, the module, and whether it is in a
 /// suspect tail.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(crate) struct FrameKey {
     pub name: String,
-    pub module: u32,
+    pub module: Option<ModuleId>,
     pub suspect: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct FrameInfo {
     pub name: String,
-    pub module: u32,
+    /// `None` for frames that lie in no known module.
+    pub module: Option<ModuleId>,
     pub file: Option<String>,
     pub line: Option<u32>,
     /// The frame lies at or beyond the first return address that failed validation
@@ -36,117 +56,139 @@ pub struct FrameInfo {
 
 #[derive(Clone, Copy, Debug)]
 pub struct Node {
-    pub parent: u32,
-    /// Index into `Profile::frames`; `u32::MAX` for the synthetic root.
-    pub frame: u32,
+    /// `None` for the synthetic root.
+    pub parent: Option<NodeId>,
+    /// `None` for the synthetic root.
+    pub frame: Option<FrameId>,
     /// Samples whose stack passes through this node (inclusive).
     pub total: u32,
     /// Samples whose stack ends here.
     pub self_count: u32,
 }
 
-/// A call trie in compact form: children of node `n` are `children[child_start[n]..child_start[n+1]]`,
-/// sorted by descending `total`.
+/// A call trie in compact form: the children of node `n` are
+/// `children[child_start[n]..child_start[n + 1]]`, sorted by descending `total`.
 #[derive(Default)]
 pub struct Trie {
-    pub nodes: Vec<Node>,
-    pub child_start: Vec<u32>,
-    pub children: Vec<u32>,
+    pub nodes: IndexVec<NodeId, Node>,
+    child_start: Vec<u32>,
+    children: Vec<NodeId>,
 }
 
 impl Trie {
-    pub fn children(&self, node: u32) -> &[u32] {
+    pub fn children(&self, node: NodeId) -> &[NodeId] {
         let (start, end) = (
-            self.child_start[node as usize] as usize,
-            self.child_start[node as usize + 1] as usize,
+            self.child_start[node.index()] as usize,
+            self.child_start[node.index() + 1] as usize,
         );
         &self.children[start..end]
     }
 
     pub fn total(&self) -> u32 {
-        self.nodes[ROOT as usize].total
+        self.nodes[ROOT].total
     }
 }
 
+/// The edge from a node to its child for one frame.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+struct Edge {
+    parent: NodeId,
+    frame: FrameId,
+}
+
 pub struct TrieBuilder {
-    nodes: Vec<Node>,
-    index: FxHashMap<(u32, u32), u32>,
+    nodes: IndexVec<NodeId, Node>,
+    children_by_edge: FxHashMap<Edge, NodeId>,
 }
 
 impl Default for TrieBuilder {
     fn default() -> Self {
         Self {
-            nodes: vec![Node {
-                parent: u32::MAX,
-                frame: u32::MAX,
+            nodes: IndexVec::from_raw(vec![Node {
+                parent: None,
+                frame: None,
                 total: 0,
                 self_count: 0,
-            }],
-            index: FxHashMap::default(),
+            }]),
+            children_by_edge: FxHashMap::default(),
         }
     }
 }
 
 impl TrieBuilder {
     /// The child of `parent` for `frame`, created if needed.
-    pub fn child(&mut self, parent: u32, frame: u32) -> u32 {
-        *self.index.entry((parent, frame)).or_insert_with(|| {
-            self.nodes.push(Node {
-                parent,
-                frame,
-                total: 0,
-                self_count: 0,
-            });
-            self.nodes.len() as u32 - 1
-        })
+    pub fn child(&mut self, parent: NodeId, frame: FrameId) -> NodeId {
+        *self
+            .children_by_edge
+            .entry(Edge { parent, frame })
+            .or_insert_with(|| {
+                self.nodes.push(Node {
+                    parent: Some(parent),
+                    frame: Some(frame),
+                    total: 0,
+                    self_count: 0,
+                })
+            })
     }
 
-    pub fn add_self(&mut self, node: u32, count: u32) {
-        self.nodes[node as usize].self_count += count;
+    pub fn add_self(&mut self, node: NodeId, count: u32) {
+        self.nodes[node].self_count += count;
     }
 
     /// Add one sample whose stack is `path` (root-first frame ids).
-    pub fn insert(&mut self, path: impl IntoIterator<Item = u32>) {
-        let mut cur = ROOT;
+    pub fn insert(&mut self, path: impl IntoIterator<Item = FrameId>) {
+        let mut current = ROOT;
         for frame in path {
-            cur = self.child(cur, frame);
+            current = self.child(current, frame);
         }
-        self.add_self(cur, 1);
+        self.add_self(current, 1);
     }
 
     pub fn finish(mut self) -> Trie {
         // Children are always created after their parent, so one reverse pass gives inclusive totals.
-        for i in 0..self.nodes.len() {
-            self.nodes[i].total = self.nodes[i].self_count;
+        for node in self.nodes.iter_mut() {
+            node.total = node.self_count;
         }
-        for i in (1..self.nodes.len()).rev() {
-            let (parent, total) = (self.nodes[i].parent as usize, self.nodes[i].total);
-            self.nodes[parent].total += total;
+        for id in self.nodes.indices().skip(1).rev() {
+            let node = self.nodes[id];
+            let parent = node
+                .parent
+                .expect("a node other than the root has a parent");
+            self.nodes[parent].total += node.total;
         }
         // CSR children, heaviest first (ties by node id for a stable layout).
         let node_count = self.nodes.len();
-        let mut count = vec![0u32; node_count + 1];
-        for node in &self.nodes[1..] {
-            count[node.parent as usize + 1] += 1;
+        let mut child_start = vec![0u32; node_count + 1];
+        for node in self.nodes.iter().skip(1) {
+            let parent = node
+                .parent
+                .expect("a node other than the root has a parent");
+            child_start[parent.index() + 1] += 1;
         }
-        for i in 0..node_count {
-            count[i + 1] += count[i];
+        for index in 0..node_count {
+            child_start[index + 1] += child_start[index];
         }
-        let mut fill = count.clone();
-        let mut children = vec![0u32; node_count.saturating_sub(1)];
-        for (i, node) in self.nodes.iter().enumerate().skip(1) {
-            let slot = &mut fill[node.parent as usize];
-            children[*slot as usize] = i as u32;
+        let mut next_slot = child_start.clone();
+        let mut children = vec![ROOT; node_count.saturating_sub(1)];
+        for (id, node) in self.nodes.iter_enumerated().skip(1) {
+            let parent = node
+                .parent
+                .expect("a node other than the root has a parent");
+            let slot = &mut next_slot[parent.index()];
+            children[*slot as usize] = id;
             *slot += 1;
         }
         for parent in 0..node_count {
-            let (start, end) = (count[parent] as usize, count[parent + 1] as usize);
+            let (start, end) = (
+                child_start[parent] as usize,
+                child_start[parent + 1] as usize,
+            );
             children[start..end]
-                .sort_by_key(|&child| (std::cmp::Reverse(self.nodes[child as usize].total), child));
+                .sort_by_key(|&child| (std::cmp::Reverse(self.nodes[child].total), child));
         }
         Trie {
             nodes: self.nodes,
-            child_start: count,
+            child_start,
             children,
         }
     }
@@ -197,15 +239,15 @@ pub struct SampleRef {
     pub pid: i32,
     pub tid: i32,
     /// The node where the sample's stack ends in [`Profile::full`] and [`Profile::truncated`].
-    pub full: u32,
-    pub truncated: u32,
+    pub full: NodeId,
+    pub truncated: NodeId,
 }
 
 pub struct Profile {
     /// Full paths of the modules, indexed by module id. Several distinct modules can share a
     /// file name (e.g. many `build_script_build`), so identity must use the path.
-    pub modules: Vec<String>,
-    pub frames: Vec<FrameInfo>,
+    pub modules: IndexVec<ModuleId, String>,
+    pub frames: IndexVec<FrameId, FrameInfo>,
     pub full: Trie,
     pub truncated: Trie,
     pub samples: Vec<SampleRef>,
@@ -216,16 +258,27 @@ pub struct Profile {
 
 impl Profile {
     /// The module's file name, for display.
-    pub fn module_name(&self, module: u32) -> &str {
+    pub fn module_name(&self, module: Option<ModuleId>) -> &str {
         self.module_path(module)
             .rsplit('/')
             .next()
             .unwrap_or("[no module]")
     }
 
-    pub fn module_path(&self, module: u32) -> &str {
-        self.modules
-            .get(module as usize)
+    pub fn module_path(&self, module: Option<ModuleId>) -> &str {
+        module
+            .and_then(|module| self.modules.get(module))
             .map_or("[no module]", String::as_str)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_node_stays_16_bytes_and_an_optional_id_costs_nothing() {
+        assert_eq!(size_of::<Node>(), 16);
+        assert_eq!(size_of::<Option<NodeId>>(), size_of::<NodeId>());
     }
 }

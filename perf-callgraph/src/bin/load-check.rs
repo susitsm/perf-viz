@@ -138,8 +138,8 @@ fn print_heaviest_root_children(profile: &Profile, name: &str, trie: &Trie) {
         trie.total()
     );
     for &child in trie.children(ROOT).iter().take(6) {
-        let node = trie.nodes[child as usize];
-        let frame = &profile.frames[node.frame as usize];
+        let node = trie.nodes[child];
+        let frame = &profile.frames[node.frame.expect("a child of the root has a frame")];
         println!(
             "  {:>6} {:>5.1}%  {}{}  [{}]",
             node.total,

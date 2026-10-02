@@ -14,7 +14,9 @@
 use std::{collections::HashMap, sync::Arc};
 
 use crate::{
-    model::NO_MODULE,
+    define_index,
+    index::{Idx, IndexVec},
+    model::ModuleId,
     unwinding::events::{Event, EventKind},
 };
 
@@ -36,14 +38,19 @@ pub struct Mapping {
     /// `None` for anonymous/pseudo mappings (JIT code, `[vdso]`...): they still shadow whatever
     /// they overlap, but there is no file to unwind or symbolize from.
     pub path: Option<Arc<str>>,
-    /// Index into [`AddressSpaces::module_paths`], or [`NO_MODULE`] when `path` is `None`.
-    pub module: u32,
+    /// Index into [`AddressSpaces::module_paths`]; `None` when `path` is `None`.
+    pub module: Option<ModuleId>,
 }
 
-#[derive(Clone, Debug, Default)]
+define_index!(
+    /// An address-space epoch of one process.
+    pub EpochId
+);
+
+#[derive(Clone, Debug)]
 pub struct Epoch {
     /// Unique across the whole [`AddressSpaces`], `0..epoch_count()`; for indexing side tables.
-    pub id: u32,
+    pub id: EpochId,
     pub start_time: u64,
     /// Bumped whenever `maps` changes, so users can tell when something derived from them is stale.
     pub version: u32,
@@ -80,7 +87,7 @@ pub fn find_in(maps: &[Mapping], addr: u64) -> Option<&Mapping> {
 /// A snapshot of an epoch, cheap to take and safe to keep while the model keeps changing.
 #[derive(Clone, Debug)]
 pub struct EpochSnap {
-    pub id: u32,
+    pub id: EpochId,
     pub version: u32,
     pub maps: Arc<Vec<Mapping>>,
 }
@@ -90,9 +97,9 @@ pub struct AddressSpaces {
     procs: HashMap<i32, Vec<Epoch>>,
     /// Last command name seen per process.
     pub comm: HashMap<i32, String>,
-    next_epoch_id: u32,
-    module_ids: HashMap<Arc<str>, u32>,
-    module_paths: Vec<Arc<str>>,
+    epoch_count: usize,
+    module_ids: HashMap<Arc<str>, ModuleId>,
+    module_paths: IndexVec<ModuleId, Arc<str>>,
 }
 
 impl AddressSpaces {
@@ -111,8 +118,8 @@ impl AddressSpaces {
     }
 
     fn new_epoch(&mut self, start_time: u64, maps: Arc<Vec<Mapping>>) -> Epoch {
-        let id = self.next_epoch_id;
-        self.next_epoch_id += 1;
+        let id = EpochId::new(self.epoch_count);
+        self.epoch_count += 1;
         Epoch {
             id,
             start_time,
@@ -121,13 +128,12 @@ impl AddressSpaces {
         }
     }
 
-    fn module_id(&mut self, path: &str) -> u32 {
+    fn module_id(&mut self, path: &str) -> ModuleId {
         if let Some(&id) = self.module_ids.get(path) {
             return id;
         }
         let shared_path: Arc<str> = Arc::from(path);
-        let id = self.module_paths.len() as u32;
-        self.module_paths.push(shared_path.clone());
+        let id = self.module_paths.push(shared_path.clone());
         self.module_ids.insert(shared_path, id);
         id
     }
@@ -163,12 +169,8 @@ impl AddressSpaces {
                 ..
             } => {
                 let file = is_file_backed(path);
-                let module = if file {
-                    self.module_id(path)
-                } else {
-                    NO_MODULE
-                };
-                let path = file.then(|| self.module_paths[module as usize].clone());
+                let module = file.then(|| self.module_id(path));
+                let path = module.map(|module| self.module_paths[module].clone());
                 if self.procs.get(pid).is_none_or(|epochs| epochs.is_empty()) {
                     let ep = self.new_epoch(0, Arc::default()); // process that predates the recording
                     self.procs.insert(*pid, vec![ep]);
@@ -213,12 +215,12 @@ impl AddressSpaces {
     }
 
     /// Paths of all file-backed modules seen, indexed by module id.
-    pub fn module_paths(&self) -> &[Arc<str>] {
+    pub fn module_paths(&self) -> &IndexVec<ModuleId, Arc<str>> {
         &self.module_paths
     }
 
     pub fn epoch_count(&self) -> usize {
-        self.next_epoch_id as usize
+        self.epoch_count
     }
 
     pub fn pids(&self) -> impl Iterator<Item = &i32> {
@@ -345,7 +347,7 @@ mod tests {
                 .lookup(10, 5, addr)
                 .expect("still a mapping, just not a file");
             assert!(
-                mapping.path.is_none() && mapping.module == NO_MODULE,
+                mapping.path.is_none() && mapping.module.is_none(),
                 "{addr:#x} must not resolve to a file"
             );
         }

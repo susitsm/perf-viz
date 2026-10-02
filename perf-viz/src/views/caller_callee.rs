@@ -4,16 +4,16 @@ use eframe::egui::{self};
 use perf_callgraph::model::{Profile, ROOT, Trie};
 
 use super::{
-    Functions, Weighted, func_row, noun,
+    FuncId, Functions, NodeCounts, Weighted, func_row, noun,
     table::{self, Click, Columns},
 };
 use crate::{fmt::Cost, views};
 
 /// State of the caller/callee view.
 pub(crate) struct CcState {
-    pub(crate) selected: Option<u32>,
+    pub(crate) selected: Option<FuncId>,
     sort: views::SortBy,
-    list: Vec<u32>,
+    list: Vec<FuncId>,
     list_key: Option<ListKey>,
     /// Callers and callees of the selected function.
     lists: Option<CallLists>,
@@ -29,10 +29,10 @@ pub(crate) struct ListKey {
 
 /// The callers and callees of one function, for the view version they were built for.
 pub(crate) struct CallLists {
-    func: u32,
+    func: FuncId,
     version: u64,
-    callers: Vec<Weighted>,
-    callees: Vec<Weighted>,
+    callers: Vec<Weighted<FuncId>>,
+    callees: Vec<Weighted<FuncId>>,
 }
 
 impl Default for CcState {
@@ -50,7 +50,7 @@ impl Default for CcState {
 pub(crate) fn refresh_call_lists(
     state: &mut CcState,
     trie: &Trie,
-    totals: &[u64],
+    totals: &NodeCounts,
     funcs: &Functions,
     version: u64,
 ) {
@@ -75,9 +75,9 @@ pub(crate) fn draw_related_functions(
     profile: &Profile,
     funcs: &Functions,
     (title, name): (&str, &str),
-    related: &[Weighted],
+    related: &[Weighted<FuncId>],
     (cost, inclusive): (Cost, u64),
-) -> Option<u32> {
+) -> Option<FuncId> {
     ui.strong(title);
     let click = table::draw(
         ui,
@@ -107,7 +107,7 @@ pub(crate) fn draw_call_lists_panel(
     costs: &views::Costs,
     cost: Cost,
     state: &CcState,
-) -> Option<u32> {
+) -> Option<FuncId> {
     let mut next = None;
     egui::Panel::bottom("cc_lists")
         .resizable(true)
@@ -119,19 +119,13 @@ pub(crate) fn draw_call_lists_panel(
                 ui.weak("Select a function above to see who calls it and what it calls.");
                 return;
             };
-            let inclusive = costs.inclusive[*func as usize];
+            let inclusive = costs.inclusive[*func];
             ui.horizontal(|ui| {
-                ui.strong(
-                    funcs.funcs[*func as usize]
-                        .name
-                        .chars()
-                        .take(90)
-                        .collect::<String>(),
-                );
+                ui.strong(funcs.funcs[*func].name.chars().take(90).collect::<String>());
                 ui.weak(format!(
                     "inclusive {}, self {} {}; percentages are of the inclusive cost",
                     cost.format(inclusive),
-                    cost.format(costs.self_[*func as usize]),
+                    cost.format(costs.self_[*func]),
                     noun(profile, cost)
                 ));
             });
@@ -168,7 +162,7 @@ pub(crate) fn draw_caller_callee(
     profile: &Profile,
     funcs: &Functions,
     trie: &Trie,
-    totals: &[u64],
+    totals: &NodeCounts,
     costs: &views::Costs,
     cost: Cost,
     query: &str,
@@ -205,15 +199,15 @@ pub(crate) fn draw_caller_callee(
             }),
         },
         list.len(),
-        totals[ROOT as usize],
+        totals[ROOT],
         |i| {
             let func = list[i];
             func_row(
                 profile,
                 funcs,
                 func,
-                costs.inclusive[func as usize],
-                Some(costs.self_[func as usize]),
+                costs.inclusive[func],
+                Some(costs.self_[func]),
                 selected == Some(func),
             )
         },

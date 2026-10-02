@@ -19,7 +19,7 @@ pub(super) fn merge_states(states: Vec<Local>) -> Merged {
     for state in states {
         let map = merged.phys.merge(&state.trie);
         merged.rows.extend(state.rows.iter().map(|row| Row {
-            node: map[row.node as usize],
+            node: map[row.node],
             ..*row
         }));
         let counters = &mut merged.counters;

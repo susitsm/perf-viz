@@ -15,6 +15,7 @@
 
 pub mod tries;
 
+use crate::{index::IndexVec, model::ModuleId};
 use std::{
     fs::File,
     path::{Path, PathBuf},
@@ -256,7 +257,7 @@ pub fn symbolize_module(path: &Path, addrs: &[u64], mode: DwarfMode) -> ModuleRe
 
 /// The addresses of one module to look up.
 pub struct ModuleAddrs {
-    pub module: u32,
+    pub module: ModuleId,
     /// Sorted, unique.
     pub addrs: Vec<u64>,
 }
@@ -281,10 +282,10 @@ impl ModuleSymbols {
 /// Symbolize many modules in parallel, one module per task. `paths[module id]` is the file. Returns,
 /// per module id, its addresses and result.
 pub fn symbolize_many(
-    paths: &[PathBuf],
+    paths: &IndexVec<ModuleId, PathBuf>,
     per_module: Vec<ModuleAddrs>,
     mode: DwarfMode,
-) -> std::collections::HashMap<u32, ModuleSymbols> {
+) -> std::collections::HashMap<ModuleId, ModuleSymbols> {
     use std::sync::atomic::{AtomicUsize, Ordering};
     let next = AtomicUsize::new(0);
     let workers = std::thread::available_parallelism()
@@ -302,7 +303,7 @@ pub fn symbolize_many(
                         let Some(task) = tasks.get(i) else { return out };
                         out.push((
                             task.module,
-                            symbolize_module(&paths[task.module as usize], &task.addrs, mode),
+                            symbolize_module(&paths[task.module], &task.addrs, mode),
                         ));
                     }
                 })

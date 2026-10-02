@@ -13,10 +13,11 @@ use perf_reader::{Ctx, for_each_record, readers::ordered::Consumer};
 
 use crate::{
     Result,
-    unwinding::addrspace::{AddressSpaces, EpochSnap},
+    index::Idx,
+    unwinding::addrspace::{AddressSpaces, EpochId, EpochSnap},
     unwinding::binary::BinaryCache,
     unwinding::events::{Event, event_of},
-    unwinding::phys::PhysTrie,
+    unwinding::phys::{PhysNodeId, PhysTrie},
     unwinding::{
         EpochUnwind, PERF_REG_X86_BP, PERF_REG_X86_IP, PERF_REG_X86_SP, Phys, Scratch, UnwCache,
         unwind_sample,
@@ -33,7 +34,7 @@ pub(super) struct Row {
     pub(super) period: u64,
     pub(super) pid: i32,
     pub(super) tid: i32,
-    pub(super) node: u32,
+    pub(super) node: PhysNodeId,
 }
 
 #[derive(Default, Clone, Copy)]
@@ -102,7 +103,7 @@ pub(super) struct Loader {
     pub(super) spaces: RwLock<AddressSpaces>,
     pending: Mutex<Pending>,
     /// Latest unwinder per epoch id, with the epoch version it was built for; sharded by id.
-    unwinders: Vec<Mutex<HashMap<u32, VersionedUnwinder>>>,
+    unwinders: Vec<Mutex<HashMap<EpochId, VersionedUnwinder>>>,
     empty: Arc<EpochUnwind>,
     bins: BinaryCache,
 }
@@ -123,7 +124,7 @@ impl Loader {
     }
 
     fn unwinder_for(&self, snap: &EpochSnap) -> Arc<EpochUnwind> {
-        let mut shard = self.unwinders[snap.id as usize % UNWINDER_SHARDS]
+        let mut shard = self.unwinders[snap.id.index() % UNWINDER_SHARDS]
             .lock()
             .unwrap();
         if let Some(cached) = shard.get(&snap.id)
@@ -213,7 +214,7 @@ impl Loader {
             let snap = self.spaces.read().unwrap().snapshot(pid, time);
             let (key, eu) = match &snap {
                 Some(sn) => (
-                    ((sn.id as u64) << 32) | sn.version as u64,
+                    ((sn.id.index() as u64) << 32) | sn.version as u64,
                     self.unwinder_for(sn),
                 ),
                 None => (u64::MAX - 1, self.empty.clone()),

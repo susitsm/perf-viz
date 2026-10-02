@@ -24,11 +24,12 @@ use rustc_hash::FxHashMap;
 
 use crate::{
     Result,
-    model::{FrameInfo, LoadStats, NO_MODULE, Profile, Trie, TrieBuilder},
+    index::IndexVec,
+    model::{FrameId, FrameInfo, LoadStats, ModuleId, Profile, Trie, TrieBuilder},
     symbolizing::tries::{FrameTable, module_addresses, symbolize_modules, unmapped_frame},
     symbolizing::{DwarfMode, ModuleSymbols},
     unwinding::binary::{Binary, BinaryCache, SectionData},
-    unwinding::{PERF_REG_X86_BP, PERF_REG_X86_IP, PERF_REG_X86_SP, follows_call},
+    unwinding::{PERF_REG_X86_BP, PERF_REG_X86_IP, PERF_REG_X86_SP, Phys, follows_call},
 };
 
 type Unw = UnwinderX86_64<SectionData>;
@@ -41,7 +42,7 @@ struct Mod {
     end: u64,
     bias: u64,
     bin: Arc<Binary>,
-    module: u32,
+    module: ModuleId,
 }
 
 #[derive(Clone, Default)]
@@ -50,24 +51,9 @@ struct Proc {
     mods: Vec<Mod>,
 }
 
-#[derive(Clone, Copy)]
-struct Phys {
-    module: u32,
-    svma: u64,
-    suspect: bool,
-}
-
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Options {
     pub dwarf: DwarfMode,
-}
-
-/// A physical frame (module, static address, suspect-tail flag) whose logical frames are cached.
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
-struct ChainKey {
-    module: u32,
-    svma: u64,
-    suspect: bool,
 }
 
 /// The registers and stack copy of one sample.
@@ -166,8 +152,8 @@ struct Replayer {
     // framehop's cache tags entries with a 16-bit generation that wraps after 65,536 module additions,
     // so it is reset whenever the process changes instead of being shared across processes.
     cache_pid: i32,
-    module_ids: HashMap<PathBuf, u32>,
-    module_paths: Vec<PathBuf>,
+    module_ids: HashMap<PathBuf, ModuleId>,
+    module_paths: IndexVec<ModuleId, PathBuf>,
     /// All unwound frames, flat: sample i owns `stacks[offsets[i]..offsets[i + 1]]`, leaf first.
     stacks: Vec<Phys>,
     offsets: Vec<u32>,
@@ -182,7 +168,7 @@ impl Replayer {
             unwind_cache: CacheX86_64::new(),
             cache_pid: i32::MIN,
             module_ids: HashMap::new(),
-            module_paths: Vec::new(),
+            module_paths: IndexVec::new(),
             stacks: Vec::new(),
             offsets: vec![0],
         }
@@ -229,15 +215,11 @@ impl Replayer {
         let Some(bias) = bin.bias_for_mapping(mmap.address, mmap.page_offset, mmap.length) else {
             return;
         };
-        let next_id = self.module_ids.len() as u32;
         let module_paths = &mut self.module_paths;
         let module = *self
             .module_ids
             .entry(PathBuf::from(path))
-            .or_insert_with(|| {
-                module_paths.push(PathBuf::from(path));
-                next_id
-            });
+            .or_insert_with(|| module_paths.push(PathBuf::from(path)));
         self.cache_pid = i32::MIN; // this process's unwinder changes: the cache must not carry over
         let (start, end) = (mmap.address, mmap.address + mmap.length);
         let proc = self.procs.entry(mmap.pid).or_default();
@@ -287,12 +269,12 @@ impl Replayer {
             let suspect = suspect_from.is_some_and(|first| index >= first);
             self.stacks.push(match module_at(proc, address) {
                 Some(module) => Phys {
-                    module: module.module,
+                    module: Some(module.module),
                     svma: address.wrapping_sub(module.bias),
                     suspect,
                 },
                 None => Phys {
-                    module: NO_MODULE,
+                    module: None,
                     svma: 0,
                     suspect,
                 },
@@ -311,36 +293,30 @@ impl Replayer {
 fn build_sample_tries(
     stacks: &[Phys],
     offsets: &[u32],
-    results: &HashMap<u32, ModuleSymbols>,
-) -> (Vec<FrameInfo>, Trie, Trie) {
+    results: &HashMap<ModuleId, ModuleSymbols>,
+) -> (IndexVec<FrameId, FrameInfo>, Trie, Trie) {
     let mut table = FrameTable::default();
-    // Frame-id chains (innermost first) per (module, svma, suspect).
-    let mut chains: FxHashMap<ChainKey, Vec<u32>> = FxHashMap::default();
+    // Frame-id chains (innermost first) per physical frame.
+    let mut chains: FxHashMap<Phys, Vec<FrameId>> = FxHashMap::default();
     let unmapped = unmapped_frame();
     let (mut full, mut truncated) = (TrieBuilder::default(), TrieBuilder::default());
-    let mut path_full: Vec<u32> = Vec::new();
-    let mut path_truncated: Vec<u32> = Vec::new();
+    let mut path_full: Vec<FrameId> = Vec::new();
+    let mut path_truncated: Vec<FrameId> = Vec::new();
     for pair in offsets.windows(2) {
         let sample = &stacks[pair[0] as usize..pair[1] as usize];
         path_full.clear();
         path_truncated.clear();
         for physical in sample.iter().rev() {
-            let key = ChainKey {
-                module: physical.module,
-                svma: physical.svma,
-                suspect: physical.suspect,
-            };
-            let chain = chains.entry(key).or_insert_with(|| {
-                if physical.module == NO_MODULE {
-                    vec![table.intern(&unmapped, NO_MODULE, physical.suspect)]
-                } else {
-                    results[&physical.module]
+            let chain = chains
+                .entry(*physical)
+                .or_insert_with(|| match physical.module {
+                    None => vec![table.intern(&unmapped, None, physical.suspect)],
+                    Some(module) => results[&module]
                         .frames_of(physical.svma)
                         .iter()
-                        .map(|frame| table.intern(frame, physical.module, physical.suspect))
-                        .collect()
-                }
-            });
+                        .map(|frame| table.intern(frame, Some(module), physical.suspect))
+                        .collect(),
+                });
             // The chain is innermost-first; the path is root-first, so walk it backwards.
             for &frame in chain.iter().rev() {
                 path_full.push(frame);
@@ -368,12 +344,7 @@ pub fn load_replay(
 
     progress("symbolizing");
     let started = Instant::now();
-    let tasks = module_addresses(
-        replayer
-            .stacks
-            .iter()
-            .map(|physical| (physical.module, physical.svma)),
-    );
+    let tasks = module_addresses(replayer.stacks.iter().copied());
     let results = symbolize_modules(
         &replayer.module_paths,
         tasks,

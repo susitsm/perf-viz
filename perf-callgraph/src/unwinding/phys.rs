@@ -1,73 +1,94 @@
 //! The physical call trie: frames are (module, static address, suspect) exactly as unwound,
 //! before symbolization. Workers each build one; they are merged into a single trie.
 
+use std::num::NonZeroU32;
+
 use rustc_hash::FxHashMap;
 
-use crate::{model::NO_MODULE, unwinding::Phys};
+use crate::{define_index, index::IndexVec, unwinding::Phys};
 
-pub const ROOT: u32 = 0;
+define_index!(
+    /// A node of the physical trie.
+    pub PhysNodeId
+);
+
+/// The synthetic root of the physical trie.
+pub const ROOT: PhysNodeId = PhysNodeId(NonZeroU32::MIN);
 
 #[derive(Clone, Copy, Debug)]
 pub struct PNode {
-    pub parent: u32,
+    /// `None` for the root.
+    pub parent: Option<PhysNodeId>,
     pub frame: Phys,
     /// Samples whose stack ends at this node.
     pub self_count: u32,
 }
 
+/// The edge from a node to its child for one frame.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+struct Edge {
+    parent: PhysNodeId,
+    frame: Phys,
+}
+
 pub struct PhysTrie {
     /// Parents always precede their children.
-    pub nodes: Vec<PNode>,
-    index: FxHashMap<(u32, Phys), u32>,
+    pub nodes: IndexVec<PhysNodeId, PNode>,
+    children_by_edge: FxHashMap<Edge, PhysNodeId>,
 }
 
 impl Default for PhysTrie {
     fn default() -> Self {
         let root = PNode {
-            parent: u32::MAX,
+            parent: None,
             frame: Phys {
-                module: NO_MODULE,
+                module: None,
                 svma: 0,
                 suspect: false,
             },
             self_count: 0,
         };
         Self {
-            nodes: vec![root],
-            index: FxHashMap::default(),
+            nodes: IndexVec::from_raw(vec![root]),
+            children_by_edge: FxHashMap::default(),
         }
     }
 }
 
 impl PhysTrie {
-    fn child(&mut self, parent: u32, frame: Phys) -> u32 {
-        *self.index.entry((parent, frame)).or_insert_with(|| {
-            self.nodes.push(PNode {
-                parent,
-                frame,
-                self_count: 0,
-            });
-            self.nodes.len() as u32 - 1
-        })
+    fn child(&mut self, parent: PhysNodeId, frame: Phys) -> PhysNodeId {
+        *self
+            .children_by_edge
+            .entry(Edge { parent, frame })
+            .or_insert_with(|| {
+                self.nodes.push(PNode {
+                    parent: Some(parent),
+                    frame,
+                    self_count: 0,
+                })
+            })
     }
 
     /// Add one sample given leaf-first (the order unwinding produces). Returns the leaf's node.
-    pub fn insert_leaf_first(&mut self, frames: &[Phys]) -> u32 {
-        let mut cur = ROOT;
+    pub fn insert_leaf_first(&mut self, frames: &[Phys]) -> PhysNodeId {
+        let mut current = ROOT;
         for &frame in frames.iter().rev() {
-            cur = self.child(cur, frame);
+            current = self.child(current, frame);
         }
-        self.nodes[cur as usize].self_count += 1;
-        cur
+        self.nodes[current].self_count += 1;
+        current
     }
 
     /// Merge `other` into `self`; returns, for each node of `other`, its node in `self`.
-    pub fn merge(&mut self, other: &PhysTrie) -> Vec<u32> {
-        let mut map = vec![ROOT; other.nodes.len()];
-        for (i, node) in other.nodes.iter().enumerate().skip(1) {
-            let mapped = self.child(map[node.parent as usize], node.frame);
-            self.nodes[mapped as usize].self_count += node.self_count;
-            map[i] = mapped;
+    pub fn merge(&mut self, other: &PhysTrie) -> IndexVec<PhysNodeId, PhysNodeId> {
+        let mut map = IndexVec::from_elem(ROOT, other.nodes.len());
+        for (id, node) in other.nodes.iter_enumerated().skip(1) {
+            let parent = node
+                .parent
+                .expect("a node other than the root has a parent");
+            let mapped = self.child(map[parent], node.frame);
+            self.nodes[mapped].self_count += node.self_count;
+            map[id] = mapped;
         }
         map
     }
@@ -76,10 +97,11 @@ impl PhysTrie {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{index::Idx, model::ModuleId};
 
     fn f(svma: u64) -> Phys {
         Phys {
-            module: 0,
+            module: Some(ModuleId::new(0)),
             svma,
             suspect: false,
         }
@@ -94,7 +116,7 @@ mod tests {
         assert_eq!(leaf_a, leaf_c, "same stack, same node");
         assert_ne!(leaf_a, leaf_b);
         assert_eq!(trie.nodes.len(), 1 + 4, "root + frames 1, 2, 3, 4");
-        assert_eq!(trie.nodes[leaf_a as usize].self_count, 2);
+        assert_eq!(trie.nodes[leaf_a].self_count, 2);
     }
 
     #[test]
@@ -116,15 +138,15 @@ mod tests {
         trie_b.insert_leaf_first(&[f(5), f(1)]);
         let map = trie_a.merge(&trie_b);
         assert_eq!(trie_a.nodes.len(), 4);
-        let mapped = map[leaf_b as usize];
+        let mapped = map[leaf_b];
         assert_eq!(
-            trie_a.nodes[mapped as usize].self_count, 2,
+            trie_a.nodes[mapped].self_count, 2,
             "same stack in both tries adds up"
         );
         assert!(
             map.iter()
-                .all(|&mapped| (mapped as usize) < trie_a.nodes.len())
+                .all(|&mapped| mapped.index() < trie_a.nodes.len())
         );
-        assert_eq!(map[0], ROOT);
+        assert_eq!(map[ROOT], ROOT);
     }
 }

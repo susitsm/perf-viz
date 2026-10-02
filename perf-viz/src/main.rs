@@ -28,7 +28,7 @@ use crate::{
     theme::Pal,
     tuner::Tuner,
     views::{
-        Functions, ViewContext,
+        Functions, NodeCounts, ViewContext,
         bottom_up::BuState,
         caller_callee::CcState,
         flame::{ItemsKey, ScrollKey},
@@ -41,8 +41,9 @@ use crate::{
 };
 use eframe::egui::{self, Align2, Color32, FontId, RichText, Sense, Stroke, StrokeKind, vec2};
 use perf_callgraph::{
+    index::IndexVec,
     load,
-    model::{Profile, ROOT, Trie},
+    model::{FrameId, NodeId, Profile, ROOT, Trie},
 };
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -210,11 +211,11 @@ struct App {
     truncated: bool,
     tab: Tab,
     /// Focused (zoomed) node, per view: node ids differ between the two tries.
-    focus: [u32; 2],
+    focus: [NodeId; 2],
 
     funcs: Option<Functions>,
     /// Samples ending at each node of the current view's trie (see `views::self_counts`).
-    selfs: Vec<u64>,
+    selfs: NodeCounts,
     /// Self and inclusive cost per function, for the current view and filter.
     costs: views::Costs,
     summary: SummaryInfo,
@@ -233,7 +234,7 @@ struct App {
     sel_tid: Option<i32>,
     proc_rows: Vec<ProcRow>,
     proc_query: String,
-    totals: Vec<u64>,
+    totals: NodeCounts,
     totals_key: Option<TotalsKey>,
     /// What the views add up, and the total of the whole recording in that cost.
     cost: Cost,
@@ -247,7 +248,7 @@ struct App {
 
     search: String,
     search_applied: Option<SearchKey>,
-    matches: Vec<bool>,
+    matches: IndexVec<FrameId, bool>,
     coverage: Coverage,
 
     items: Vec<Item>,
@@ -341,10 +342,10 @@ impl App {
             tab: args.tab,
             focus: [ROOT; 2],
             funcs: None,
-            selfs: Vec::new(),
+            selfs: NodeCounts::new(),
             costs: views::Costs {
-                self_: Vec::new(),
-                inclusive: Vec::new(),
+                self_: IndexVec::new(),
+                inclusive: IndexVec::new(),
             },
             summary: SummaryInfo::default(),
             td: TdState::default(),
@@ -358,7 +359,7 @@ impl App {
             sel_tid: args.thread,
             proc_rows: Vec::new(),
             proc_query: String::new(),
-            totals: Vec::new(),
+            totals: NodeCounts::new(),
             totals_key: None,
             cost: args.cost.unwrap_or_default(),
             grand_total: 0,
@@ -367,7 +368,7 @@ impl App {
             totals_version: 0,
             search: args.search,
             search_applied: None,
-            matches: Vec::new(),
+            matches: IndexVec::new(),
             coverage: Coverage::default(),
             items: Vec::new(),
             items_key: None,
@@ -1181,9 +1182,9 @@ impl App {
         }
         self.totals = filter::totals_in(profile, self.truncated, filter, self.range, cost);
         self.grand_total = if filter == Filter::All && self.range.is_none() {
-            self.totals[ROOT as usize]
+            self.totals[ROOT]
         } else {
-            filter::totals_in(profile, self.truncated, Filter::All, None, cost)[ROOT as usize]
+            filter::totals_in(profile, self.truncated, Filter::All, None, cost)[ROOT]
         };
         self.selfs = views::self_counts(trie, &self.totals);
         if let Some(funcs) = &self.funcs {
@@ -1222,21 +1223,26 @@ impl App {
             pal,
             ..
         } = *view_context;
-        let total = self.totals[ROOT as usize].max(1);
+        let total = self.totals[ROOT].max(1);
         egui::Panel::top("crumbs").show(ui, |ui| {
             ui.horizontal_wrapped(|ui| {
                 let mut path = Vec::new();
                 let mut current = self.focus[view];
                 while current != ROOT {
                     path.push(current);
-                    current = trie.nodes[current as usize].parent;
+                    current = trie.nodes[current]
+                        .parent
+                        .expect("a node other than the root has a parent");
                 }
                 if ui.small_button("all").clicked() {
                     self.focus[view] = ROOT;
                 }
                 for &node in path.iter().rev() {
                     ui.label(">");
-                    let name = &profile.frames[trie.nodes[node as usize].frame as usize].name;
+                    let frame = trie.nodes[node]
+                        .frame
+                        .expect("a node on the path has a frame");
+                    let name = &profile.frames[frame].name;
                     let short: String = name.chars().take(28).collect();
                     if ui.small_button(short).clicked() {
                         self.focus[view] = node;
@@ -1280,7 +1286,7 @@ impl App {
             pal,
             ..
         } = *view_context;
-        let shown_total = self.totals[ROOT as usize];
+        let shown_total = self.totals[ROOT];
         egui::Panel::bottom("status").show(ui, |ui| {
             let state = &profile.stats;
             ui.horizontal_wrapped(|ui| {

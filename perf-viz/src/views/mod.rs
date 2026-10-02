@@ -10,7 +10,11 @@ use std::{
     collections::{HashMap, HashSet},
 };
 
-use perf_callgraph::model::{Profile, ROOT, Trie};
+use perf_callgraph::{
+    define_index,
+    index::IndexVec,
+    model::{FrameId, ModuleId, NodeId, Profile, ROOT, Trie},
+};
 
 use crate::{fmt::Cost, theme::Pal};
 use table::{Arrow, RowData};
@@ -24,24 +28,32 @@ pub mod table;
 pub mod timeline;
 pub mod top_down;
 
+define_index!(
+    /// A function: an index into [`Functions::funcs`].
+    pub FuncId
+);
+
+/// A sample count for each node of a trie.
+pub type NodeCounts = IndexVec<NodeId, u64>;
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Func {
     pub name: String,
-    pub module: u32,
+    pub module: Option<ModuleId>,
 }
 
 /// Functions, identified by (name, module). A frame id is finer (it also distinguishes the
 /// suspect variant of the same function), so several frames can map to one function.
 pub struct Functions {
-    pub funcs: Vec<Func>,
+    pub funcs: IndexVec<FuncId, Func>,
     /// Function id of each frame id.
-    pub frame_func: Vec<u32>,
+    pub frame_func: IndexVec<FrameId, FuncId>,
 }
 
 impl Functions {
     pub fn new(profile: &Profile) -> Self {
-        let mut ids: HashMap<(&str, u32), u32> = HashMap::new();
-        let mut funcs = Vec::new();
+        let mut ids: HashMap<(&str, Option<ModuleId>), FuncId> = HashMap::new();
+        let mut funcs = IndexVec::new();
         let frame_func = profile
             .frames
             .iter()
@@ -51,8 +63,7 @@ impl Functions {
                         funcs.push(Func {
                             name: frame.name.clone(),
                             module: frame.module,
-                        });
-                        funcs.len() as u32 - 1
+                        })
                     })
             })
             .collect();
@@ -60,19 +71,23 @@ impl Functions {
     }
 
     /// The function of a trie node (not the root).
-    pub fn of_node(&self, trie: &Trie, node: u32) -> u32 {
-        self.frame_func[trie.nodes[node as usize].frame as usize]
+    pub fn of_node(&self, trie: &Trie, node: NodeId) -> FuncId {
+        let frame = trie.nodes[node]
+            .frame
+            .expect("a node other than the root has a frame");
+        self.frame_func[frame]
     }
 }
 
 /// Samples that end at each node, given inclusive `totals`.
-pub fn self_counts(trie: &Trie, totals: &[u64]) -> Vec<u64> {
-    (0..trie.nodes.len() as u32)
+pub fn self_counts(trie: &Trie, totals: &NodeCounts) -> NodeCounts {
+    trie.nodes
+        .indices()
         .map(|node| {
-            totals[node as usize].saturating_sub(
+            totals[node].saturating_sub(
                 trie.children(node)
                     .iter()
-                    .map(|&child| totals[child as usize])
+                    .map(|&child| totals[child])
                     .sum::<u64>(),
             )
         })
@@ -81,30 +96,30 @@ pub fn self_counts(trie: &Trie, totals: &[u64]) -> Vec<u64> {
 
 /// Cost per function id.
 pub struct Costs {
-    pub self_: Vec<u64>,
-    pub inclusive: Vec<u64>,
+    pub self_: IndexVec<FuncId, u64>,
+    pub inclusive: IndexVec<FuncId, u64>,
 }
 
-pub fn costs(trie: &Trie, totals: &[u64], selfs: &[u64], funcs: &Functions) -> Costs {
+pub fn costs(trie: &Trie, totals: &NodeCounts, selfs: &NodeCounts, funcs: &Functions) -> Costs {
     let mut costs = Costs {
-        self_: vec![0; funcs.funcs.len()],
-        inclusive: vec![0; funcs.funcs.len()],
+        self_: IndexVec::from_elem(0, funcs.funcs.len()),
+        inclusive: IndexVec::from_elem(0, funcs.funcs.len()),
     };
-    let mut on_stack = vec![0u32; funcs.funcs.len()];
+    let mut on_stack: IndexVec<FuncId, u32> = IndexVec::from_elem(0, funcs.funcs.len());
     // Depth-first with an explicit stack: (node, next child index).
-    let mut stack: Vec<(u32, usize)> = vec![(ROOT, 0)];
+    let mut stack: Vec<(NodeId, usize)> = vec![(ROOT, 0)];
     while let Some(&mut (node, ref mut i)) = stack.last_mut() {
         if *i == 0 && node != ROOT {
-            let func = funcs.of_node(trie, node) as usize;
-            costs.self_[func] += selfs[node as usize];
+            let func = funcs.of_node(trie, node);
+            costs.self_[func] += selfs[node];
             if on_stack[func] == 0 {
-                costs.inclusive[func] += totals[node as usize];
+                costs.inclusive[func] += totals[node];
             }
             on_stack[func] += 1;
         }
         let kids = trie.children(node);
         // Skip children without samples.
-        while *i < kids.len() && totals[kids[*i] as usize] == 0 {
+        while *i < kids.len() && totals[kids[*i]] == 0 {
             *i += 1;
         }
         if *i < kids.len() {
@@ -113,7 +128,7 @@ pub fn costs(trie: &Trie, totals: &[u64], selfs: &[u64], funcs: &Functions) -> C
             stack.push((child, 0));
         } else {
             if node != ROOT {
-                on_stack[funcs.of_node(trie, node) as usize] -= 1;
+                on_stack[funcs.of_node(trie, node)] -= 1;
             }
             stack.pop();
         }
@@ -123,29 +138,29 @@ pub fn costs(trie: &Trie, totals: &[u64], selfs: &[u64], funcs: &Functions) -> C
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TdRow {
-    pub node: u32,
+    pub node: NodeId,
     pub depth: u32,
     /// Has at least one child with samples.
     pub expandable: bool,
     pub expanded: bool,
 }
 
-fn kids_by_cost(trie: &Trie, totals: &[u64], node: u32) -> Vec<u32> {
-    let mut k: Vec<u32> = trie
+fn kids_by_cost(trie: &Trie, totals: &NodeCounts, node: NodeId) -> Vec<NodeId> {
+    let mut kids: Vec<NodeId> = trie
         .children(node)
         .iter()
         .copied()
-        .filter(|&child| totals[child as usize] > 0)
+        .filter(|&child| totals[child] > 0)
         .collect();
-    k.sort_by_key(|&child| (Reverse(totals[child as usize]), child));
-    k
+    kids.sort_by_key(|&child| (Reverse(totals[child]), child));
+    kids
 }
 
 /// The visible rows of the top-down tree: the root's children, and the children of every
 /// expanded node, heaviest first.
-pub fn top_down_rows(trie: &Trie, totals: &[u64], expanded: &HashSet<u32>) -> Vec<TdRow> {
+pub fn top_down_rows(trie: &Trie, totals: &NodeCounts, expanded: &HashSet<NodeId>) -> Vec<TdRow> {
     let mut rows = Vec::new();
-    let mut stack: Vec<(u32, u32)> = kids_by_cost(trie, totals, ROOT)
+    let mut stack: Vec<(NodeId, u32)> = kids_by_cost(trie, totals, ROOT)
         .into_iter()
         .rev()
         .map(|child| (child, 0))
@@ -168,9 +183,9 @@ pub fn top_down_rows(trie: &Trie, totals: &[u64], expanded: &HashSet<u32>) -> Ve
 
 /// Every node with samples whose depth (root's children are depth 0) is below `depth`, and that has
 /// children: expanding these shows the tree down to `depth + 1` levels.
-pub fn expand_to_depth(trie: &Trie, totals: &[u64], depth: u32) -> HashSet<u32> {
+pub fn expand_to_depth(trie: &Trie, totals: &NodeCounts, depth: u32) -> HashSet<NodeId> {
     let mut out = HashSet::new();
-    let mut frontier: Vec<u32> = kids_by_cost(trie, totals, ROOT);
+    let mut frontier: Vec<NodeId> = kids_by_cost(trie, totals, ROOT);
     for _ in 0..depth {
         let mut next = Vec::new();
         for node in frontier {
@@ -187,11 +202,11 @@ pub fn expand_to_depth(trie: &Trie, totals: &[u64], depth: u32) -> HashSet<u32> 
 
 /// Nodes along the heaviest path from the root, while each step keeps at least `min_share` of the
 /// parent's samples and the node still has children with samples.
-pub fn hottest_path(trie: &Trie, totals: &[u64], min_share: f32) -> Vec<u32> {
+pub fn hottest_path(trie: &Trie, totals: &NodeCounts, min_share: f32) -> Vec<NodeId> {
     let mut path = Vec::new();
     let mut current = ROOT;
     while let Some(&best) = kids_by_cost(trie, totals, current).first() {
-        if (totals[best as usize] as f32) < min_share * totals[current as usize] as f32 {
+        if (totals[best] as f32) < min_share * totals[current] as f32 {
             break;
         }
         path.push(best);
@@ -202,23 +217,27 @@ pub fn hottest_path(trie: &Trie, totals: &[u64], min_share: f32) -> Vec<u32> {
 
 /// An id (a function, module or trie node, depending on the list) with the cost attributed to it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Weighted {
-    pub id: u32,
+pub struct Weighted<I> {
+    pub id: I,
     pub cost: u64,
 }
 
 /// A node of the inverted call tree: a function, reached from the leaf of some samples.
 #[derive(Clone, Debug)]
 pub struct BuNode {
-    pub func: u32,
+    pub func: FuncId,
     /// Samples whose stack, read from the leaf outward, starts with the path to this node.
     pub cost: u64,
     /// For each such group of samples: the trie node currently reached and how many samples.
-    entries: Vec<Weighted>,
+    entries: Vec<Weighted<NodeId>>,
 }
 
-fn group(trie: &Trie, funcs: &Functions, entries: impl Iterator<Item = Weighted>) -> Vec<BuNode> {
-    let mut by_func: HashMap<u32, BuNode> = HashMap::new();
+fn group(
+    trie: &Trie,
+    funcs: &Functions,
+    entries: impl Iterator<Item = Weighted<NodeId>>,
+) -> Vec<BuNode> {
+    let mut by_func: HashMap<FuncId, BuNode> = HashMap::new();
     for entry in entries {
         let func = funcs.of_node(trie, entry.id);
         let group = by_func.entry(func).or_insert_with(|| BuNode {
@@ -235,15 +254,17 @@ fn group(trie: &Trie, funcs: &Functions, entries: impl Iterator<Item = Weighted>
 }
 
 /// The first level of the bottom-up tree: functions ranked by self cost.
-pub fn bu_roots(trie: &Trie, funcs: &Functions, selfs: &[u64]) -> Vec<BuNode> {
+pub fn bu_roots(trie: &Trie, funcs: &Functions, selfs: &NodeCounts) -> Vec<BuNode> {
     group(
         trie,
         funcs,
-        (1..trie.nodes.len() as u32)
-            .filter(|&node| selfs[node as usize] > 0)
+        trie.nodes
+            .indices()
+            .skip(1)
+            .filter(|&node| selfs[node] > 0)
             .map(|node| Weighted {
                 id: node,
-                cost: selfs[node as usize],
+                cost: selfs[node],
             }),
     )
 }
@@ -254,7 +275,7 @@ pub fn bu_callers(trie: &Trie, funcs: &Functions, node: &BuNode) -> Vec<BuNode> 
         trie,
         funcs,
         node.entries.iter().filter_map(|entry| {
-            let parent = trie.nodes[entry.id as usize].parent;
+            let parent = trie.nodes[entry.id].parent?;
             (parent != ROOT).then_some(Weighted {
                 id: parent,
                 cost: entry.cost,
@@ -266,8 +287,8 @@ pub fn bu_callers(trie: &Trie, funcs: &Functions, node: &BuNode) -> Vec<BuNode> 
 #[derive(Clone, Debug)]
 pub struct BuRow {
     /// Function ids from the first level down to this row; identifies the row.
-    pub path: Vec<u32>,
-    pub func: u32,
+    pub path: Vec<FuncId>,
+    pub func: FuncId,
     pub cost: u64,
     pub has_callers: bool,
     pub expanded: bool,
@@ -277,15 +298,15 @@ pub struct BuRow {
 pub fn bu_rows(
     trie: &Trie,
     funcs: &Functions,
-    selfs: &[u64],
-    expanded: &HashSet<Vec<u32>>,
+    selfs: &NodeCounts,
+    expanded: &HashSet<Vec<FuncId>>,
 ) -> Vec<BuRow> {
     fn walk(
         trie: &Trie,
         funcs: &Functions,
-        expanded: &HashSet<Vec<u32>>,
+        expanded: &HashSet<Vec<FuncId>>,
         nodes: Vec<BuNode>,
-        prefix: &[u32],
+        prefix: &[FuncId],
         out: &mut Vec<BuRow>,
     ) {
         for node in nodes {
@@ -325,27 +346,30 @@ pub enum SortBy {
 
 /// Function ids with samples in the view, ranked by `by` (ties by id), keeping only names that
 /// contain `query_lc` (already lower-case; empty keeps all).
-pub fn ranked_functions(costs: &Costs, funcs: &Functions, by: SortBy, query_lc: &str) -> Vec<u32> {
-    let key = |func: u32| match by {
-        SortBy::Inclusive => costs.inclusive[func as usize],
-        SortBy::Self_ => costs.self_[func as usize],
+pub fn ranked_functions(
+    costs: &Costs,
+    funcs: &Functions,
+    by: SortBy,
+    query_lc: &str,
+) -> Vec<FuncId> {
+    let key = |func: FuncId| match by {
+        SortBy::Inclusive => costs.inclusive[func],
+        SortBy::Self_ => costs.self_[func],
     };
-    let mut funcs: Vec<u32> = (0..funcs.funcs.len() as u32)
+    let mut ranked: Vec<FuncId> = funcs
+        .funcs
+        .indices()
         .filter(|&func| {
-            costs.inclusive[func as usize] > 0
-                && (query_lc.is_empty()
-                    || funcs.funcs[func as usize]
-                        .name
-                        .to_lowercase()
-                        .contains(query_lc))
+            costs.inclusive[func] > 0
+                && (query_lc.is_empty() || funcs.funcs[func].name.to_lowercase().contains(query_lc))
         })
         .collect();
-    funcs.sort_by_key(|&func| (Reverse(key(func)), func));
-    funcs
+    ranked.sort_by_key(|&func| (Reverse(key(func)), func));
+    ranked
 }
 
-fn ranked(costs: HashMap<u32, u64>) -> Vec<Weighted> {
-    let mut ranked: Vec<Weighted> = costs
+fn ranked<I: Copy + Ord>(costs: HashMap<I, u64>) -> Vec<Weighted<I>> {
+    let mut ranked: Vec<Weighted<I>> = costs
         .into_iter()
         .map(|(id, cost)| Weighted { id, cost })
         .collect();
@@ -355,15 +379,22 @@ fn ranked(costs: HashMap<u32, u64>) -> Vec<Weighted> {
 
 /// The functions that call `f`, with the samples that pass through each call. A recursive call
 /// (`f` calling `f`) is not a caller: only the outermost entry into `f` on a path counts.
-pub fn callers_of(trie: &Trie, totals: &[u64], funcs: &Functions, func: u32) -> Vec<Weighted> {
-    let mut cost_by_func: HashMap<u32, u64> = HashMap::new();
-    for node in 1..trie.nodes.len() as u32 {
-        if totals[node as usize] == 0 || funcs.of_node(trie, node) != func {
+pub fn callers_of(
+    trie: &Trie,
+    totals: &NodeCounts,
+    funcs: &Functions,
+    func: FuncId,
+) -> Vec<Weighted<FuncId>> {
+    let mut cost_by_func: HashMap<FuncId, u64> = HashMap::new();
+    for node in trie.nodes.indices().skip(1) {
+        if totals[node] == 0 || funcs.of_node(trie, node) != func {
             continue;
         }
-        let parent = trie.nodes[node as usize].parent;
+        let parent = trie.nodes[node]
+            .parent
+            .expect("a node other than the root has a parent");
         if parent != ROOT && funcs.of_node(trie, parent) != func {
-            *cost_by_func.entry(funcs.of_node(trie, parent)).or_default() += totals[node as usize];
+            *cost_by_func.entry(funcs.of_node(trie, parent)).or_default() += totals[node];
         }
     }
     ranked(cost_by_func)
@@ -371,16 +402,20 @@ pub fn callers_of(trie: &Trie, totals: &[u64], funcs: &Functions, func: u32) -> 
 
 /// The functions that `f` calls, with the samples spent under each call. Recursive calls are not
 /// listed (their samples are already inside the outer call).
-pub fn callees_of(trie: &Trie, totals: &[u64], funcs: &Functions, func: u32) -> Vec<Weighted> {
-    let mut cost_by_func: HashMap<u32, u64> = HashMap::new();
-    for node in 1..trie.nodes.len() as u32 {
-        if totals[node as usize] == 0 || funcs.of_node(trie, node) != func {
+pub fn callees_of(
+    trie: &Trie,
+    totals: &NodeCounts,
+    funcs: &Functions,
+    func: FuncId,
+) -> Vec<Weighted<FuncId>> {
+    let mut cost_by_func: HashMap<FuncId, u64> = HashMap::new();
+    for node in trie.nodes.indices().skip(1) {
+        if totals[node] == 0 || funcs.of_node(trie, node) != func {
             continue;
         }
         for &child in trie.children(node) {
-            if totals[child as usize] > 0 && funcs.of_node(trie, child) != func {
-                *cost_by_func.entry(funcs.of_node(trie, child)).or_default() +=
-                    totals[child as usize];
+            if totals[child] > 0 && funcs.of_node(trie, child) != func {
+                *cost_by_func.entry(funcs.of_node(trie, child)).or_default() += totals[child];
             }
         }
     }
@@ -388,11 +423,11 @@ pub fn callees_of(trie: &Trie, totals: &[u64], funcs: &Functions, func: u32) -> 
 }
 
 /// Self cost per module, busiest first, skipping modules with none.
-pub fn module_self_costs(funcs: &Functions, costs: &Costs) -> Vec<Weighted> {
-    let mut cost_by_module: HashMap<u32, u64> = HashMap::new();
-    for (i, func) in funcs.funcs.iter().enumerate() {
-        if costs.self_[i] > 0 {
-            *cost_by_module.entry(func.module).or_default() += costs.self_[i];
+pub fn module_self_costs(funcs: &Functions, costs: &Costs) -> Vec<Weighted<Option<ModuleId>>> {
+    let mut cost_by_module: HashMap<Option<ModuleId>, u64> = HashMap::new();
+    for (id, func) in funcs.funcs.iter_enumerated() {
+        if costs.self_[id] > 0 {
+            *cost_by_module.entry(func.module).or_default() += costs.self_[id];
         }
     }
     ranked(cost_by_module)
@@ -432,12 +467,12 @@ pub(crate) fn noun(profile: &Profile, cost: Cost) -> &str {
 pub(crate) fn func_row<'a>(
     profile: &'a Profile,
     funcs: &'a Functions,
-    func: u32,
+    func: FuncId,
     cost: u64,
     self_cost: Option<u64>,
     selected: bool,
 ) -> RowData<'a> {
-    let func = &funcs.funcs[func as usize];
+    let func = &funcs.funcs[func];
     RowData {
         depth: 0,
         arrow: Arrow::None,
@@ -454,16 +489,27 @@ pub(crate) fn func_row<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use perf_callgraph::model::{FrameInfo, LoadStats, TrieBuilder};
+    use perf_callgraph::{
+        index::Idx,
+        model::{FrameInfo, LoadStats, TrieBuilder},
+    };
 
-    fn w(id: u32, cost: u64) -> Weighted {
+    fn frame_id(index: usize) -> FrameId {
+        FrameId::new(index)
+    }
+
+    fn module_id(index: usize) -> ModuleId {
+        ModuleId::new(index)
+    }
+
+    fn w<I>(id: I, cost: u64) -> Weighted<I> {
         Weighted { id, cost }
     }
 
-    fn frame(name: &str, module: u32, suspect: bool) -> FrameInfo {
+    fn frame(name: &str, module: usize, suspect: bool) -> FrameInfo {
         FrameInfo {
             name: name.into(),
-            module,
+            module: Some(module_id(module)),
             file: None,
             line: None,
             suspect,
@@ -477,17 +523,17 @@ mod tests {
     ///   main>work>helper>helper (x1)     recursion; self: helper 1
     ///   main>idle (x2)                   self: idle 2
     ///   main>work (x1)                   self: work 1
-    fn profile() -> (Profile, Vec<u64>) {
-        let frames = vec![
+    fn profile() -> (Profile, NodeCounts) {
+        let frames = IndexVec::from_raw(vec![
             frame("main", 0, false),
             frame("work", 0, false),
             frame("helper", 0, false),
             frame("idle", 0, false),
             frame("helper", 1, false),
             frame("main", 0, true),
-        ];
+        ]);
         let mut builder = TrieBuilder::default();
-        let stacks: [(&[u32], u32); 4] = [
+        let stacks: [(&[usize], u32); 4] = [
             (&[0, 1, 2], 3),
             (&[0, 1, 2, 2], 1),
             (&[0, 3], 2),
@@ -496,7 +542,7 @@ mod tests {
         for (path, leaf) in stacks {
             let mut cur = ROOT;
             for &frame in path {
-                cur = builder.child(cur, frame);
+                cur = builder.child(cur, frame_id(frame));
             }
             builder.add_self(cur, leaf);
         }
@@ -504,7 +550,7 @@ mod tests {
         let totals = full.nodes.iter().map(|node| node.total as u64).collect();
         (
             Profile {
-                modules: vec!["/a".into(), "/b".into()],
+                modules: IndexVec::from_raw(vec!["/a".into(), "/b".into()]),
                 frames,
                 full,
                 truncated: Trie::default(),
@@ -516,8 +562,8 @@ mod tests {
         )
     }
 
-    fn name_of(fns: &Functions, func: u32) -> &str {
-        &fns.funcs[func as usize].name
+    fn name_of(fns: &Functions, func: FuncId) -> &str {
+        &fns.funcs[func].name
     }
 
     #[test]
@@ -525,11 +571,13 @@ mod tests {
         let (sample_profile, _) = profile();
         let functions = Functions::new(&sample_profile);
         assert_eq!(
-            functions.frame_func[0], functions.frame_func[5],
+            functions.frame_func[frame_id(0)],
+            functions.frame_func[frame_id(5)],
             "main and its suspect variant are one function"
         );
         assert_ne!(
-            functions.frame_func[2], functions.frame_func[4],
+            functions.frame_func[frame_id(2)],
+            functions.frame_func[frame_id(4)],
             "same name in another module is another function"
         );
         assert_eq!(functions.funcs.len(), 5);
@@ -540,7 +588,7 @@ mod tests {
         let (sample_profile, totals) = profile();
         let selfs = self_counts(&sample_profile.full, &totals);
         assert_eq!(selfs.iter().sum::<u64>(), 7);
-        assert_eq!(selfs[ROOT as usize], 0);
+        assert_eq!(selfs[ROOT], 0);
     }
 
     #[test]
@@ -552,8 +600,9 @@ mod tests {
         let by_name = |name: &str| {
             funcs
                 .funcs
-                .iter()
-                .position(|func| func.name == name && func.module == 0)
+                .iter_enumerated()
+                .find(|(_, func)| func.name == name && func.module == Some(module_id(0)))
+                .map(|(id, _)| id)
                 .unwrap()
         };
         // helper is in 4 samples (3 + the recursing one), not 5.
@@ -598,7 +647,7 @@ mod tests {
             .iter()
             .map(|row| {
                 (
-                    sample_profile.frames[trie.nodes[row.node as usize].frame as usize]
+                    sample_profile.frames[trie.nodes[row.node].frame.unwrap()]
                         .name
                         .as_str(),
                     row.depth,
@@ -632,23 +681,23 @@ mod tests {
         // Pretend a filter removed everything under `work`.
         let main = trie.children(ROOT)[0];
         let work = kids_by_cost(trie, &totals, main)[0];
-        let removed = totals[work as usize];
-        totals[main as usize] -= removed;
-        totals[ROOT as usize] -= removed;
-        for node in 0..totals.len() as u32 {
+        let removed = totals[work];
+        totals[main] -= removed;
+        totals[ROOT] -= removed;
+        for node in totals.indices() {
             let mut ancestor = node;
             while ancestor != ROOT && ancestor != work {
-                ancestor = trie.nodes[ancestor as usize].parent;
+                ancestor = trie.nodes[ancestor].parent.unwrap();
             }
             if ancestor == work {
-                totals[node as usize] = 0;
+                totals[node] = 0;
             }
         }
         let rows = top_down_rows(trie, &totals, &[main].into_iter().collect());
         let names: Vec<_> = rows
             .iter()
             .map(|row| {
-                sample_profile.frames[trie.nodes[row.node as usize].frame as usize]
+                sample_profile.frames[trie.nodes[row.node].frame.unwrap()]
                     .name
                     .as_str()
             })
@@ -696,7 +745,7 @@ mod tests {
         let collapsed = bu_rows(trie, &funcs, &selfs, &HashSet::new());
         assert_eq!(collapsed.len(), 3);
         assert!(collapsed[0].has_callers && !collapsed[0].expanded);
-        let expanded: HashSet<Vec<u32>> = [vec![collapsed[0].func]].into_iter().collect();
+        let expanded: HashSet<Vec<FuncId>> = [vec![collapsed[0].func]].into_iter().collect();
         let rows = bu_rows(trie, &funcs, &selfs, &expanded);
         assert_eq!(rows.len(), 5, "helper, its two callers, idle, work");
         assert_eq!(rows[1].path.len(), 2);
@@ -713,9 +762,10 @@ mod tests {
         let func_named = |name: &str| {
             funcs
                 .funcs
-                .iter()
-                .position(|x| x.name == name && x.module == 0)
-                .unwrap() as u32
+                .iter_enumerated()
+                .find(|(_, x)| x.name == name && x.module == Some(module_id(0)))
+                .map(|(id, _)| id)
+                .unwrap()
         };
         // helper is called only by work; the samples through that call are 4 (3 + the recursing one).
         assert_eq!(
@@ -752,10 +802,10 @@ mod tests {
         let funcs = Functions::new(&sample_profile);
         let selfs = self_counts(&sample_profile.full, &totals);
         let function_costs = costs(&sample_profile.full, &totals, &selfs, &funcs);
-        let names = |func_ids: Vec<u32>| {
+        let names = |func_ids: Vec<FuncId>| {
             func_ids
                 .iter()
-                .map(|&func| funcs.funcs[func as usize].name.clone())
+                .map(|&func| funcs.funcs[func].name.clone())
                 .collect::<Vec<_>>()
         };
         assert_eq!(
@@ -791,6 +841,9 @@ mod tests {
         let selfs = self_counts(&sample_profile.full, &totals);
         let function_costs = costs(&sample_profile.full, &totals, &selfs, &funcs);
         // Only module 0 has self samples in this profile (helper 4, idle 2, work 1).
-        assert_eq!(module_self_costs(&funcs, &function_costs), vec![w(0, 7)]);
+        assert_eq!(
+            module_self_costs(&funcs, &function_costs),
+            vec![w(Some(module_id(0)), 7)]
+        );
     }
 }

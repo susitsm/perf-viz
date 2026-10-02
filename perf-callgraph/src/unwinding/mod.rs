@@ -14,7 +14,7 @@ use framehop::{
 };
 
 use crate::{
-    model::NO_MODULE,
+    model::ModuleId,
     unwinding::addrspace::Mapping,
     unwinding::binary::{Binary, BinaryCache, SectionData},
 };
@@ -25,9 +25,9 @@ pub type UnwCache = CacheX86_64;
 /// One frame of an unwound stack, as a static address inside a module.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Phys {
-    /// Index into the module table, or [`NO_MODULE`].
-    pub module: u32,
-    /// Static (file) address; 0 when `module` is [`NO_MODULE`].
+    /// `None` for an address in no known module.
+    pub module: Option<ModuleId>,
+    /// Static (file) address; 0 when `module` is `None`.
     pub svma: u64,
     /// At or beyond the first return address that failed validation.
     pub suspect: bool,
@@ -38,7 +38,7 @@ pub struct ModRange {
     pub end: u64,
     pub bias: u64,
     pub bin: Arc<Binary>,
-    pub module: u32,
+    pub module: Option<ModuleId>,
 }
 
 /// Everything needed to unwind samples of one process epoch. Built once, shared by workers.
@@ -185,7 +185,7 @@ pub fn unwind_sample(
                 suspect,
             },
             None => Phys {
-                module: NO_MODULE,
+                module: None,
                 svma: 0,
                 suspect,
             },

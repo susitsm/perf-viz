@@ -1,16 +1,18 @@
 //! Flame graph layout: a pure function from a call trie to rectangles.
 //!
-//! Widths are proportional to inclusive sample counts, taken from a `totals` slice indexed by
+//! Widths are proportional to inclusive sample counts, taken from a `totals` vector indexed by
 //! node so that a filtered view can reuse the trie's structure. Children are placed left to
 //! right in the trie's order (heaviest first for the unfiltered counts). Boxes narrower than
 //! `min_w` pixels are culled together with their whole subtree, so the work is bounded by what
 //! can be seen.
 
-use perf_callgraph::model::Trie;
+use perf_callgraph::model::{NodeId, Trie};
+
+use super::NodeCounts;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Item {
-    pub node: u32,
+    pub node: NodeId,
     /// Distance from the focused node (0 = the focused node itself).
     pub depth: u32,
     /// Left edge and width, in pixels from the left of the graph.
@@ -18,9 +20,9 @@ pub struct Item {
     pub width: f32,
 }
 
-/// The trie's own inclusive totals, as a slice usable with [`layout`].
+/// The trie's own inclusive totals, usable with [`layout`].
 #[cfg(test)]
-pub fn trie_totals(trie: &Trie) -> Vec<u64> {
+pub fn trie_totals(trie: &Trie) -> NodeCounts {
     trie.nodes.iter().map(|node| node.total as u64).collect()
 }
 
@@ -28,15 +30,15 @@ pub fn trie_totals(trie: &Trie) -> Vec<u64> {
 /// sample count of each node. `max_depth` bounds the number of rows produced.
 pub fn layout(
     trie: &Trie,
-    totals: &[u64],
-    focus: u32,
+    totals: &NodeCounts,
+    focus: NodeId,
     width: f32,
     min_w: f32,
     max_depth: u32,
     out: &mut Vec<Item>,
 ) {
     out.clear();
-    let total = totals[focus as usize];
+    let total = totals[focus];
     if total == 0 || width <= 0.0 {
         return;
     }
@@ -51,10 +53,10 @@ pub fn layout(
         if it.depth + 1 >= max_depth {
             continue;
         }
-        let parent_total = totals[it.node as usize] as f32;
+        let parent_total = totals[it.node] as f32;
         let mut x = it.x;
         for &child in trie.children(it.node) {
-            let child_width = it.width * totals[child as usize] as f32 / parent_total;
+            let child_width = it.width * totals[child] as f32 / parent_total;
             // Not `break`: with filtered totals the children are no longer sorted by width.
             if child_width < min_w {
                 continue;
@@ -80,15 +82,22 @@ pub fn hit(items: &[Item], x: f32, depth: u32) -> Option<&Item> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use perf_callgraph::model::{ROOT, TrieBuilder};
+    use perf_callgraph::{
+        index::Idx,
+        model::{FrameId, ROOT, TrieBuilder},
+    };
+
+    fn frames<const N: usize>(ids: [usize; N]) -> [FrameId; N] {
+        ids.map(FrameId::new)
+    }
 
     fn trie() -> Trie {
         // root -> a(3) -> b(2), a -> c(1) ; root -> d(1)
         let mut builder = TrieBuilder::default();
-        builder.insert([1, 2]);
-        builder.insert([1, 2]);
-        builder.insert([1, 3]);
-        builder.insert([4]);
+        builder.insert(frames([1, 2]));
+        builder.insert(frames([1, 2]));
+        builder.insert(frames([1, 3]));
+        builder.insert(frames([4]));
         builder.finish()
     }
 
@@ -106,7 +115,7 @@ mod tests {
             &mut out,
         );
         assert_eq!(out.len(), 5); // root, a, b, c, d
-        let by_node = |node: u32| out.iter().find(|i| i.node == node).unwrap();
+        let by_node = |node: NodeId| out.iter().find(|i| i.node == node).unwrap();
         let root = by_node(ROOT);
         assert_eq!((root.x, root.width), (0.0, 400.0));
         let first_child = sample_trie.children(ROOT)[0];
@@ -142,7 +151,7 @@ mod tests {
             100,
             &mut out,
         ); // d is 100px, c is 100px: both culled
-        let mut nodes: Vec<u32> = out.iter().map(|i| i.node).collect();
+        let mut nodes: Vec<NodeId> = out.iter().map(|i| i.node).collect();
         nodes.sort();
         assert_eq!(out.len(), 3, "root, a, b remain: {nodes:?}");
     }
@@ -189,9 +198,9 @@ mod tests {
         let first_child = sample_trie.children(ROOT)[0];
         let last_child = sample_trie.children(ROOT)[1];
         let mut totals = trie_totals(&sample_trie);
-        totals.fill(0);
-        totals[ROOT as usize] = 1;
-        totals[last_child as usize] = 1;
+        totals.iter_mut().for_each(|total| *total = 0);
+        totals[ROOT] = 1;
+        totals[last_child] = 1;
         let mut out = Vec::new();
         layout(&sample_trie, &totals, ROOT, 400.0, 0.5, 100, &mut out);
         assert!(
@@ -209,7 +218,7 @@ mod tests {
     fn empty_and_hit_test() {
         let sample_trie = TrieBuilder::default().finish();
         let mut out = vec![Item {
-            node: 9,
+            node: NodeId::new(9),
             depth: 9,
             x: 0.0,
             width: 1.0,

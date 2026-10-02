@@ -6,7 +6,7 @@ use eframe::egui::{self};
 use perf_callgraph::model::{Profile, ROOT, Trie};
 
 use super::{
-    BuRow, Functions, RowsKey, noun,
+    BuRow, FuncId, Functions, NodeCounts, RowsKey, noun,
     table::{self, Arrow, Click, Columns, RowData},
 };
 use crate::{fmt::Cost, views};
@@ -14,11 +14,11 @@ use crate::{fmt::Cost, views};
 /// State of the bottom-up tree. Rows are identified by the function path from the first level.
 #[derive(Default)]
 pub(crate) struct BuState {
-    expanded: HashSet<Vec<u32>>,
+    expanded: HashSet<Vec<FuncId>>,
     rows: Vec<BuRow>,
     rows_key: Option<RowsKey>,
     version: u64,
-    selected: Option<Vec<u32>>,
+    selected: Option<Vec<FuncId>>,
 }
 
 /// The bottom-up tree: functions ranked by self cost; expanding one shows who called it.
@@ -28,8 +28,8 @@ pub(crate) fn draw_bottom_up(
     profile: &Profile,
     funcs: &Functions,
     trie: &Trie,
-    totals: &[u64],
-    selfs: &[u64],
+    totals: &NodeCounts,
+    selfs: &NodeCounts,
     cost: Cost,
     query: &str,
     state: &mut BuState,
@@ -64,10 +64,10 @@ pub(crate) fn draw_bottom_up(
             sort: None,
         },
         rows.len(),
-        totals[ROOT as usize],
+        totals[ROOT],
         |i| {
             let row = &rows[i];
-            let func = &funcs.funcs[row.func as usize];
+            let func = &funcs.funcs[row.func];
             RowData {
                 depth: row.path.len() as u32 - 1,
                 arrow: if !row.has_callers {

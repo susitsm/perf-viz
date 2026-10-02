@@ -3,10 +3,10 @@
 use std::collections::HashSet;
 
 use eframe::egui::{self, RichText, vec2};
-use perf_callgraph::model::{Profile, ROOT};
+use perf_callgraph::model::{ModuleId, Profile, ROOT};
 
 use super::{
-    Functions, ViewContext, Weighted, func_row, noun,
+    FuncId, Functions, ViewContext, Weighted, func_row, noun,
     table::{self, Arrow, Click, Columns, RowData},
 };
 use crate::{
@@ -68,7 +68,7 @@ pub(crate) fn draw_summary(
     cost: Cost,
     scope: SummaryScope,
     info: &SummaryInfo,
-) -> Option<u32> {
+) -> Option<FuncId> {
     let SummaryScope {
         total,
         grand_total,
@@ -106,17 +106,17 @@ pub(crate) fn draw_summary(
         });
         ui.add_space(12.0);
         ui.strong("Top hotspots by self cost (click one to see its callers and callees)");
-        let top: Vec<u32> = views::ranked_functions(costs, funcs, views::SortBy::Self_, "").into_iter().take(12).collect();
+        let top: Vec<FuncId> = views::ranked_functions(costs, funcs, views::SortBy::Self_, "").into_iter().take(12).collect();
         let height = (top.len() + 1) as f32 * table::ROW_H + 6.0;
         let click = ui
-            .allocate_ui(vec2(ui.available_width(), height), |ui| table::draw(ui, &Columns { unit: cost, name: "Function", cost: "Self", self_cost: Some("Inclusive"), sort: None }, top.len(), total, |i| func_row(profile, funcs, top[i], costs.self_[top[i] as usize], Some(costs.inclusive[top[i] as usize]), false)))
+            .allocate_ui(vec2(ui.available_width(), height), |ui| table::draw(ui, &Columns { unit: cost, name: "Function", cost: "Self", self_cost: Some("Inclusive"), sort: None }, top.len(), total, |i| func_row(profile, funcs, top[i], costs.self_[top[i]], Some(costs.inclusive[top[i]]), false)))
             .inner;
         if let Some(Click::Select(i) | Click::Toggle(i)) = click {
             nav = Some(top[i]);
         }
         ui.add_space(12.0);
         ui.strong("Self cost by module");
-        let mods: Vec<Weighted> = views::module_self_costs(funcs, costs).into_iter().take(10).collect();
+        let mods: Vec<Weighted<Option<ModuleId>>> = views::module_self_costs(funcs, costs).into_iter().take(10).collect();
         let height = (mods.len() + 1) as f32 * table::ROW_H + 6.0;
         ui.allocate_ui(vec2(ui.available_width(), height), |ui| {
             table::draw(ui, &Columns { unit: cost, name: "Module", cost: "Self", self_cost: None, sort: None }, mods.len(), total, |i| RowData {
@@ -138,7 +138,7 @@ pub(crate) fn draw_summary(
 impl App {
     pub(crate) fn draw_summary_tab(&mut self, ui: &mut egui::Ui, view_context: &ViewContext<'_>) {
         let scope = SummaryScope {
-            total: self.totals[ROOT as usize],
+            total: self.totals[ROOT],
             grand_total: self.grand_total,
             filtered: view_context.filtered,
         };

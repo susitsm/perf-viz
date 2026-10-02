@@ -40,7 +40,8 @@ use perf_reader::{
 
 use crate::{
     Result,
-    model::{LoadStats, Profile, SampleRef},
+    index::IndexVec,
+    model::{LoadStats, ModuleId, Profile, SampleRef},
     symbolizing::DwarfMode,
     symbolizing::tries::{build_tries, module_addresses, symbolize_modules},
 };
@@ -167,7 +168,7 @@ pub fn load(path: &Path, options: Options, progress: &mut dyn FnMut(&str)) -> Re
     progress("reading and unwinding");
     let (loader, states) = read_and_unwind(path, &source, &options, &mut stats)?;
     let spaces = loader.spaces.into_inner().unwrap();
-    let module_paths: Vec<PathBuf> = spaces
+    let module_paths: IndexVec<ModuleId, PathBuf> = spaces
         .module_paths()
         .iter()
         .map(|path| PathBuf::from(&**path))
@@ -195,11 +196,7 @@ pub fn load(path: &Path, options: Options, progress: &mut dyn FnMut(&str)) -> Re
 
     progress("symbolizing");
     let started = Instant::now();
-    let tasks = module_addresses(
-        phys.nodes[1..]
-            .iter()
-            .map(|node| (node.frame.module, node.frame.svma)),
-    );
+    let tasks = module_addresses(phys.nodes.iter().skip(1).map(|node| node.frame));
     let results = symbolize_modules(&module_paths, tasks, options.dwarf, &mut stats);
     stats.secs_symbolize = started.elapsed().as_secs_f64();
 
@@ -213,8 +210,8 @@ pub fn load(path: &Path, options: Options, progress: &mut dyn FnMut(&str)) -> Re
             period: row.period,
             pid: row.pid,
             tid: row.tid,
-            full: tries.full_of[row.node as usize],
-            truncated: tries.truncated_of[row.node as usize],
+            full: tries.full_of[row.node],
+            truncated: tries.truncated_of[row.node],
         })
         .collect();
     stats.secs_build = started.elapsed().as_secs_f64();

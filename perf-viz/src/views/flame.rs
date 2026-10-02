@@ -3,7 +3,7 @@
 use eframe::egui::{
     self, Align2, Color32, FontId, Key, Rect, Sense, Stroke, StrokeKind, pos2, vec2,
 };
-use perf_callgraph::model::{FrameInfo, Profile, ROOT};
+use perf_callgraph::model::{FrameInfo, ModuleId, NodeId, Profile, ROOT};
 
 use super::{ViewContext, flame_layout, flame_layout::Item};
 use crate::{
@@ -15,7 +15,7 @@ use crate::{
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) struct ItemsKey {
     truncated: bool,
-    focus: u32,
+    focus: NodeId,
     width: i32,
     totals_version: u64,
 }
@@ -24,7 +24,7 @@ pub(crate) struct ItemsKey {
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) struct ScrollKey {
     truncated: bool,
-    focus: u32,
+    focus: NodeId,
     totals_version: u64,
 }
 
@@ -34,7 +34,7 @@ pub(crate) const MIN_BOX_PX: f32 = 0.5;
 
 pub(crate) const LABEL_MIN_PX: f32 = 36.0;
 
-pub(crate) fn module_color(profile: &Profile, module: u32, name: &str) -> Color32 {
+pub(crate) fn module_color(profile: &Profile, module: Option<ModuleId>, name: &str) -> Color32 {
     // Hue from the module, a little brightness variation from the function name.
     let hash = |text: &str| {
         text.bytes()
@@ -68,8 +68,10 @@ pub(crate) fn flame_box_rect(rect: Rect, bottom: f32, item: &Item) -> Rect {
 impl App {
     pub(crate) fn draw_flame_graph(&mut self, ui: &mut egui::Ui, view_context: &ViewContext<'_>) {
         let (trie, view) = (view_context.trie, view_context.view);
-        if ui.input(|i| i.key_pressed(Key::Escape)) && self.focus[view] != ROOT {
-            self.focus[view] = trie.nodes[self.focus[view] as usize].parent;
+        if ui.input(|i| i.key_pressed(Key::Escape))
+            && let Some(parent) = trie.nodes[self.focus[view]].parent
+        {
+            self.focus[view] = parent;
         }
         let focus = self.focus[view];
         let available = ui.available_size();
@@ -132,7 +134,7 @@ impl App {
         view_context: &ViewContext<'_>,
         width: f32,
         content_height: f32,
-    ) -> Option<u32> {
+    ) -> Option<NodeId> {
         let (response, painter) = ui.allocate_painter(vec2(width, content_height), Sense::click());
         let rect = response.rect;
         let bottom = rect.bottom() - 2.0;
@@ -174,20 +176,20 @@ impl App {
             pal,
             ..
         } = *view_context;
-        let node = trie.nodes[item.node as usize];
-        let (mut fill, label, matched): (Color32, String, bool) = if node.frame == u32::MAX {
-            (pal.root_box(), "all samples".into(), false)
-        } else {
-            let frame = &profile.frames[node.frame as usize];
-            (
-                frame_color(profile, frame),
-                frame.name.clone(),
-                searching && self.matches[node.frame as usize],
-            )
+        let (fill, label, matched): (Color32, String, bool) = match trie.nodes[item.node].frame {
+            None => (pal.root_box(), "all samples".into(), false),
+            Some(frame_id) => {
+                let frame = &profile.frames[frame_id];
+                let matched = searching && self.matches[frame_id];
+                let color = frame_color(profile, frame);
+                let fill = if searching && !matched {
+                    pal.dim(color)
+                } else {
+                    color
+                };
+                (fill, frame.name.clone(), matched)
+            }
         };
-        if searching && !matched && node.frame != u32::MAX {
-            fill = pal.dim(fill);
-        }
         painter.rect_filled(box_rect, 0.0, fill);
         painter.rect_stroke(
             box_rect,
@@ -220,7 +222,7 @@ impl App {
         &self,
         response: &egui::Response,
         view_context: &ViewContext<'_>,
-        hovered_node: u32,
+        hovered_node: NodeId,
     ) {
         let ViewContext {
             profile,
@@ -230,20 +232,18 @@ impl App {
             pal,
             ..
         } = *view_context;
-        let total = self.totals[ROOT as usize].max(1);
-        let node = trie.nodes[hovered_node as usize];
-        let node_total = self.totals[hovered_node as usize];
+        let total = self.totals[ROOT].max(1);
+        let node = trie.nodes[hovered_node];
+        let node_total = self.totals[hovered_node];
         let children_total: u64 = trie
             .children(hovered_node)
             .iter()
-            .map(|&child| self.totals[child as usize])
+            .map(|&child| self.totals[child])
             .sum();
         let self_count = node_total.saturating_sub(children_total);
         response.clone().on_hover_ui_at_pointer(|ui| {
-            if node.frame == u32::MAX {
-                ui.strong("all samples");
-            } else {
-                let frame = &profile.frames[node.frame as usize];
+            if let Some(frame_id) = node.frame {
+                let frame = &profile.frames[frame_id];
                 ui.strong(&frame.name);
                 ui.label(format!("module: {}", profile.module_name(frame.module)));
                 if let Some(file) = &frame.file {
@@ -258,12 +258,10 @@ impl App {
                 if frame.raw {
                     ui.label("no symbol found");
                 }
-            }
-            let parent_total = if node.parent == u32::MAX {
-                node_total
             } else {
-                self.totals[node.parent as usize]
-            };
+                ui.strong("all samples");
+            }
+            let parent_total = node.parent.map_or(node_total, |parent| self.totals[parent]);
             ui.label(format!(
                 "{} {unit} inclusive ({}% of the view, {}% of parent)",
                 cost.format(node_total),

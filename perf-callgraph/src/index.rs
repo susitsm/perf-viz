@@ -1,6 +1,6 @@
 //! Typed indices and a vector indexed by them, so that a trie node id cannot index the frame table.
 //!
-//! [`define_index!`] declares an id type; [`IndexVec`] is a `Vec` that is indexed by one id type
+//! [`define_index!`](crate::define_index) declares an id type; [`IndexVec`] is a `Vec` that is indexed by one id type
 //! only. Ids store `index + 1` in a `NonZeroU32`, so an `Option<Id>` is as small as the id itself
 //! and can stand for "no such id" without a sentinel value.
 

@@ -9,6 +9,7 @@ mod load_replay;
 pub mod model;
 pub mod phys;
 pub mod symbolize;
+pub mod tries;
 pub mod unwind;
 
 #[cfg(test)]

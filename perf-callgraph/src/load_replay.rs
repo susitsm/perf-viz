@@ -25,9 +25,9 @@ use rustc_hash::FxHashMap;
 use crate::{
     Result,
     binary::{Binary, BinaryCache, SectionData},
-    load::{FrameTable, module_addresses, symbolize_modules, unmapped_frame},
     model::{FrameInfo, LoadStats, NO_MODULE, Profile, Trie, TrieBuilder},
     symbolize::{DwarfMode, ModuleSymbols},
+    tries::{FrameTable, module_addresses, symbolize_modules, unmapped_frame},
 };
 
 type Unw = UnwinderX86_64<SectionData>;

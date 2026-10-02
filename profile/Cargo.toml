@@ -3,6 +3,9 @@ name = "perf-profile"
 version = "0.1.0"
 edition = "2024"
 
+[lints]
+workspace = true
+
 [dependencies]
 addr2line = "0.27.1"
 blazesym = "0.2.6"

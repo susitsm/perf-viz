@@ -221,7 +221,6 @@ pub fn symbolize_module(path: &Path, addrs: &[u64], mode: DwarfMode) -> ModuleRe
         }
     };
 
-    // Level 1: DWARF, only when the module has it.
     if mode == DwarfMode::Auto && cap.has_dwarf() {
         match run_blaze(path, addrs, true) {
             Ok(frames) => return finish(Level::Full, frames, notes),
@@ -237,7 +236,6 @@ pub fn symbolize_module(path: &Path, addrs: &[u64], mode: DwarfMode) -> ModuleRe
         );
     }
 
-    // Level 2: ELF symbol tables.
     if cap.has_symbols {
         match run_blaze(path, addrs, false) {
             Ok(frames) => return finish(Level::SymbolsOnly, frames, notes),
@@ -249,7 +247,6 @@ pub fn symbolize_module(path: &Path, addrs: &[u64], mode: DwarfMode) -> ModuleRe
         notes.push("no function symbols".into());
     }
 
-    // Level 3: raw.
     finish(Level::Raw, all_raw(path, addrs), notes)
 }
 

@@ -109,8 +109,6 @@ pub fn costs(trie: &Trie, totals: &[u64], selfs: &[u64], funcs: &Functions) -> C
     costs
 }
 
-// ---- top-down -----------------------------------------------------------------------------------
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TdRow {
     pub node: u32,
@@ -192,8 +190,6 @@ pub fn hottest_path(trie: &Trie, totals: &[u64], min_share: f32) -> Vec<u32> {
     }
     path
 }
-
-// ---- bottom-up ----------------------------------------------------------------------------------
 
 /// An id (a function, module or trie node, depending on the list) with the cost attributed to it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -311,8 +307,6 @@ pub fn bu_rows(
     );
     out
 }
-
-// ---- caller / callee ----------------------------------------------------------------------------
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SortBy {

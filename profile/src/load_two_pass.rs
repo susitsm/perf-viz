@@ -217,7 +217,6 @@ pub fn load_two_pass(
         ..Default::default()
     };
 
-    // ---- pass 1: events and sample rows -> address spaces ------------------------------------
     progress("pass 1: reading task and mmap events");
     let started = Instant::now();
     let (meta, rep1) = meta::read_meta(&src, path, config, sopts)?;
@@ -230,7 +229,6 @@ pub fn load_two_pass(
     stats.epochs = spaces.epoch_count();
     drop(meta);
 
-    // ---- module table and binaries, opened in parallel ---------------------------------------
     progress("opening binaries");
     let started = Instant::now();
     let module_paths: Vec<PathBuf> = spaces
@@ -253,7 +251,6 @@ pub fn load_two_pass(
     }
     stats.secs_open_binaries = started.elapsed().as_secs_f64();
 
-    // ---- pass 2: unwind on the workers -------------------------------------------------------
     progress("pass 2: unwinding samples");
     let started = Instant::now();
     let shared = Shared {
@@ -280,7 +277,6 @@ pub fn load_two_pass(
     stats.secs_pass2 = started.elapsed().as_secs_f64();
     stats.fell_back |= rep2.fell_back;
 
-    // ---- merge the workers' tries ------------------------------------------------------------
     progress("merging");
     let started = Instant::now();
     let mut phys = PhysTrie::default();
@@ -306,7 +302,6 @@ pub fn load_two_pass(
     stats.suspect_samples = counters.suspect_samples;
     stats.suspect_frames = counters.suspect_frames;
 
-    // ---- symbolize the unique (module, address) pairs ----------------------------------------
     progress("symbolizing");
     let started = Instant::now();
     let mut per_module: BTreeMap<u32, BTreeSet<u64>> = BTreeMap::new();
@@ -338,7 +333,6 @@ pub fn load_two_pass(
     }
     stats.secs_symbolize = started.elapsed().as_secs_f64();
 
-    // ---- expand the physical trie into the logical tries -------------------------------------
     progress("building call trees");
     let started = Instant::now();
     let mut frames: Vec<FrameInfo> = Vec::new();

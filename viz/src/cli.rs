@@ -3,7 +3,7 @@
 //! Flags override the saved settings (see [`crate::config`]) for one run and never change them. They
 //! are grouped by what they are for: [`InitialView`] (what the window shows when it opens),
 //! [`ReaderArgs`] (how the file is read) and, hidden and only with the `scripted` feature,
-//! [`ScriptArgs`] (scripted input and screenshots for automated checks of the GUI).
+//! `ScriptArgs` (scripted input and screenshots for automated checks of the GUI).
 
 use std::path::PathBuf;
 

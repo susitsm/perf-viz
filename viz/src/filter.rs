@@ -436,7 +436,6 @@ mod tests {
             )[ROOT as usize],
             1
         );
-        // No range is the same as `totals`.
         assert_eq!(
             totals_in(
                 &sample_profile,

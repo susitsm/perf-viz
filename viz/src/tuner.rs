@@ -171,7 +171,6 @@ impl Tuner {
         if !self.can_start() {
             return;
         }
-        // What to tune on: a recording, or (after writing it) a generated one.
         let (source, synthetic) = (self.source.clone(), self.synthetic);
         let (folder, bytes) = (self.synth_folder(), (self.synth_gb() * 1e9) as u64);
         self.cancel.store(false, Ordering::Relaxed);
@@ -425,7 +424,6 @@ impl Tuner {
             }
             ui.allocate_space(vec2(ui.available_width(), 0.0));
                 });
-                // Closing this window while asked: the question appears in this window.
                 if matches!(self.confirm, Some(Ask::Close)) {
                     self.confirm_ui(vui.ctx(), &mut out);
                 }

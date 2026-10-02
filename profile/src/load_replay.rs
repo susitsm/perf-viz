@@ -102,7 +102,6 @@ pub fn load_replay(
     let mut stacks: Vec<Phys> = Vec::new();
     let mut offsets: Vec<u32> = vec![0];
 
-    // ---- replay + unwind -------------------------------------------------------------------
     progress("replaying records and unwinding");
     let started = Instant::now();
     let PerfFileReader {
@@ -270,7 +269,6 @@ pub fn load_replay(
     }
     stats.secs_replay_unwind = started.elapsed().as_secs_f64();
 
-    // ---- symbolize unique (module, address) pairs, one module per task ------------------------
     progress("symbolizing");
     let started = Instant::now();
     let mut per_module: HashMap<u32, BTreeSet<u64>> = HashMap::new();
@@ -302,7 +300,6 @@ pub fn load_replay(
     }
     stats.secs_symbolize = started.elapsed().as_secs_f64();
 
-    // ---- build tries ------------------------------------------------------------------------
     progress("building call trees");
     let started = Instant::now();
     let mut frames: Vec<FrameInfo> = Vec::new();

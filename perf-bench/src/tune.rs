@@ -509,7 +509,6 @@ pub fn tune(
         notes.push("the recording is on a RAM-backed file system, so the speeds are memory speeds, not a disk's".into());
     }
 
-    // 1. Sustained speed.
     on_event(Event::Info(format!(
         "Measuring sustained read speed ({:.0} s)",
         options.probe_secs
@@ -523,7 +522,6 @@ pub fn tune(
         return Err("could not measure the read speed".into());
     }
 
-    // 2. How much a trial reads, and the windows it reads from.
     let long = trial_bytes(
         probe_result.sustained_gbps,
         options.trial_secs,
@@ -554,7 +552,6 @@ pub fn tune(
         notes.push(format!("the recording ({:.1} GB) is shorter than a trial, so each trial reads it more than once", trial_runner.section.len as f64 / 1e9));
     }
 
-    // 3. Sweep, one setting at a time, on short trials.
     let mut trials: Vec<Trial> = Vec::new();
     let run = |runner: &mut Trials,
                what: &'static str,
@@ -571,7 +568,7 @@ pub fn tune(
             .iter()
             .find(|x| x.settings == settings && x.long == is_long)
         {
-            return Ok(Some(done.gbps)); // already measured
+            return Ok(Some(done.gbps));
         }
         if cancel.load(Ordering::Relaxed) {
             return Err("cancelled".into());
@@ -661,7 +658,6 @@ pub fn tune(
     }
     cur.in_flight = pick(&scored, |&in_flight| in_flight as u64).unwrap_or(cur.in_flight);
 
-    // 4. Confirm the fastest few, and the defaults, on full-length trials.
     let mut ranked: Vec<Scored<Settings>> = trials
         .iter()
         .filter(|x| !x.long)

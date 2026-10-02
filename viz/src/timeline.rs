@@ -113,7 +113,6 @@ pub fn build(
         Filter::Thread(thread_id) => tid == thread_id,
     };
 
-    // Which threads are busiest?
     let mut per_thread: HashMap<i32, ThreadCost> = HashMap::new();
     for sample in profile
         .samples
@@ -231,8 +230,6 @@ pub fn ticks(span_ns: u64, width_px: f32, min_gap_px: f32) -> Vec<Tick> {
         .collect()
 }
 
-// ---- drawing ------------------------------------------------------------------------------------
-
 /// What the user did in the timeline this frame.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Action {
@@ -272,7 +269,6 @@ pub fn draw(ui: &mut egui::Ui, options: &Options<'_>, drag: &mut Option<XDrag>) 
     let pal = Pal::of(ui);
     let span = timeline_data.span();
 
-    // Caption: what is selected.
     ui.horizontal(|ui| {
         match options.range {
             Some(range) => {
@@ -293,7 +289,6 @@ pub fn draw(ui: &mut egui::Ui, options: &Options<'_>, drag: &mut Option<XDrag>) 
         left + (time.saturating_sub(timeline_data.t0) as f64 / span as f64 * plot_w as f64) as f32
     };
 
-    // One drawing pass per row (the overall strip, then the lanes), all sharing the same x axis.
     let mut row = |ui: &mut egui::Ui,
                    id: usize,
                    row_height: f32,
@@ -315,7 +310,6 @@ pub fn draw(ui: &mut egui::Ui, options: &Options<'_>, drag: &mut Option<XDrag>) 
         );
         let painter = ui.painter();
         painter.rect_filled(plot, 2.0, pal.plot_bg());
-        // Bars
         let max = bins.iter().copied().max().unwrap_or(0).max(1) as f32;
         let bw = plot_w / bins.len().max(1) as f32;
         for (i, &count) in bins.iter().enumerate() {
@@ -332,7 +326,6 @@ pub fn draw(ui: &mut egui::Ui, options: &Options<'_>, drag: &mut Option<XDrag>) 
                 );
             }
         }
-        // Selection (applied, or being dragged)
         let band = match *drag {
             Some(drag) => Some((drag.from_x.min(drag.to_x), drag.from_x.max(drag.to_x))),
             None => options
@@ -352,7 +345,6 @@ pub fn draw(ui: &mut egui::Ui, options: &Options<'_>, drag: &mut Option<XDrag>) 
                 egui::StrokeKind::Inside,
             );
         }
-        // Label
         let selected = label_action.is_some_and(
             |action| matches!(action, Action::SelectThread { tid, .. } if Some(tid) == options.selected_tid),
         );
@@ -370,7 +362,6 @@ pub fn draw(ui: &mut egui::Ui, options: &Options<'_>, drag: &mut Option<XDrag>) 
                 },
             );
 
-        // Interaction: drag selects; a click without dragging clears; a click on the label selects a thread.
         if resp.drag_started() {
             if let Some(pointer) = resp
                 .interact_pointer_pos()
@@ -430,7 +421,6 @@ pub fn draw(ui: &mut egui::Ui, options: &Options<'_>, drag: &mut Option<XDrag>) 
         id
     };
 
-    // Time axis, above the overall strip
     let (axis, _) = ui.allocate_exact_size(
         vec2(options.label_w + plot_w + RIGHT_PAD, 16.0),
         Sense::hover(),

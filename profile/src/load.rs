@@ -384,7 +384,6 @@ pub fn load(path: &Path, options: Options, progress: &mut dyn FnMut(&str)) -> Re
         force_sequential: options.force_sequential,
     };
 
-    // ---- one pass: read, extract events, commit, unwind ---------------------------------------
     progress("reading and unwinding");
     let started = Instant::now();
     let (loader, states, rep) = ordered::stream_ordered(path, config, sopts, || {
@@ -404,7 +403,6 @@ pub fn load(path: &Path, options: Options, progress: &mut dyn FnMut(&str)) -> Re
     stats.processes = spaces.pids().count();
     stats.epochs = spaces.epoch_count();
 
-    // ---- merge the workers' tries ------------------------------------------------------------
     progress("merging");
     let started = Instant::now();
     let mut phys = PhysTrie::default();
@@ -437,7 +435,6 @@ pub fn load(path: &Path, options: Options, progress: &mut dyn FnMut(&str)) -> Re
     stats.samples_with_period = counters.with_period;
     stats.period_unit = src.period_unit.to_string();
 
-    // ---- symbolize the unique (module, address) pairs ----------------------------------------
     progress("symbolizing");
     let started = Instant::now();
     let mut per_module: BTreeMap<u32, BTreeSet<u64>> = BTreeMap::new();
@@ -469,7 +466,6 @@ pub fn load(path: &Path, options: Options, progress: &mut dyn FnMut(&str)) -> Re
     }
     stats.secs_symbolize = started.elapsed().as_secs_f64();
 
-    // ---- expand the physical trie into the logical tries -------------------------------------
     progress("building call trees");
     let started = Instant::now();
     let mut frames: Vec<FrameInfo> = Vec::new();

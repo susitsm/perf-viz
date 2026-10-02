@@ -93,7 +93,6 @@ fn walk<T: ByteOrder>(
             file.read_exact_at(&mut buffer[..read_len], section.start + off)?;
             (buf_at, filled) = (off, read_len);
         }
-        // Tight loop over the headers this block contains.
         let end = buf_at + filled as u64;
         while off + HEADER_LEN as u64 <= end {
             let remaining = &buffer[(off - buf_at) as usize..];

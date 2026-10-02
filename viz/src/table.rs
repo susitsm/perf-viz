@@ -66,7 +66,6 @@ pub fn draw<'a>(
     let width = ui.available_width().max(200.0);
     let numeric_w = (NUM_W + PCT_W) * if cols.self_cost.is_some() { 2.0 } else { 1.0 };
     let name_w = (width - numeric_w - MODULE_W - 12.0).max(80.0);
-    // x offsets from the left of the table
     let module_x = name_w;
     let cost_x = module_x + MODULE_W;
     let self_x = cost_x + NUM_W + PCT_W;
@@ -76,7 +75,6 @@ pub fn draw<'a>(
     let (text, weak) = (pal.text(), pal.weak());
     let mut clicked = None;
 
-    // Header. The numeric columns are clickable when the table is sortable.
     let (hrect, _) = ui.allocate_exact_size(vec2(width, ROW_H), Sense::hover());
     ui.painter().rect_filled(hrect, 0.0, pal.header_bg());
     if let Some(current) = cols.sort {
@@ -151,7 +149,6 @@ pub fn draw<'a>(
                     painter.rect_filled(rect, 0.0, pal.tint(14));
                 }
 
-                // Tree column: indent, arrow, name
                 let indent_x = 6.0 + row_data.depth as f32 * INDENT;
                 if row_data.arrow != Arrow::None {
                     let (ax, ay) = (left + indent_x + 4.0, cy);
@@ -200,7 +197,6 @@ pub fn draw<'a>(
                     weak,
                 );
 
-                // Numeric columns, each a count and a percentage (with a bar behind the percentage)
                 let cell = |x: f32, value: u64, bar: Color32| {
                     let frac = (value as f32 / total_f).clamp(0.0, 1.0);
                     let bar_rect = Rect::from_min_size(

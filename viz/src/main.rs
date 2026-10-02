@@ -348,7 +348,6 @@ struct App {
     /// Focused (zoomed) node, per view: node ids differ between the two tries.
     focus: [u32; 2],
 
-    // Views over the loaded profile
     funcs: Option<Functions>,
     /// Samples ending at each node of the current view's trie (see `views::self_counts`).
     selfs: Vec<u64>,
@@ -366,7 +365,6 @@ struct App {
     drag: Option<XDrag>,
     timeline_data: Option<TimelineCache>,
 
-    // Filters
     sel_pid: Option<i32>,
     sel_tid: Option<i32>,
     proc_rows: Vec<ProcRow>,
@@ -383,7 +381,6 @@ struct App {
     /// The tab last written to the config, so a tab given on the command line isn't saved.
     saved_tab: Tab,
 
-    // Search
     search: String,
     search_applied: Option<SearchKey>,
     matches: Vec<bool>,
@@ -719,7 +716,6 @@ impl App {
     }
 
     fn loading_screen(&self, ui: &mut egui::Ui) {
-        // A fixed-width block in the middle of the window.
         const BLOCK_W: f32 = 460.0;
         const BLOCK_H: f32 = 230.0;
         ui.add_space(((ui.available_height() - BLOCK_H) / 2.0).max(30.0));
@@ -832,7 +828,6 @@ impl eframe::App for App {
     }
 
     fn raw_input_hook(&mut self, _ctx: &egui::Context, raw: &mut egui::RawInput) {
-        // Scripted pointer events (only with the `scripted` feature).
         let screen_ready = self.profile.is_some() || self.path.is_none() || self.pending_load;
         self.harness
             .raw_input_hook(raw, screen_ready, self.frames_since_load);
@@ -846,7 +841,6 @@ impl eframe::App for App {
             timing(&format!("frame {}", self.frames_total));
         }
 
-        // A file dropped on the window, or chosen in the file dialog, replaces what is open.
         let dropped = ctx.input(|i| {
             i.raw
                 .dropped_files
@@ -905,7 +899,6 @@ impl eframe::App for App {
             ctx.request_repaint();
             return;
         }
-        // The first-run tuning finished or was closed: now load the file.
         if self.pending_load && self.tune_first && !self.tuner.open {
             self.start_load(&ctx);
         }
@@ -1013,7 +1006,6 @@ impl eframe::App for App {
 
         self.harness.poll_screen(&ctx, self.frames_since_load);
 
-        // ---- controls: view, filters, search ----
         let mut filter_changed = false;
         egui::Panel::top("top").show(ui, |ui| {
             ui.horizontal_wrapped(|ui| {
@@ -1077,7 +1069,6 @@ impl eframe::App for App {
                 ui.label("suspect tail: from the first invalid return address out to the root");
             });
             ui.horizontal_wrapped(|ui| {
-                // Process selector
                 let proc_text = match self.sel_pid {
                     None => "All processes".to_string(),
                     Some(pid) => format!("{} ({pid})", profile.comm.get(&pid).map_or("?", String::as_str)),
@@ -1108,7 +1099,6 @@ impl eframe::App for App {
                         }
                     });
                 });
-                // Thread selector, once a process is chosen
                 if let Some(pid) = self.sel_pid {
                     ui.label("Thread:");
                     let text = self.sel_tid.map_or("All threads".to_string(), |thread_id| thread_id.to_string());
@@ -1144,7 +1134,6 @@ impl eframe::App for App {
             self.totals_key = None;
         }
 
-        // ---- recompute what depends on the view / filter / search ----
         let filter = self.filter();
         // The trie must be chosen *after* the controls above, which can change `truncated`: totals
         // are per node of the chosen trie, so a stale trie would index them out of range.
@@ -1196,7 +1185,6 @@ impl eframe::App for App {
         let searching = !self.search.is_empty();
         let filtered = filter != Filter::All || self.range.is_some();
 
-        // ---- timeline: build its data, and show the compact strip on every tab but its own ----
         let tl_bins = (((ui.available_width() - TL_LABEL_W - 10.0) / 2.0).max(60.0)) as usize;
         let timeline_current = self.timeline_data.as_ref().is_some_and(|cache| {
             cache.filter == filter && cache.bins == tl_bins && cache.cost == cost
@@ -1230,7 +1218,6 @@ impl eframe::App for App {
                 .inner;
         }
 
-        // The breadcrumb and search summary belong to the flame graph's zoom.
         if self.tab == Tab::FlameGraph {
             egui::Panel::top("crumbs").show(ui, |ui| {
                 ui.horizontal_wrapped(|ui| {
@@ -1279,7 +1266,6 @@ impl eframe::App for App {
             });
         }
 
-        // ---- status bar ----
         egui::Panel::bottom("status").show(ui, |ui| {
             let state = &profile.stats;
             ui.horizontal_wrapped(|ui| {
@@ -1306,7 +1292,6 @@ impl eframe::App for App {
             });
         });
 
-        // ---- the selected view ----
         egui::CentralPanel::default().show(ui, |ui| {
             let (query, funcs) = (
                 self.search.to_lowercase(),
@@ -1391,7 +1376,6 @@ impl eframe::App for App {
                         &self.summary,
                         filtered,
                     ) {
-                        // A hotspot was clicked: show it in the caller/callee view.
                         self.cc.selected = Some(function);
                         self.tab = Tab::CallerCallee;
                     }
@@ -2041,7 +2025,6 @@ fn main() -> eframe::Result {
     let config = config::load();
     let mut load_options = load::Options::default();
     config.reader.apply(&mut load_options);
-    // Flags override the saved settings for this run.
     cli.reader.apply(&mut load_options);
     let harness = Harness::from_cli(&cli);
     let show = cli.show;

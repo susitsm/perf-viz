@@ -56,7 +56,6 @@ fn main() -> perf_profile::Result<()> {
     );
     let size = std::fs::metadata(&path)?.len() as f64;
 
-    // ---- pass 1 ----
     let config = Config {
         block: 1 << 20,
         workers,
@@ -119,7 +118,6 @@ fn main() -> perf_profile::Result<()> {
         "events must be time-sorted"
     );
 
-    // ---- address spaces ----
     let started = Instant::now();
     let spaces = AddressSpaces::build(&meta.events);
     let mut per_pid: HashMap<i32, u64> = HashMap::new();
@@ -173,7 +171,6 @@ fn main() -> perf_profile::Result<()> {
         return Ok(());
     }
 
-    // ---- exact reference: time-ordered replay with live maps ----
     let started = Instant::now();
     #[derive(Clone)]
     struct M {

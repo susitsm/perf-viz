@@ -3,12 +3,9 @@
 mod cli;
 mod config;
 mod filter;
-mod flame;
 mod fmt;
 mod harness;
-mod table;
 mod theme;
-mod timeline;
 mod tuner;
 mod views;
 
@@ -27,14 +24,16 @@ use crate::{
     cli::{Cli, MsRange},
     config::{Config, Dwarf, ReaderConfig, TabName, Theme},
     filter::{Coverage, Filter, ProcRow},
-    flame::Item,
     fmt::Cost,
     harness::Harness,
-    table::{Arrow, Click, Columns, RowData},
     theme::Pal,
-    timeline::{TimeRange, XDrag},
     tuner::Tuner,
-    views::{BuRow, Functions, TdRow, Weighted},
+    views::{
+        BuRow, Functions, TdRow, Weighted,
+        flame_layout::{self, Item},
+        table::{self, Arrow, Click, Columns, RowData},
+        timeline::{self, TimeRange, XDrag},
+    },
 };
 use eframe::egui::{
     self, Align2, Color32, FontId, Key, Rect, RichText, Sense, Stroke, StrokeKind, pos2, vec2,
@@ -1660,7 +1659,7 @@ impl App {
             totals_version: self.totals_version,
         };
         if self.items_key != Some(key) {
-            flame::layout(
+            flame_layout::layout(
                 trie,
                 &self.totals,
                 focus,
@@ -1718,7 +1717,7 @@ impl App {
         let hovered = response.hover_pos().and_then(|pos| {
             let depth_index = ((bottom - pos.y) / ROW_H).floor();
             (depth_index >= 0.0)
-                .then(|| flame::hit(&self.items, pos.x - rect.left(), depth_index as u32))
+                .then(|| flame_layout::hit(&self.items, pos.x - rect.left(), depth_index as u32))
                 .flatten()
                 .copied()
         });

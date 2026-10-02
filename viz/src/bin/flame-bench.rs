@@ -3,10 +3,10 @@ use std::time::Instant;
 
 use perf_profile::model::{ROOT, Trie, TrieBuilder};
 // The layout code is part of the viewer binary; the benchmark compiles the same file.
-#[path = "../flame.rs"]
+#[path = "../views/flame_layout.rs"]
 #[allow(dead_code)] // the benchmark uses only part of it
-mod flame;
-use flame::{layout, trie_totals};
+mod flame_layout;
+use flame_layout::{layout, trie_totals};
 
 fn synthetic(nodes_target: usize) -> Trie {
     // Skewed random stacks over a pool of "functions", like real profiles: a few very hot

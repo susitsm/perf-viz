@@ -61,7 +61,7 @@ pub fn totals_in(
         return trie.nodes.iter().map(|node| node.total as u64).collect();
     }
     let mut node_totals = vec![0u64; trie.nodes.len()];
-    for sample in &profile.samples[crate::timeline::sample_indices(profile, range)] {
+    for sample in &profile.samples[crate::views::timeline::sample_indices(profile, range)] {
         if filter.keeps(sample.pid, sample.tid) {
             node_totals[(if truncated {
                 sample.truncated

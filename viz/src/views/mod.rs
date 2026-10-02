@@ -12,6 +12,10 @@ use std::{
 
 use perf_profile::model::{Profile, ROOT, Trie};
 
+pub mod flame_layout;
+pub mod table;
+pub mod timeline;
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Func {
     pub name: String,

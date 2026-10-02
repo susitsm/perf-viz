@@ -98,6 +98,60 @@ mod scripted {
         finished: Option<Instant>,
     }
 
+    fn pause(ms: u64) -> Instant {
+        Instant::now() + Duration::from_millis(ms)
+    }
+
+    fn primary_button(pos: egui::Pos2, pressed: bool) -> egui::Event {
+        egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::default(),
+        }
+    }
+
+    fn start_pointer_step(script: &mut Script, raw: &mut egui::RawInput, step: Step) {
+        let (Step::Click(pos) | Step::Hover(pos) | Step::Drag(pos, _)) = step else {
+            unreachable!()
+        };
+        raw.events.push(egui::Event::PointerMoved(pos));
+        // Let the hover register before pressing; a hover step just pauses.
+        script.current = (!matches!(step, Step::Hover(_))).then_some(Doing { step, stage: 0 });
+        script.wait_until = pause(if script.current.is_some() { 150 } else { 350 });
+    }
+
+    fn continue_click(script: &mut Script, raw: &mut egui::RawInput, pos: egui::Pos2, stage: u8) {
+        raw.events.push(primary_button(pos, stage == 0));
+        script.current = (stage == 0).then_some(Doing {
+            step: Step::Click(pos),
+            stage: 1,
+        });
+        script.wait_until = pause(if stage == 0 { 80 } else { 350 });
+    }
+
+    fn continue_drag(
+        script: &mut Script,
+        raw: &mut egui::RawInput,
+        from: egui::Pos2,
+        to: egui::Pos2,
+        stage: u8,
+    ) {
+        let middle = pos2((from.x + to.x) / 2.0, (from.y + to.y) / 2.0);
+        raw.events.push(match stage {
+            0 => primary_button(from, true),
+            1 => egui::Event::PointerMoved(middle),
+            2 => egui::Event::PointerMoved(to),
+            _ => primary_button(to, false),
+        });
+        let last = stage >= 3;
+        script.current = (!last).then_some(Doing {
+            step: Step::Drag(from, to),
+            stage: stage + 1,
+        });
+        script.wait_until = pause(if last { 350 } else { 80 });
+    }
+
     #[derive(Clone, Default)]
     pub struct Harness {
         screenshot: Option<PathBuf>,
@@ -171,8 +225,6 @@ mod scripted {
             if sc.finished.is_some() || Instant::now() < sc.wait_until {
                 return;
             }
-            let mods = egui::Modifiers::default();
-            let pause = |ms| Instant::now() + Duration::from_millis(ms);
             match sc.current {
                 None => match sc.steps.pop_front() {
                     None => sc.finished = Some(Instant::now()),
@@ -185,66 +237,16 @@ mod scripted {
                         self.injected_open = sc.files.get(i).cloned();
                         sc.wait_until = pause(300);
                     }
-                    Some(step) => {
-                        let (Step::Click(pos) | Step::Hover(pos) | Step::Drag(pos, _)) = step
-                        else {
-                            unreachable!()
-                        };
-                        raw.events.push(egui::Event::PointerMoved(pos));
-                        // Let the hover register before pressing; a hover step just pauses.
-                        sc.current =
-                            (!matches!(step, Step::Hover(_))).then_some(Doing { step, stage: 0 });
-                        sc.wait_until = pause(if sc.current.is_some() { 150 } else { 350 });
-                    }
+                    Some(step) => start_pointer_step(sc, raw, step),
                 },
                 Some(Doing {
-                    step: step @ Step::Click(pos),
+                    step: Step::Click(pos),
                     stage,
-                }) => {
-                    raw.events.push(egui::Event::PointerButton {
-                        pos,
-                        button: egui::PointerButton::Primary,
-                        pressed: stage == 0,
-                        modifiers: mods,
-                    });
-                    sc.current = if stage == 0 {
-                        Some(Doing { step, stage: 1 })
-                    } else {
-                        None
-                    };
-                    sc.wait_until = pause(if stage == 0 { 80 } else { 350 });
-                }
+                }) => continue_click(sc, raw, pos, stage),
                 Some(Doing {
-                    step: step @ Step::Drag(from, to),
+                    step: Step::Drag(from, to),
                     stage,
-                }) => {
-                    let mid = pos2((from.x + to.x) / 2.0, (from.y + to.y) / 2.0);
-                    raw.events.push(match stage {
-                        0 => egui::Event::PointerButton {
-                            pos: from,
-                            button: egui::PointerButton::Primary,
-                            pressed: true,
-                            modifiers: mods,
-                        },
-                        1 => egui::Event::PointerMoved(mid),
-                        2 => egui::Event::PointerMoved(to),
-                        _ => egui::Event::PointerButton {
-                            pos: to,
-                            button: egui::PointerButton::Primary,
-                            pressed: false,
-                            modifiers: mods,
-                        },
-                    });
-                    sc.current = if stage >= 3 {
-                        None
-                    } else {
-                        Some(Doing {
-                            step,
-                            stage: stage + 1,
-                        })
-                    };
-                    sc.wait_until = pause(if stage >= 3 { 350 } else { 80 });
-                }
+                }) => continue_drag(sc, raw, from, to, stage),
                 Some(_) => sc.current = None,
             }
         }

@@ -842,7 +842,111 @@ impl eframe::App for App {
             self.frames_total += 1;
             timing(&format!("frame {}", self.frames_total));
         }
+        if self.handle_file_requests(&ctx) {
+            return;
+        }
+        self.handle_close_request(&ctx);
+        if self.update_tuner(&ctx) {
+            return;
+        }
+        if self.pending_load && self.tune_first && !self.tuner.open {
+            self.start_load(&ctx);
+        }
+        draw_drop_overlay(&ctx, &pal);
+        self.receive_profile();
 
+        let Some(shared_profile) = self.profile.clone() else {
+            self.draw_without_profile(ui, &ctx, &pal);
+            return;
+        };
+        let profile: &Profile = &shared_profile;
+        self.frames_since_load += 1;
+        self.harness.poll_screen(&ctx, self.frames_since_load);
+
+        if self.draw_top_bar(ui, &ctx, profile) {
+            self.totals_key = None;
+        }
+        self.save_tab_choice();
+
+        let filter = self.filter();
+        // The trie must be chosen *after* the controls above, which can change `truncated`: totals
+        // are per node of the chosen trie, so a stale trie would index them out of range.
+        let trie: &Trie = if self.truncated {
+            &profile.truncated
+        } else {
+            &profile.full
+        };
+        let view_context = ViewContext {
+            profile,
+            trie,
+            view: self.view(),
+            cost: self.cost,
+            unit: noun(profile, self.cost),
+            filtered: filter != Filter::All || self.range.is_some(),
+            searching: !self.search.is_empty(),
+            pal,
+        };
+        self.refresh_totals(&view_context, filter);
+        self.refresh_search(profile);
+        self.refresh_timeline(ui, &view_context, filter);
+
+        let mut timeline_actions = Vec::new();
+        if self.tab != Tab::Timeline {
+            timeline_actions = self.draw_timeline_strip(ui, &view_context);
+        }
+        if self.tab == Tab::FlameGraph {
+            self.draw_breadcrumbs(ui, &view_context);
+        }
+        self.draw_status_bar(ui, &view_context);
+        egui::CentralPanel::default().show(ui, |ui| {
+            self.draw_tab(ui, &view_context, &mut timeline_actions);
+        });
+        self.apply_timeline_actions(timeline_actions);
+    }
+}
+
+/// What the views drawn in one frame share.
+struct ViewContext<'a> {
+    profile: &'a Profile,
+    trie: &'a Trie,
+    view: usize,
+    cost: Cost,
+    /// What the cost counts, for captions.
+    unit: &'a str,
+    filtered: bool,
+    searching: bool,
+    pal: Pal,
+}
+
+fn draw_drop_overlay(ctx: &egui::Context, pal: &Pal) {
+    if ctx.input(|i| i.raw.hovered_files.is_empty()) {
+        return;
+    }
+    let painter = ctx.layer_painter(egui::LayerId::new(
+        egui::Order::Foreground,
+        egui::Id::new("drop_overlay"),
+    ));
+    let rect = ctx.content_rect();
+    painter.rect_filled(rect, 0.0, Color32::from_black_alpha(150));
+    painter.rect_stroke(
+        rect.shrink(12.0),
+        8.0,
+        Stroke::new(3.0, pal.highlight()),
+        StrokeKind::Inside,
+    );
+    painter.text(
+        rect.center(),
+        Align2::CENTER_CENTER,
+        "Drop a perf.data file to open it",
+        FontId::proportional(26.0),
+        Color32::WHITE,
+    );
+}
+
+impl App {
+    /// Opens a file that was dropped, chosen in the dialog or requested by the script. Returns
+    /// whether it was opened (this frame is then over).
+    fn handle_file_requests(&mut self, ctx: &egui::Context) -> bool {
         let dropped = ctx.input(|i| {
             i.raw
                 .dropped_files
@@ -860,16 +964,20 @@ impl eframe::App for App {
         if picked.is_some() {
             self.picker = None;
         }
-        if let Some(path) = dropped.or(picked.flatten()).or(self.harness.take_open()) {
-            if self.tuner.unsaved() {
-                // Unsaved tuning results: ask about them first; the file opens once that is settled.
-                self.tuner.ask_before_open(path);
-            } else {
-                self.open(&ctx, path);
-                ctx.request_repaint();
-                return;
-            }
+        let Some(path) = dropped.or(picked.flatten()).or(self.harness.take_open()) else {
+            return false;
+        };
+        if self.tuner.unsaved() {
+            // Unsaved tuning results: ask about them first; the file opens once that is settled.
+            self.tuner.ask_before_open(path);
+            return false;
         }
+        self.open(ctx, path);
+        ctx.request_repaint();
+        true
+    }
+
+    fn handle_close_request(&mut self, ctx: &egui::Context) {
         if ctx.input(|i| i.viewport().close_requested())
             && self.tuner.unsaved()
             && !self.harness.finished()
@@ -877,14 +985,18 @@ impl eframe::App for App {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
             self.tuner.ask_before_quit();
         }
+    }
+
+    /// Shows the tuner window and applies what it decided. Returns whether it opened a file
+    /// (this frame is then over).
+    fn update_tuner(&mut self, ctx: &egui::Context) -> bool {
         if self.harness.take_tune_window() {
-            self.tuner.open_for(&ctx, self.path.as_deref());
+            self.tuner.open_for(ctx, self.path.as_deref());
         }
-        let tuned = self.tuner.show(&ctx);
+        let tuned = self.tuner.show(ctx);
         if tuned.quit {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
         }
-        let open_after = tuned.open_file;
         if let Some(settings) = tuned.apply {
             self.config.tuning_prompted = Some(true);
             self.config.reader.readers = Some(settings.readers);
@@ -895,282 +1007,376 @@ impl eframe::App for App {
             self.base.load_options.region_mb = settings.region_mb;
             self.base.load_options.in_flight = settings.in_flight;
         }
-        if let Some(path) = open_after {
-            self.open(&ctx, path);
-            ctx.request_repaint();
-            return;
-        }
-        if self.pending_load && self.tune_first && !self.tuner.open {
-            self.start_load(&ctx);
-        }
-        if ctx.input(|i| !i.raw.hovered_files.is_empty()) {
-            let painter = ctx.layer_painter(egui::LayerId::new(
-                egui::Order::Foreground,
-                egui::Id::new("drop_overlay"),
-            ));
-            let rect = ctx.content_rect();
-            painter.rect_filled(rect, 0.0, Color32::from_black_alpha(150));
-            painter.rect_stroke(
-                rect.shrink(12.0),
-                8.0,
-                Stroke::new(3.0, pal.highlight()),
-                StrokeKind::Inside,
-            );
-            painter.text(
-                rect.center(),
-                Align2::CENTER_CENTER,
-                "Drop a perf.data file to open it",
-                FontId::proportional(26.0),
-                Color32::WHITE,
-            );
-        }
+        let Some(path) = tuned.open_file else {
+            return false;
+        };
+        self.open(ctx, path);
+        ctx.request_repaint();
+        true
+    }
 
-        if let Some(receiver) = &self.receiver {
-            match receiver.try_recv() {
-                Ok(Ok(loaded_profile)) => {
-                    if loaded_profile.stats.samples_with_period == 0 {
-                        self.cost = Cost::Samples;
-                    }
-                    self.proc_rows = filter::processes(&loaded_profile, self.cost);
-                    self.funcs = Some(Functions::new(&loaded_profile));
-                    self.summary = SummaryInfo::new(&loaded_profile);
-                    self.summary.load = {
-                        let log = self.log.lock().unwrap();
-                        let read = log
-                            .entries
-                            .iter()
-                            .find(|phase| phase.name == PHASES[0].0)
-                            .and_then(|phase| {
-                                phase.end.map(|end| (end - phase.start).as_secs_f32())
-                            });
-                        read.map(|read_secs| LoadInfo {
-                            file_bytes: self.file_size,
-                            read_secs,
-                            total_secs: self.load_started.elapsed().as_secs_f32(),
-                        })
-                    };
-                    if let (Some(ms), Some(first)) =
-                        (self.pending_range_ms.take(), loaded_profile.samples.first())
-                    {
-                        self.range = Some(TimeRange {
-                            start: first.time + (ms.start_ms * 1e6) as u64,
-                            end: first.time + (ms.end_ms * 1e6) as u64,
-                        });
-                    }
-                    // `--thread` alone: find the thread's process so the selectors agree.
-                    if let (Some(thread_id), None) = (self.sel_tid, self.sel_pid) {
-                        self.sel_pid = loaded_profile
-                            .samples
-                            .iter()
-                            .find(|sample| sample.tid == thread_id)
-                            .map(|sample| sample.pid);
-                    }
-                    self.profile = Some(Arc::new(loaded_profile));
-                    self.receiver = None;
-                }
-                Ok(Err(message)) => {
-                    self.error = Some(message);
-                    self.receiver = None;
-                }
-                Err(_) => {}
-            }
-        }
-
-        let Some(shared_profile) = self.profile.clone() else {
-            egui::CentralPanel::default().show(ui, |ui| {
-                if self.path.is_none() {
-                    self.welcome_screen(ui, &ctx);
-                } else if self.pending_load {
-                    self.tune_prompt_screen(ui, &ctx);
-                } else if let Some(message) = self.error.clone() {
-                    ui.add_space(40.0);
-                    ui.colored_label(
-                        pal.suspect(),
-                        format!("Failed to load {}: {message}", self.path_text()),
-                    );
-                    ui.add_space(8.0);
-                    if ui.button("Open another file…").clicked() {
-                        self.pick_file(&ctx);
-                    }
-                    ui.weak("or drop a file on the window");
-                } else {
-                    self.loading_screen(ui);
-                    ctx.request_repaint_after(Duration::from_millis(100));
-                    self.harness
-                        .poll_loading(&ctx, self.load_started.elapsed().as_secs_f32());
-                }
-            });
+    /// Takes the finished load, if any, and sets up everything derived from the profile.
+    fn receive_profile(&mut self) {
+        let Some(receiver) = &self.receiver else {
             return;
         };
-        let profile: &Profile = &shared_profile;
-        self.frames_since_load += 1;
+        match receiver.try_recv() {
+            Ok(Ok(loaded_profile)) => {
+                if loaded_profile.stats.samples_with_period == 0 {
+                    self.cost = Cost::Samples;
+                }
+                self.proc_rows = filter::processes(&loaded_profile, self.cost);
+                self.funcs = Some(Functions::new(&loaded_profile));
+                self.summary = SummaryInfo::new(&loaded_profile);
+                self.summary.load = self.load_info();
+                if let (Some(ms), Some(first)) =
+                    (self.pending_range_ms.take(), loaded_profile.samples.first())
+                {
+                    self.range = Some(TimeRange {
+                        start: first.time + (ms.start_ms * 1e6) as u64,
+                        end: first.time + (ms.end_ms * 1e6) as u64,
+                    });
+                }
+                // `--thread` alone: find the thread's process so the selectors agree.
+                if let (Some(thread_id), None) = (self.sel_tid, self.sel_pid) {
+                    self.sel_pid = loaded_profile
+                        .samples
+                        .iter()
+                        .find(|sample| sample.tid == thread_id)
+                        .map(|sample| sample.pid);
+                }
+                self.profile = Some(Arc::new(loaded_profile));
+                self.receiver = None;
+            }
+            Ok(Err(message)) => {
+                self.error = Some(message);
+                self.receiver = None;
+            }
+            Err(_) => {}
+        }
+    }
 
-        self.harness.poll_screen(&ctx, self.frames_since_load);
+    /// How long the file read took and the whole load, for the summary.
+    fn load_info(&self) -> Option<LoadInfo> {
+        let log = self.log.lock().unwrap();
+        let read_secs = log
+            .entries
+            .iter()
+            .find(|phase| phase.name == PHASES[0].0)
+            .and_then(|phase| phase.end.map(|end| (end - phase.start).as_secs_f32()))?;
+        Some(LoadInfo {
+            file_bytes: self.file_size,
+            read_secs,
+            total_secs: self.load_started.elapsed().as_secs_f32(),
+        })
+    }
 
+    /// The screens shown while there is no profile: welcome, tune prompt, error or progress.
+    fn draw_without_profile(&mut self, ui: &mut egui::Ui, ctx: &egui::Context, pal: &Pal) {
+        egui::CentralPanel::default().show(ui, |ui| {
+            if self.path.is_none() {
+                self.welcome_screen(ui, ctx);
+            } else if self.pending_load {
+                self.tune_prompt_screen(ui, ctx);
+            } else if let Some(message) = self.error.clone() {
+                ui.add_space(40.0);
+                ui.colored_label(
+                    pal.suspect(),
+                    format!("Failed to load {}: {message}", self.path_text()),
+                );
+                ui.add_space(8.0);
+                if ui.button("Open another file…").clicked() {
+                    self.pick_file(ctx);
+                }
+                ui.weak("or drop a file on the window");
+            } else {
+                self.loading_screen(ui);
+                ctx.request_repaint_after(Duration::from_millis(100));
+                self.harness
+                    .poll_loading(ctx, self.load_started.elapsed().as_secs_f32());
+            }
+        });
+    }
+
+    /// Draws the toolbar and the filters; returns whether a filter changed.
+    fn draw_top_bar(&mut self, ui: &mut egui::Ui, ctx: &egui::Context, profile: &Profile) -> bool {
         let mut filter_changed = false;
         egui::Panel::top("top").show(ui, |ui| {
-            ui.horizontal_wrapped(|ui| {
-                ui.strong("perf-viz");
-                if ui.button("Open…").on_hover_text("Open another file (or drop one on the window)").clicked() {
-                    self.pick_file(&ctx);
+            self.draw_toolbar(ui, ctx, profile);
+            filter_changed = self.draw_filters(ui, profile);
+        });
+        filter_changed
+    }
+
+    fn draw_toolbar(&mut self, ui: &mut egui::Ui, ctx: &egui::Context, profile: &Profile) {
+        ui.horizontal_wrapped(|ui| {
+            ui.strong("perf-viz");
+            if ui
+                .button("Open…")
+                .on_hover_text("Open another file (or drop one on the window)")
+                .clicked()
+            {
+                self.pick_file(ctx);
+            }
+            ui.label(self.path_text());
+            ui.separator();
+            for (tab, label) in TABS {
+                ui.selectable_value(&mut self.tab, tab, label);
+            }
+            ui.separator();
+            // Stays open while settings are changed; closes on a click outside.
+            egui::containers::menu::MenuButton::new("Options")
+                .config(
+                    egui::containers::menu::MenuConfig::new()
+                        .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside),
+                )
+                .ui(ui, |ui| self.draw_options_menu(ui, ctx, profile));
+            ui.separator();
+            let (rect, _) = ui.allocate_exact_size(vec2(12.0, 12.0), Sense::hover());
+            ui.painter()
+                .rect_filled(rect, 2.0, Color32::from_rgb(200, 60, 60)); // the same red as the boxes
+            ui.label("suspect tail: from the first invalid return address out to the root");
+        });
+    }
+
+    fn draw_options_menu(&mut self, ui: &mut egui::Ui, ctx: &egui::Context, profile: &Profile) {
+        ui.set_min_width(230.0);
+        if profile.stats.samples_with_period > 0 {
+            self.draw_cost_options(ui, profile);
+            ui.separator();
+        }
+        self.draw_theme_options(ui, ctx);
+        ui.separator();
+        ui.label(RichText::new("Call trees").weak());
+        if ui
+            .checkbox(&mut self.truncated, "Truncate suspect tails")
+            .on_hover_text("Drop the frames from the first invalid return address out to the root")
+            .changed()
+        {
+            self.items_key = None;
+            self.totals_key = None;
+            self.config.truncate_suspect_tails = Some(self.truncated);
+            config::save(&self.config);
+        }
+        ui.separator();
+        self.reader_options(ui);
+        ui.separator();
+        if ui
+            .button("Tune reader…")
+            .on_hover_text("Measure the disk and find good reader settings")
+            .clicked()
+        {
+            self.tuner.open_for(ctx, self.path.as_deref());
+        }
+    }
+
+    fn draw_cost_options(&mut self, ui: &mut egui::Ui, profile: &Profile) {
+        ui.label(RichText::new("Cost").weak());
+        let before = self.cost;
+        ui.radio_value(&mut self.cost, Cost::Samples, "Samples")
+            .on_hover_text("Count each sample once");
+        ui.radio_value(&mut self.cost, Cost::Cycles, cycles_label(profile))
+            .on_hover_text("Weigh each sample by its period: the events (cycles) it stands for");
+        if self.cost != before {
+            self.config.cost = Some(self.cost);
+            config::save(&self.config);
+            self.proc_rows = filter::processes(profile, self.cost);
+            self.totals_key = None;
+        }
+    }
+
+    fn draw_theme_options(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        ui.label(RichText::new("Theme").weak());
+        let mut preference = ctx.options(|options| options.theme_preference);
+        let before = preference;
+        ui.radio_value(&mut preference, egui::ThemePreference::System, "System")
+            .on_hover_text("Follow the desktop's light/dark setting (dark if it has none)");
+        ui.radio_value(&mut preference, egui::ThemePreference::Light, "Light");
+        ui.radio_value(&mut preference, egui::ThemePreference::Dark, "Dark");
+        if preference != before {
+            ctx.set_theme(preference);
+            self.config.theme = Some(theme_setting(preference));
+            config::save(&self.config);
+        }
+    }
+
+    /// The process and thread selectors and the search box; returns whether a selection changed.
+    fn draw_filters(&mut self, ui: &mut egui::Ui, profile: &Profile) -> bool {
+        let mut changed = false;
+        ui.horizontal_wrapped(|ui| {
+            changed |= self.draw_process_selector(ui, profile);
+            if let Some(pid) = self.sel_pid {
+                changed |= self.draw_thread_selector(ui, profile, pid);
+            }
+            ui.separator();
+            ui.label("Search:");
+            ui.add(
+                egui::TextEdit::singleline(&mut self.search)
+                    .hint_text("function name")
+                    .desired_width(200.0),
+            );
+            if !self.search.is_empty() && ui.small_button("Clear").clicked() {
+                self.search.clear();
+            }
+        });
+        changed
+    }
+
+    fn draw_process_selector(&mut self, ui: &mut egui::Ui, profile: &Profile) -> bool {
+        let mut changed = false;
+        let proc_text = match self.sel_pid {
+            None => "All processes".to_string(),
+            Some(pid) => format!(
+                "{} ({pid})",
+                profile.comm.get(&pid).map_or("?", String::as_str)
+            ),
+        };
+        ui.label("Process:");
+        egui::ComboBox::from_id_salt("proc")
+            .width(230.0)
+            .selected_text(proc_text)
+            .show_ui(ui, |ui| {
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.proc_query)
+                        .hint_text("filter by name or pid"),
+                );
+                if ui
+                    .selectable_label(self.sel_pid.is_none(), "All processes")
+                    .clicked()
+                {
+                    (self.sel_pid, self.sel_tid) = (None, None);
+                    changed = true;
                 }
-                ui.label(self.path_text());
-                ui.separator();
-                for (tab, label) in TABS {
-                    ui.selectable_value(&mut self.tab, tab, label);
-                }
-                ui.separator();
-                // Stays open while settings are changed; closes on a click outside.
-                egui::containers::menu::MenuButton::new("Options")
-                    .config(egui::containers::menu::MenuConfig::new().close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside))
-                    .ui(ui, |ui| {
-                        ui.set_min_width(230.0);
-                        if profile.stats.samples_with_period > 0 {
-                            ui.label(RichText::new("Cost").weak());
-                            let before = self.cost;
-                            ui.radio_value(&mut self.cost, Cost::Samples, "Samples").on_hover_text("Count each sample once");
-                            ui.radio_value(&mut self.cost, Cost::Cycles, cycles_label(profile)).on_hover_text("Weigh each sample by its period: the events (cycles) it stands for");
-                            if self.cost != before {
-                                self.config.cost = Some(self.cost);
-                                config::save(&self.config);
-                                self.proc_rows = filter::processes(profile, self.cost);
-                                self.totals_key = None;
-                            }
-                            ui.separator();
-                        }
-                        ui.label(RichText::new("Theme").weak());
-                        let mut pref = ctx.options(|options| options.theme_preference);
-                        let before = pref;
-                        ui.radio_value(&mut pref, egui::ThemePreference::System, "System").on_hover_text("Follow the desktop's light/dark setting (dark if it has none)");
-                        ui.radio_value(&mut pref, egui::ThemePreference::Light, "Light");
-                        ui.radio_value(&mut pref, egui::ThemePreference::Dark, "Dark");
-                        if pref != before {
-                            ctx.set_theme(pref);
-                            self.config.theme = Some(theme_setting(pref));
-                            config::save(&self.config);
-                        }
-                        ui.separator();
-                        ui.label(RichText::new("Call trees").weak());
-                        if ui.checkbox(&mut self.truncated, "Truncate suspect tails").on_hover_text("Drop the frames from the first invalid return address out to the root").changed() {
-                            self.items_key = None;
-                            self.totals_key = None;
-                            self.config.truncate_suspect_tails = Some(self.truncated);
-                            config::save(&self.config);
-                        }
-                        ui.separator();
-                        self.reader_options(ui);
-                        ui.separator();
-                        if ui.button("Tune reader…").on_hover_text("Measure the disk and find good reader settings").clicked() {
-                            self.tuner.open_for(&ctx, self.path.as_deref());
-                        }
-                    });
-                ui.separator();
-                let (rect, _) = ui.allocate_exact_size(vec2(12.0, 12.0), Sense::hover());
-                ui.painter().rect_filled(rect, 2.0, Color32::from_rgb(200, 60, 60)); // the same red as the boxes
-                ui.label("suspect tail: from the first invalid return address out to the root");
-            });
-            ui.horizontal_wrapped(|ui| {
-                let proc_text = match self.sel_pid {
-                    None => "All processes".to_string(),
-                    Some(pid) => format!("{} ({pid})", profile.comm.get(&pid).map_or("?", String::as_str)),
-                };
-                ui.label("Process:");
-                egui::ComboBox::from_id_salt("proc").width(230.0).selected_text(proc_text).show_ui(ui, |ui| {
-                    ui.add(egui::TextEdit::singleline(&mut self.proc_query).hint_text("filter by name or pid"));
-                    if ui.selectable_label(self.sel_pid.is_none(), "All processes").clicked() {
-                        (self.sel_pid, self.sel_tid) = (None, None);
-                        filter_changed = true;
-                    }
-                    let query_lowercase = self.proc_query.to_lowercase();
-                    egui::ScrollArea::vertical().max_height(320.0).show(ui, |ui| {
+                let query_lowercase = self.proc_query.to_lowercase();
+                egui::ScrollArea::vertical()
+                    .max_height(320.0)
+                    .show(ui, |ui| {
                         let mut shown = 0;
                         for row in &self.proc_rows {
                             if shown >= MAX_LIST {
-                                ui.weak(format!("…refine the filter to see more of {} processes", self.proc_rows.len()));
+                                ui.weak(format!(
+                                    "…refine the filter to see more of {} processes",
+                                    self.proc_rows.len()
+                                ));
                                 break;
                             }
-                            if query_lowercase.is_empty() || row.comm.to_lowercase().contains(&query_lowercase) || row.pid.to_string().contains(&query_lowercase) {
+                            if query_lowercase.is_empty()
+                                || row.comm.to_lowercase().contains(&query_lowercase)
+                                || row.pid.to_string().contains(&query_lowercase)
+                            {
                                 shown += 1;
-                                let label = format!("{} ({}) — {} {}", row.comm, row.pid, self.cost.format(row.cost), noun(profile, self.cost));
-                                if ui.selectable_label(self.sel_pid == Some(row.pid), label).clicked() {
+                                let label = format!(
+                                    "{} ({}) — {} {}",
+                                    row.comm,
+                                    row.pid,
+                                    self.cost.format(row.cost),
+                                    noun(profile, self.cost)
+                                );
+                                if ui
+                                    .selectable_label(self.sel_pid == Some(row.pid), label)
+                                    .clicked()
+                                {
                                     (self.sel_pid, self.sel_tid) = (Some(row.pid), None);
-                                    filter_changed = true;
+                                    changed = true;
                                 }
                             }
                         }
                     });
-                });
-                if let Some(pid) = self.sel_pid {
-                    ui.label("Thread:");
-                    let text = self.sel_tid.map_or("All threads".to_string(), |thread_id| thread_id.to_string());
-                    egui::ComboBox::from_id_salt("thread").width(140.0).selected_text(text).show_ui(ui, |ui| {
-                        if ui.selectable_label(self.sel_tid.is_none(), "All threads").clicked() {
-                            self.sel_tid = None;
-                            filter_changed = true;
-                        }
-                        egui::ScrollArea::vertical().max_height(320.0).show(ui, |ui| {
-                            for (tid, cost) in filter::threads(profile, pid, self.cost).into_iter().take(MAX_LIST) {
-                                if ui.selectable_label(self.sel_tid == Some(tid), format!("{tid} — {} {}", self.cost.format(cost), noun(profile, self.cost))).clicked() {
-                                    self.sel_tid = Some(tid);
-                                    filter_changed = true;
-                                }
-                            }
-                        });
-                    });
-                }
-                ui.separator();
-                ui.label("Search:");
-                ui.add(egui::TextEdit::singleline(&mut self.search).hint_text("function name").desired_width(200.0));
-                if !self.search.is_empty() && ui.small_button("Clear").clicked() {
-                    self.search.clear();
-                }
             });
-        });
+        changed
+    }
+
+    fn draw_thread_selector(&mut self, ui: &mut egui::Ui, profile: &Profile, pid: i32) -> bool {
+        let mut changed = false;
+        ui.label("Thread:");
+        let text = self
+            .sel_tid
+            .map_or("All threads".to_string(), |thread_id| thread_id.to_string());
+        egui::ComboBox::from_id_salt("thread")
+            .width(140.0)
+            .selected_text(text)
+            .show_ui(ui, |ui| {
+                if ui
+                    .selectable_label(self.sel_tid.is_none(), "All threads")
+                    .clicked()
+                {
+                    self.sel_tid = None;
+                    changed = true;
+                }
+                egui::ScrollArea::vertical()
+                    .max_height(320.0)
+                    .show(ui, |ui| {
+                        for (tid, cost) in filter::threads(profile, pid, self.cost)
+                            .into_iter()
+                            .take(MAX_LIST)
+                        {
+                            if ui
+                                .selectable_label(
+                                    self.sel_tid == Some(tid),
+                                    format!(
+                                        "{tid} — {} {}",
+                                        self.cost.format(cost),
+                                        noun(profile, self.cost)
+                                    ),
+                                )
+                                .clicked()
+                            {
+                                self.sel_tid = Some(tid);
+                                changed = true;
+                            }
+                        }
+                    });
+            });
+        changed
+    }
+
+    fn save_tab_choice(&mut self) {
         if self.tab != self.saved_tab {
             self.saved_tab = self.tab;
             self.config.tab = Some(self.tab.name());
             config::save(&self.config);
         }
-        if filter_changed {
-            self.totals_key = None;
-        }
+    }
 
-        let filter = self.filter();
-        // The trie must be chosen *after* the controls above, which can change `truncated`: totals
-        // are per node of the chosen trie, so a stale trie would index them out of range.
-        let view = self.view();
-        let trie: &Trie = if self.truncated {
-            &profile.truncated
-        } else {
-            &profile.full
-        };
-        let cost = self.cost;
-        let unit = noun(profile, cost);
+    /// Recomputes the per-node totals and what depends on them when the view, filter, range or
+    /// cost changed.
+    fn refresh_totals(&mut self, view_context: &ViewContext<'_>, filter: Filter) {
+        let ViewContext {
+            profile,
+            trie,
+            view,
+            cost,
+            ..
+        } = *view_context;
         let totals_key = TotalsKey {
             truncated: self.truncated,
             filter,
             range: self.range,
             cost,
         };
-        if self.totals_key != Some(totals_key) {
-            self.totals = filter::totals_in(profile, self.truncated, filter, self.range, cost);
-            self.grand_total = if filter == Filter::All && self.range.is_none() {
-                self.totals[ROOT as usize]
-            } else {
-                filter::totals_in(profile, self.truncated, Filter::All, None, cost)[ROOT as usize]
-            };
-            self.selfs = views::self_counts(trie, &self.totals);
-            if let Some(funcs) = &self.funcs {
-                self.costs = views::costs(trie, &self.totals, &self.selfs, funcs);
-            }
-            self.totals_key = Some(totals_key);
-            self.totals_version += 1;
-            self.items_key = None;
-            self.search_applied = None;
-            if !filter::has_samples(&self.totals, self.focus[view]) {
-                self.focus[view] = ROOT;
-            }
+        if self.totals_key == Some(totals_key) {
+            return;
         }
+        self.totals = filter::totals_in(profile, self.truncated, filter, self.range, cost);
+        self.grand_total = if filter == Filter::All && self.range.is_none() {
+            self.totals[ROOT as usize]
+        } else {
+            filter::totals_in(profile, self.truncated, Filter::All, None, cost)[ROOT as usize]
+        };
+        self.selfs = views::self_counts(trie, &self.totals);
+        if let Some(funcs) = &self.funcs {
+            self.costs = views::costs(trie, &self.totals, &self.selfs, funcs);
+        }
+        self.totals_key = Some(totals_key);
+        self.totals_version += 1;
+        self.items_key = None;
+        self.search_applied = None;
+        if !filter::has_samples(&self.totals, self.focus[view]) {
+            self.focus[view] = ROOT;
+        }
+    }
+
+    fn refresh_search(&mut self, profile: &Profile) {
         let search_key = SearchKey {
             query: self.search.clone(),
             totals_version: self.totals_version,
@@ -1181,99 +1387,137 @@ impl eframe::App for App {
                 filter::search_coverage(profile, self.truncated, &self.totals, &self.matches);
             self.search_applied = Some(search_key);
         }
-        let totals = &self.totals;
-        let total = totals[ROOT as usize].max(1);
-        let searching = !self.search.is_empty();
-        let filtered = filter != Filter::All || self.range.is_some();
+    }
 
-        let tl_bins = (((ui.available_width() - TL_LABEL_W - 10.0) / 2.0).max(60.0)) as usize;
-        let timeline_current = self.timeline_data.as_ref().is_some_and(|cache| {
-            cache.filter == filter && cache.bins == tl_bins && cache.cost == cost
+    fn refresh_timeline(&mut self, ui: &egui::Ui, view_context: &ViewContext<'_>, filter: Filter) {
+        let bins = (((ui.available_width() - TL_LABEL_W - 10.0) / 2.0).max(60.0)) as usize;
+        let cost = view_context.cost;
+        let current = self.timeline_data.as_ref().is_some_and(|cache| {
+            cache.filter == filter && cache.bins == bins && cache.cost == cost
         });
-        if !timeline_current {
+        if !current {
             self.timeline_data = Some(TimelineCache {
                 filter,
-                bins: tl_bins,
+                bins,
                 cost,
-                timeline: timeline::build(profile, filter, tl_bins, 12, cost),
+                timeline: timeline::build(view_context.profile, filter, bins, 12, cost),
             });
         }
-        let mut tl_actions: Vec<timeline::Action> = Vec::new();
-        if self.tab != Tab::Timeline {
-            tl_actions = egui::Panel::top("timeline_strip")
-                .show(ui, |ui| {
-                    let timeline_options = timeline::Options {
-                        timeline_data: &self.timeline_data.as_ref().unwrap().timeline,
+    }
+
+    fn draw_timeline_strip(
+        &mut self,
+        ui: &mut egui::Ui,
+        view_context: &ViewContext<'_>,
+    ) -> Vec<timeline::Action> {
+        egui::Panel::top("timeline_strip")
+            .show(ui, |ui| {
+                let options = timeline_options(
+                    self.timeline_data.as_ref().unwrap(),
+                    TimelineSelection {
                         range: self.range,
-                        samples_in_range: self.range.map(|_| totals[ROOT as usize]),
-                        cost,
-                        noun: unit,
-                        strip_h: 44.0,
-                        show_lanes: false,
-                        comm: &profile.comm,
+                        shown_total: self.totals[ROOT as usize],
                         selected_tid: self.sel_tid,
-                        label_w: TL_LABEL_W,
-                    };
-                    timeline::draw(ui, &timeline_options, &mut self.drag)
-                })
-                .inner;
-        }
+                    },
+                    view_context,
+                    44.0,
+                    false,
+                );
+                timeline::draw(ui, &options, &mut self.drag)
+            })
+            .inner
+    }
 
-        if self.tab == Tab::FlameGraph {
-            egui::Panel::top("crumbs").show(ui, |ui| {
-                ui.horizontal_wrapped(|ui| {
-                    let mut path = Vec::new();
-                    let mut current = self.focus[view];
-                    while current != ROOT {
-                        path.push(current);
-                        current = trie.nodes[current as usize].parent;
+    fn apply_timeline_actions(&mut self, actions: Vec<timeline::Action>) {
+        for action in actions {
+            match action {
+                timeline::Action::SetRange(range) => self.range = Some(range),
+                timeline::Action::ClearRange => self.range = None,
+                timeline::Action::SelectThread { pid, tid } => {
+                    self.sel_pid = Some(pid);
+                    self.sel_tid = Some(tid);
+                }
+            }
+        }
+    }
+
+    fn draw_breadcrumbs(&mut self, ui: &mut egui::Ui, view_context: &ViewContext<'_>) {
+        let ViewContext {
+            profile,
+            trie,
+            view,
+            cost,
+            unit,
+            searching,
+            pal,
+            ..
+        } = *view_context;
+        let total = self.totals[ROOT as usize].max(1);
+        egui::Panel::top("crumbs").show(ui, |ui| {
+            ui.horizontal_wrapped(|ui| {
+                let mut path = Vec::new();
+                let mut current = self.focus[view];
+                while current != ROOT {
+                    path.push(current);
+                    current = trie.nodes[current as usize].parent;
+                }
+                if ui.small_button("all").clicked() {
+                    self.focus[view] = ROOT;
+                }
+                for &node in path.iter().rev() {
+                    ui.label(">");
+                    let name = &profile.frames[trie.nodes[node as usize].frame as usize].name;
+                    let short: String = name.chars().take(28).collect();
+                    if ui.small_button(short).clicked() {
+                        self.focus[view] = node;
                     }
-                    if ui.small_button("all").clicked() {
-                        self.focus[view] = ROOT;
+                }
+                ui.weak("(click a box to zoom, Esc to zoom out)");
+                if searching {
+                    ui.separator();
+                    let Coverage {
+                        cost: samples,
+                        boxes,
+                    } = self.coverage;
+                    if boxes == 0 {
+                        ui.colored_label(
+                            pal.warning(),
+                            format!("no frame matches “{}”", self.search),
+                        );
+                    } else {
+                        ui.colored_label(
+                            pal.highlight(),
+                            format!(
+                                "“{}”: {} {unit} ({}% of the view) in {boxes} boxes",
+                                self.search,
+                                cost.format(samples),
+                                fmt::pct_of(samples as f64, total as f64)
+                            ),
+                        );
                     }
-                    for &node in path.iter().rev() {
-                        ui.label(">");
-                        let name = &profile.frames[trie.nodes[node as usize].frame as usize].name;
-                        let short: String = name.chars().take(28).collect();
-                        if ui.small_button(short).clicked() {
-                            self.focus[view] = node;
-                        }
-                    }
-                    ui.weak("(click a box to zoom, Esc to zoom out)");
-                    if searching {
-                        ui.separator();
-                        let Coverage {
-                            cost: samples,
-                            boxes,
-                        } = self.coverage;
-                        if boxes == 0 {
-                            ui.colored_label(
-                                pal.warning(),
-                                format!("no frame matches “{}”", self.search),
-                            );
-                        } else {
-                            ui.colored_label(
-                                pal.highlight(),
-                                format!(
-                                    "“{}”: {} {unit} ({}% of the view) in {boxes} boxes",
-                                    self.search,
-                                    cost.format(samples),
-                                    fmt::pct_of(samples as f64, total as f64)
-                                ),
-                            );
-                        }
-                    }
-                });
+                }
             });
-        }
+        });
+    }
 
+    fn draw_status_bar(&self, ui: &mut egui::Ui, view_context: &ViewContext<'_>) {
+        let ViewContext {
+            profile,
+            trie,
+            cost,
+            unit,
+            filtered,
+            pal,
+            ..
+        } = *view_context;
+        let shown_total = self.totals[ROOT as usize];
         egui::Panel::bottom("status").show(ui, |ui| {
             let state = &profile.stats;
             ui.horizontal_wrapped(|ui| {
                 if !filtered {
-                    ui.label(format!("{} {unit} in view", cost.format(totals[ROOT as usize])));
+                    ui.label(format!("{} {unit} in view", cost.format(shown_total)));
                 } else {
-                    ui.label(format!("{} of {} {unit} (filtered)", cost.format(totals[ROOT as usize]), cost.format(self.grand_total)));
+                    ui.label(format!("{} of {} {unit} (filtered)", cost.format(shown_total), cost.format(self.grand_total)));
                 }
                 ui.separator();
                 ui.label(format!("{} nodes", trie.nodes.len()));
@@ -1292,279 +1536,364 @@ impl eframe::App for App {
                 }
             });
         });
+    }
 
-        egui::CentralPanel::default().show(ui, |ui| {
-            let (query, funcs) = (
-                self.search.to_lowercase(),
-                self.funcs.as_ref().expect("set when the profile arrived"),
-            );
-            match self.tab {
-                Tab::TopDown => {
-                    return draw_top_down(
-                        ui,
-                        profile,
-                        trie,
-                        totals,
-                        &self.selfs,
-                        cost,
-                        &self.matches,
-                        searching,
-                        &mut self.td,
-                        view,
-                        self.totals_version,
-                    );
-                }
-                Tab::BottomUp => {
-                    return draw_bottom_up(
-                        ui,
-                        profile,
-                        funcs,
-                        trie,
-                        totals,
-                        &self.selfs,
-                        cost,
-                        &query,
-                        &mut self.bu,
-                        view,
-                        self.totals_version,
-                    );
-                }
-                Tab::CallerCallee => {
-                    return draw_caller_callee(
-                        ui,
-                        profile,
-                        funcs,
-                        trie,
-                        totals,
-                        &self.costs,
-                        cost,
-                        &query,
-                        &mut self.cc,
-                        self.totals_version,
-                    );
-                }
-                Tab::Timeline => {
-                    let timeline_options = timeline::Options {
-                        timeline_data: &self.timeline_data.as_ref().unwrap().timeline,
-                        range: self.range,
-                        samples_in_range: self.range.map(|_| totals[ROOT as usize]),
-                        cost,
-                        noun: unit,
-                        strip_h: 96.0,
-                        show_lanes: true,
-                        comm: &profile.comm,
-                        selected_tid: self.sel_tid,
-                        label_w: TL_LABEL_W,
-                    };
-                    let actions = egui::ScrollArea::vertical()
-                        .auto_shrink([false, false])
-                        .show(ui, |ui| {
-                            timeline::draw(ui, &timeline_options, &mut self.drag)
-                        })
-                        .inner;
-                    tl_actions.extend(actions);
-                    return;
-                }
-                Tab::Summary => {
-                    if let Some(function) = draw_summary(
-                        ui,
-                        profile,
-                        funcs,
-                        &self.costs,
-                        cost,
-                        SummaryScope {
-                            total: totals[ROOT as usize],
-                            grand_total: self.grand_total,
-                            filtered,
-                        },
-                        &self.summary,
-                    ) {
-                        self.cc.selected = Some(function);
-                        self.tab = Tab::CallerCallee;
-                    }
-                    return;
-                }
-                Tab::FlameGraph => {}
-            }
-            if ui.input(|i| i.key_pressed(Key::Escape)) && self.focus[view] != ROOT {
-                self.focus[view] = trie.nodes[self.focus[view] as usize].parent;
-            }
-            let focus = self.focus[view];
-            let avail = ui.available_size();
-            let width = (avail.x - 14.0).max(50.0);
-
-            let key = ItemsKey {
-                truncated: self.truncated,
-                focus,
-                width: width as i32,
-                totals_version: self.totals_version,
-            };
-            if self.items_key != Some(key) {
-                flame::layout(trie, totals, focus, width, MIN_BOX_PX, 400, &mut self.items);
-                self.items_key = Some(key);
-            }
-            let rows = self
-                .items
-                .iter()
-                .map(|i| i.depth)
-                .max()
-                .map_or(1, |depth| depth + 1);
-            let content_h = (rows as f32 * ROW_H + 8.0).max(avail.y);
-
-            let mut clicked_node = None;
-            // The graph grows upward from the root at the bottom, so when it is taller than the window it
-            // must start scrolled down to the root. `stick_to_bottom` only keeps an offset that is already at
-            // the bottom, so the offset is set whenever the view changes (a new file, zoom, filter, tree).
-            let mut area = egui::ScrollArea::vertical()
-                .stick_to_bottom(true)
-                .auto_shrink([false, false]);
-            let scroll_key = ScrollKey {
-                truncated: self.truncated,
-                focus,
-                totals_version: self.totals_version,
-            };
-            if self.flame_scroll_key != Some(scroll_key) {
-                area = area.vertical_scroll_offset((content_h - avail.y).max(0.0));
-                self.flame_scroll_key = Some(scroll_key);
-            }
-            area.show(ui, |ui| {
-                let (resp, painter) = ui.allocate_painter(vec2(width, content_h), Sense::click());
-                let rect = resp.rect;
-                let bottom = rect.bottom() - 2.0;
-
-                let hovered = resp.hover_pos().and_then(|pos| {
-                    let depth_index = ((bottom - pos.y) / ROW_H).floor();
-                    (depth_index >= 0.0)
-                        .then(|| flame::hit(&self.items, pos.x - rect.left(), depth_index as u32))
-                        .flatten()
-                        .copied()
-                });
-
-                for it in &self.items {
-                    let y1 = bottom - it.depth as f32 * ROW_H;
-                    let box_rect = Rect::from_min_max(
-                        pos2(rect.left() + it.x, y1 - ROW_H + 1.0),
-                        pos2(rect.left() + it.x + it.width, y1),
-                    );
-                    if !painter.clip_rect().intersects(box_rect) {
-                        continue;
-                    }
-                    let node = trie.nodes[it.node as usize];
-                    let (mut fill, label, matched): (Color32, String, bool) =
-                        if node.frame == u32::MAX {
-                            (pal.root_box(), "all samples".into(), false)
-                        } else {
-                            let frame = &profile.frames[node.frame as usize];
-                            (
-                                frame_color(profile, frame),
-                                frame.name.clone(),
-                                searching && self.matches[node.frame as usize],
-                            )
-                        };
-                    if searching && !matched && node.frame != u32::MAX {
-                        fill = pal.dim(fill);
-                    }
-                    painter.rect_filled(box_rect, 0.0, fill);
-                    painter.rect_stroke(
-                        box_rect,
-                        0.0,
-                        Stroke::new(0.5, Color32::from_black_alpha(90)),
-                        StrokeKind::Inside,
-                    );
-                    if matched {
-                        painter.rect_stroke(
-                            box_rect,
-                            0.0,
-                            Stroke::new(2.0, pal.highlight()),
-                            StrokeKind::Inside,
-                        );
-                    }
-                    if it.width >= LABEL_MIN_PX {
-                        painter
-                            .with_clip_rect(box_rect.shrink2(vec2(2.0, 0.0)))
-                            .text(
-                                pos2(box_rect.left() + 3.0, box_rect.center().y),
-                                Align2::LEFT_CENTER,
-                                label,
-                                FontId::proportional(11.0),
-                                Color32::BLACK,
-                            );
-                    }
-                }
-
-                if let Some(hovered_item) = hovered {
-                    let y1 = bottom - hovered_item.depth as f32 * ROW_H;
-                    let box_rect = Rect::from_min_max(
-                        pos2(rect.left() + hovered_item.x, y1 - ROW_H + 1.0),
-                        pos2(rect.left() + hovered_item.x + hovered_item.width, y1),
-                    );
-                    painter.rect_stroke(
-                        box_rect,
-                        0.0,
-                        Stroke::new(1.5, pal.hover_outline()),
-                        StrokeKind::Inside,
-                    );
-                    let node = trie.nodes[hovered_item.node as usize];
-                    let node_total = totals[hovered_item.node as usize];
-                    let children_total: u64 = trie
-                        .children(hovered_item.node)
-                        .iter()
-                        .map(|&child| totals[child as usize])
-                        .sum();
-                    let self_count = node_total.saturating_sub(children_total);
-                    resp.clone().on_hover_ui_at_pointer(|ui| {
-                        if node.frame == u32::MAX {
-                            ui.strong("all samples");
-                        } else {
-                            let frame = &profile.frames[node.frame as usize];
-                            ui.strong(&frame.name);
-                            ui.label(format!("module: {}", profile.module_name(frame.module)));
-                            if let Some(file) = &frame.file {
-                                ui.label(format!("{}:{}", file, frame.line.unwrap_or(0)));
-                            }
-                            if frame.suspect {
-                                ui.colored_label(
-                                    pal.suspect(),
-                                    "suspect tail: at or beyond the first invalid return address",
-                                );
-                            }
-                            if frame.raw {
-                                ui.label("no symbol found");
-                            }
-                        }
-                        let parent_total = if node.parent == u32::MAX {
-                            node_total
-                        } else {
-                            totals[node.parent as usize]
-                        };
-                        ui.label(format!(
-                            "{} {unit} inclusive ({}% of the view, {}% of parent)",
-                            cost.format(node_total),
-                            fmt::pct_of(node_total as f64, total as f64),
-                            fmt::pct_of(node_total as f64, parent_total as f64)
-                        ));
-                        ui.label(format!("{} {unit} self", cost.format(self_count)));
-                    });
-                    if resp.clicked() {
-                        clicked_node = Some(hovered_item.node);
-                    }
-                }
-            });
-            if let Some(node) = clicked_node {
-                self.focus[view] = node;
-            }
-        });
-        for action in tl_actions {
-            match action {
-                timeline::Action::SetRange(range) => self.range = Some(range),
-                timeline::Action::ClearRange => self.range = None,
-                timeline::Action::SelectThread { pid, tid } => {
-                    self.sel_pid = Some(pid);
-                    self.sel_tid = Some(tid);
-                }
-            }
+    /// The main area: the view of the selected tab.
+    fn draw_tab(
+        &mut self,
+        ui: &mut egui::Ui,
+        view_context: &ViewContext<'_>,
+        timeline_actions: &mut Vec<timeline::Action>,
+    ) {
+        let ViewContext {
+            profile,
+            trie,
+            view,
+            cost,
+            searching,
+            ..
+        } = *view_context;
+        let query = self.search.to_lowercase();
+        let funcs = self.funcs.as_ref().expect("set when the profile arrived");
+        match self.tab {
+            Tab::TopDown => draw_top_down(
+                ui,
+                profile,
+                trie,
+                &self.totals,
+                &self.selfs,
+                cost,
+                &self.matches,
+                searching,
+                &mut self.td,
+                view,
+                self.totals_version,
+            ),
+            Tab::BottomUp => draw_bottom_up(
+                ui,
+                profile,
+                funcs,
+                trie,
+                &self.totals,
+                &self.selfs,
+                cost,
+                &query,
+                &mut self.bu,
+                view,
+                self.totals_version,
+            ),
+            Tab::CallerCallee => draw_caller_callee(
+                ui,
+                profile,
+                funcs,
+                trie,
+                &self.totals,
+                &self.costs,
+                cost,
+                &query,
+                &mut self.cc,
+                self.totals_version,
+            ),
+            Tab::Timeline => self.draw_timeline_tab(ui, view_context, timeline_actions),
+            Tab::Summary => self.draw_summary_tab(ui, view_context),
+            Tab::FlameGraph => self.draw_flame_graph(ui, view_context),
         }
     }
+
+    fn draw_timeline_tab(
+        &mut self,
+        ui: &mut egui::Ui,
+        view_context: &ViewContext<'_>,
+        timeline_actions: &mut Vec<timeline::Action>,
+    ) {
+        let options = timeline_options(
+            self.timeline_data.as_ref().unwrap(),
+            TimelineSelection {
+                range: self.range,
+                shown_total: self.totals[ROOT as usize],
+                selected_tid: self.sel_tid,
+            },
+            view_context,
+            96.0,
+            true,
+        );
+        let actions = egui::ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .show(ui, |ui| timeline::draw(ui, &options, &mut self.drag))
+            .inner;
+        timeline_actions.extend(actions);
+    }
+
+    fn draw_summary_tab(&mut self, ui: &mut egui::Ui, view_context: &ViewContext<'_>) {
+        let scope = SummaryScope {
+            total: self.totals[ROOT as usize],
+            grand_total: self.grand_total,
+            filtered: view_context.filtered,
+        };
+        let funcs = self.funcs.as_ref().expect("set when the profile arrived");
+        if let Some(function) = draw_summary(
+            ui,
+            view_context.profile,
+            funcs,
+            &self.costs,
+            view_context.cost,
+            scope,
+            &self.summary,
+        ) {
+            self.cc.selected = Some(function);
+            self.tab = Tab::CallerCallee;
+        }
+    }
+
+    fn draw_flame_graph(&mut self, ui: &mut egui::Ui, view_context: &ViewContext<'_>) {
+        let (trie, view) = (view_context.trie, view_context.view);
+        if ui.input(|i| i.key_pressed(Key::Escape)) && self.focus[view] != ROOT {
+            self.focus[view] = trie.nodes[self.focus[view] as usize].parent;
+        }
+        let focus = self.focus[view];
+        let available = ui.available_size();
+        let width = (available.x - 14.0).max(50.0);
+        let key = ItemsKey {
+            truncated: self.truncated,
+            focus,
+            width: width as i32,
+            totals_version: self.totals_version,
+        };
+        if self.items_key != Some(key) {
+            flame::layout(
+                trie,
+                &self.totals,
+                focus,
+                width,
+                MIN_BOX_PX,
+                400,
+                &mut self.items,
+            );
+            self.items_key = Some(key);
+        }
+        let rows = self
+            .items
+            .iter()
+            .map(|item| item.depth)
+            .max()
+            .map_or(1, |depth| depth + 1);
+        let content_height = (rows as f32 * ROW_H + 8.0).max(available.y);
+
+        // The graph grows upward from the root at the bottom, so when it is taller than the window it
+        // must start scrolled down to the root. `stick_to_bottom` only keeps an offset that is already at
+        // the bottom, so the offset is set whenever the view changes (a new file, zoom, filter, tree).
+        let mut area = egui::ScrollArea::vertical()
+            .stick_to_bottom(true)
+            .auto_shrink([false, false]);
+        let scroll_key = ScrollKey {
+            truncated: self.truncated,
+            focus,
+            totals_version: self.totals_version,
+        };
+        if self.flame_scroll_key != Some(scroll_key) {
+            area = area.vertical_scroll_offset((content_height - available.y).max(0.0));
+            self.flame_scroll_key = Some(scroll_key);
+        }
+        let clicked_node = area
+            .show(ui, |ui| {
+                self.draw_flame_boxes(ui, view_context, width, content_height)
+            })
+            .inner;
+        if let Some(node) = clicked_node {
+            self.focus[view] = node;
+        }
+    }
+
+    /// Paints the boxes and the hover tooltip; returns the node whose box was clicked.
+    fn draw_flame_boxes(
+        &self,
+        ui: &mut egui::Ui,
+        view_context: &ViewContext<'_>,
+        width: f32,
+        content_height: f32,
+    ) -> Option<u32> {
+        let (response, painter) = ui.allocate_painter(vec2(width, content_height), Sense::click());
+        let rect = response.rect;
+        let bottom = rect.bottom() - 2.0;
+        let hovered = response.hover_pos().and_then(|pos| {
+            let depth_index = ((bottom - pos.y) / ROW_H).floor();
+            (depth_index >= 0.0)
+                .then(|| flame::hit(&self.items, pos.x - rect.left(), depth_index as u32))
+                .flatten()
+                .copied()
+        });
+        for item in &self.items {
+            let box_rect = flame_box_rect(rect, bottom, item);
+            if painter.clip_rect().intersects(box_rect) {
+                self.paint_flame_box(&painter, view_context, item, box_rect);
+            }
+        }
+        let hovered_item = hovered?;
+        painter.rect_stroke(
+            flame_box_rect(rect, bottom, &hovered_item),
+            0.0,
+            Stroke::new(1.5, view_context.pal.hover_outline()),
+            StrokeKind::Inside,
+        );
+        self.show_flame_tooltip(&response, view_context, hovered_item.node);
+        response.clicked().then_some(hovered_item.node)
+    }
+
+    fn paint_flame_box(
+        &self,
+        painter: &egui::Painter,
+        view_context: &ViewContext<'_>,
+        item: &Item,
+        box_rect: Rect,
+    ) {
+        let ViewContext {
+            profile,
+            trie,
+            searching,
+            pal,
+            ..
+        } = *view_context;
+        let node = trie.nodes[item.node as usize];
+        let (mut fill, label, matched): (Color32, String, bool) = if node.frame == u32::MAX {
+            (pal.root_box(), "all samples".into(), false)
+        } else {
+            let frame = &profile.frames[node.frame as usize];
+            (
+                frame_color(profile, frame),
+                frame.name.clone(),
+                searching && self.matches[node.frame as usize],
+            )
+        };
+        if searching && !matched && node.frame != u32::MAX {
+            fill = pal.dim(fill);
+        }
+        painter.rect_filled(box_rect, 0.0, fill);
+        painter.rect_stroke(
+            box_rect,
+            0.0,
+            Stroke::new(0.5, Color32::from_black_alpha(90)),
+            StrokeKind::Inside,
+        );
+        if matched {
+            painter.rect_stroke(
+                box_rect,
+                0.0,
+                Stroke::new(2.0, pal.highlight()),
+                StrokeKind::Inside,
+            );
+        }
+        if item.width >= LABEL_MIN_PX {
+            painter
+                .with_clip_rect(box_rect.shrink2(vec2(2.0, 0.0)))
+                .text(
+                    pos2(box_rect.left() + 3.0, box_rect.center().y),
+                    Align2::LEFT_CENTER,
+                    label,
+                    FontId::proportional(11.0),
+                    Color32::BLACK,
+                );
+        }
+    }
+
+    fn show_flame_tooltip(
+        &self,
+        response: &egui::Response,
+        view_context: &ViewContext<'_>,
+        hovered_node: u32,
+    ) {
+        let ViewContext {
+            profile,
+            trie,
+            cost,
+            unit,
+            pal,
+            ..
+        } = *view_context;
+        let total = self.totals[ROOT as usize].max(1);
+        let node = trie.nodes[hovered_node as usize];
+        let node_total = self.totals[hovered_node as usize];
+        let children_total: u64 = trie
+            .children(hovered_node)
+            .iter()
+            .map(|&child| self.totals[child as usize])
+            .sum();
+        let self_count = node_total.saturating_sub(children_total);
+        response.clone().on_hover_ui_at_pointer(|ui| {
+            if node.frame == u32::MAX {
+                ui.strong("all samples");
+            } else {
+                let frame = &profile.frames[node.frame as usize];
+                ui.strong(&frame.name);
+                ui.label(format!("module: {}", profile.module_name(frame.module)));
+                if let Some(file) = &frame.file {
+                    ui.label(format!("{}:{}", file, frame.line.unwrap_or(0)));
+                }
+                if frame.suspect {
+                    ui.colored_label(
+                        pal.suspect(),
+                        "suspect tail: at or beyond the first invalid return address",
+                    );
+                }
+                if frame.raw {
+                    ui.label("no symbol found");
+                }
+            }
+            let parent_total = if node.parent == u32::MAX {
+                node_total
+            } else {
+                self.totals[node.parent as usize]
+            };
+            ui.label(format!(
+                "{} {unit} inclusive ({}% of the view, {}% of parent)",
+                cost.format(node_total),
+                fmt::pct_of(node_total as f64, total as f64),
+                fmt::pct_of(node_total as f64, parent_total as f64)
+            ));
+            ui.label(format!("{} {unit} self", cost.format(self_count)));
+        });
+    }
+}
+
+/// What the timeline shows as selected: the time range and the thread.
+struct TimelineSelection {
+    range: Option<TimeRange>,
+    /// The cost inside the range, for the caption.
+    shown_total: u64,
+    selected_tid: Option<i32>,
+}
+
+fn timeline_options<'a>(
+    cache: &'a TimelineCache,
+    selection: TimelineSelection,
+    view_context: &ViewContext<'a>,
+    strip_h: f32,
+    show_lanes: bool,
+) -> timeline::Options<'a> {
+    let TimelineSelection {
+        range,
+        shown_total,
+        selected_tid,
+    } = selection;
+    timeline::Options {
+        timeline_data: &cache.timeline,
+        range,
+        samples_in_range: range.map(|_| shown_total),
+        cost: view_context.cost,
+        noun: view_context.unit,
+        strip_h,
+        show_lanes,
+        comm: &view_context.profile.comm,
+        selected_tid,
+        label_w: TL_LABEL_W,
+    }
+}
+
+fn flame_box_rect(rect: Rect, bottom: f32, item: &Item) -> Rect {
+    let box_bottom = bottom - item.depth as f32 * ROW_H;
+    Rect::from_min_max(
+        pos2(rect.left() + item.x, box_bottom - ROW_H + 1.0),
+        pos2(rect.left() + item.x + item.width, box_bottom),
+    )
 }
 
 /// The top-down call tree: every frame with inclusive and self cost, heaviest first.

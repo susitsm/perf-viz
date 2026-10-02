@@ -41,7 +41,7 @@ use std::{
 };
 
 use byteorder::{BigEndian, ByteOrder, LittleEndian};
-use crossbeam_channel::{Receiver, Sender, bounded, unbounded};
+use crossbeam_channel::{Receiver, RecvTimeoutError, Sender, bounded, unbounded};
 
 use crate::{
     Result, anchor,
@@ -406,9 +406,16 @@ struct ReaderCtx<'a, 'c, C: Consumer> {
 }
 
 impl<C: Consumer> ReaderCtx<'_, '_, C> {
+    /// Wait for permission to open a region. Tokens come back only as regions complete, which
+    /// stops once the run is aborted, so the wait has to notice the abort itself.
     fn take_token(&self) {
         let started = Instant::now();
-        let _ = self.tokens_rx.recv();
+        while !self.sh.aborted() {
+            match self.tokens_rx.recv_timeout(Duration::from_millis(50)) {
+                Err(RecvTimeoutError::Timeout) => {}
+                Ok(()) | Err(RecvTimeoutError::Disconnected) => break,
+            }
+        }
         self.sh.add_ns(NS_TOKEN, started);
     }
 

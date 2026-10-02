@@ -8,12 +8,6 @@ default-run = "perf-viz"
 name = "perf-viz"
 path = "src/main.rs"
 
-[[bin]]
-name = "flame-bench"
-path = "src/bin/flame-bench.rs"
-# A benchmark; keep it out of `cargo doc`, so the viewer's page is the one that opens.
-doc = false
-
 [lints]
 workspace = true
 

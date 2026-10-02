@@ -19,7 +19,7 @@ pub struct Item {
 }
 
 /// The trie's own inclusive totals, as a slice usable with [`layout`].
-#[allow(dead_code)] // used by the tests and by the flame-bench benchmark
+#[cfg(test)]
 pub fn trie_totals(trie: &Trie) -> Vec<u64> {
     trie.nodes.iter().map(|node| node.total as u64).collect()
 }

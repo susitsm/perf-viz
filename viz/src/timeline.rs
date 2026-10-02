@@ -261,185 +261,321 @@ pub struct Options<'a> {
 const RIGHT_PAD: f32 = 10.0;
 const LANE_H: f32 = 26.0;
 
-/// Draw the timeline and return what the user did. `drag` holds a selection in progress as x
-/// coordinates and is owned by the caller so it survives between frames.
-pub fn draw(ui: &mut egui::Ui, options: &Options<'_>, drag: &mut Option<XDrag>) -> Vec<Action> {
-    let mut actions = Vec::new();
-    let timeline_data = options.timeline_data;
-    let pal = Pal::of(ui);
-    let span = timeline_data.span();
+/// Sizes shared by every row of one frame.
+struct Frame<'a> {
+    options: &'a Options<'a>,
+    pal: Pal,
+    plot_w: f32,
+    span: u64,
+}
 
-    ui.horizontal(|ui| {
-        match options.range {
-            Some(range) => {
-                ui.colored_label(pal.highlight(), format!("Selected: +{} to +{} ({}{})", duration(range.start.saturating_sub(timeline_data.t0)), duration(range.end.saturating_sub(timeline_data.t0)), duration(range.len()), options.samples_in_range.map_or(String::new(), |amount| format!(", {} {}", options.cost.format(amount), options.noun))));
-                if ui.small_button("Clear selection").clicked() {
-                    actions.push(Action::ClearRange);
-                }
+impl Frame<'_> {
+    fn time_at(&self, x: f32, plot_left: f32) -> u64 {
+        self.options
+            .timeline_data
+            .time_at((x - plot_left) / self.plot_w)
+    }
+
+    fn x_at(&self, time: u64, plot_left: f32) -> f32 {
+        let since_start = time.saturating_sub(self.options.timeline_data.t0);
+        plot_left + (since_start as f64 / self.span as f64 * self.plot_w as f64) as f32
+    }
+
+    fn row_size(&self, row_height: f32) -> egui::Vec2 {
+        vec2(self.options.label_w + self.plot_w + RIGHT_PAD, row_height)
+    }
+}
+
+/// One strip of bars: the whole recording, or one thread.
+struct Strip<'a> {
+    height: f32,
+    bins: &'a [u64],
+    color: Color32,
+    label: String,
+    label_action: Option<Action>,
+    tip: &'a dyn Fn(usize) -> String,
+}
+
+fn draw_caption(ui: &mut egui::Ui, frame: &Frame<'_>, actions: &mut Vec<Action>) {
+    let options = frame.options;
+    let t0 = options.timeline_data.t0;
+    ui.horizontal(|ui| match options.range {
+        Some(range) => {
+            let in_range = options.samples_in_range.map_or(String::new(), |amount| {
+                format!(", {} {}", options.cost.format(amount), options.noun)
+            });
+            ui.colored_label(
+                frame.pal.highlight(),
+                format!(
+                    "Selected: +{} to +{} ({}{in_range})",
+                    duration(range.start.saturating_sub(t0)),
+                    duration(range.end.saturating_sub(t0)),
+                    duration(range.len()),
+                ),
+            );
+            if ui.small_button("Clear selection").clicked() {
+                actions.push(Action::ClearRange);
             }
-            None => {
-                ui.weak(format!("Recording {}: drag across the timeline to select a time range; every view follows the selection", duration(span)));
-            }
+        }
+        None => {
+            ui.weak(format!(
+                "Recording {}: drag across the timeline to select a time range; every view follows the selection",
+                duration(frame.span)
+            ));
         }
     });
+}
 
-    let plot_w = (ui.available_width() - options.label_w - RIGHT_PAD).max(50.0);
-    let to_time = |x: f32, left: f32| timeline_data.time_at((x - left) / plot_w);
-    let to_x = |time: u64, left: f32| {
-        left + (time.saturating_sub(timeline_data.t0) as f64 / span as f64 * plot_w as f64) as f32
-    };
-
-    let mut row = |ui: &mut egui::Ui,
-                   id: usize,
-                   row_height: f32,
-                   bins: &[u64],
-                   color: Color32,
-                   label: &str,
-                   label_action: Option<Action>,
-                   tip: &dyn Fn(usize) -> String| {
-        let (rect, resp) = ui.allocate_at_least(
-            vec2(options.label_w + plot_w + RIGHT_PAD, row_height),
-            Sense::click_and_drag(),
-        );
-        let (label_rect, plot) = (
-            Rect::from_min_size(rect.min, vec2(options.label_w, row_height)),
-            Rect::from_min_size(
-                pos2(rect.left() + options.label_w, rect.top()),
-                vec2(plot_w, row_height),
+fn draw_bars(painter: &egui::Painter, plot: Rect, strip: &Strip<'_>) {
+    let tallest = strip.bins.iter().copied().max().unwrap_or(0).max(1) as f32;
+    let bar_width = plot.width() / strip.bins.len().max(1) as f32;
+    for (index, &count) in strip.bins.iter().enumerate() {
+        if count == 0 {
+            continue;
+        }
+        let bar_height = (count as f32 / tallest * (strip.height - 4.0)).max(1.0);
+        let x = plot.left() + index as f32 * bar_width;
+        painter.rect_filled(
+            Rect::from_min_max(
+                pos2(x, plot.bottom() - 2.0 - bar_height),
+                pos2(x + bar_width.max(1.0), plot.bottom() - 2.0),
             ),
+            0.0,
+            strip.color,
         );
-        let painter = ui.painter();
-        painter.rect_filled(plot, 2.0, pal.plot_bg());
-        let max = bins.iter().copied().max().unwrap_or(0).max(1) as f32;
-        let bw = plot_w / bins.len().max(1) as f32;
-        for (i, &count) in bins.iter().enumerate() {
-            if count > 0 {
-                let bh = (count as f32 / max * (row_height - 4.0)).max(1.0);
-                let x = plot.left() + i as f32 * bw;
-                painter.rect_filled(
-                    Rect::from_min_max(
-                        pos2(x, plot.bottom() - 2.0 - bh),
-                        pos2(x + bw.max(1.0), plot.bottom() - 2.0),
-                    ),
-                    0.0,
-                    color,
-                );
-            }
-        }
-        let band = match *drag {
-            Some(drag) => Some((drag.from_x.min(drag.to_x), drag.from_x.max(drag.to_x))),
-            None => options
-                .range
-                .map(|range| (to_x(range.start, plot.left()), to_x(range.end, plot.left()))),
-        };
-        if let Some((xa, xb)) = band {
-            let band = Rect::from_min_max(
-                pos2(xa.clamp(plot.left(), plot.right()), plot.top()),
-                pos2(xb.clamp(plot.left(), plot.right()), plot.bottom()),
-            );
-            painter.rect_filled(band, 0.0, pal.band());
-            painter.rect_stroke(
-                band,
-                0.0,
-                Stroke::new(1.0, pal.highlight()),
-                egui::StrokeKind::Inside,
-            );
-        }
-        let selected = label_action.is_some_and(
-            |action| matches!(action, Action::SelectThread { tid, .. } if Some(tid) == options.selected_tid),
-        );
-        painter
-            .with_clip_rect(label_rect.shrink2(vec2(2.0, 0.0)))
-            .text(
-                pos2(label_rect.left() + 4.0, label_rect.center().y),
-                Align2::LEFT_CENTER,
-                label,
-                FontId::proportional(11.5),
-                if selected {
-                    pal.highlight()
-                } else {
-                    pal.text()
-                },
-            );
+    }
+}
 
-        if resp.drag_started()
-            && let Some(pointer) = resp
-                .interact_pointer_pos()
-                .filter(|point| plot.contains(*point))
-        {
-            *drag = Some(XDrag {
-                from_x: pointer.x,
-                to_x: pointer.x,
-            });
-        }
-        if resp.dragged()
-            && let (Some(active_drag), Some(pointer)) = (drag.as_mut(), resp.interact_pointer_pos())
-        {
-            active_drag.to_x = pointer.x;
-        }
-        if resp.drag_stopped()
-            && let Some(finished_drag) = drag.take()
-        {
-            if (finished_drag.from_x - finished_drag.to_x).abs() >= 4.0 {
-                let (ta, tb) = (
-                    to_time(finished_drag.from_x.min(finished_drag.to_x), plot.left()),
-                    to_time(finished_drag.from_x.max(finished_drag.to_x), plot.left()),
-                );
-                actions.push(Action::SetRange(TimeRange {
-                    start: ta,
-                    end: tb.max(ta + 1),
-                }));
-            } else {
-                actions.push(Action::ClearRange);
-            }
-        }
-        if resp.clicked()
-            && let Some(pointer) = resp.interact_pointer_pos()
-        {
-            if label_rect.contains(pointer) {
-                actions.extend(label_action);
-            } else if plot.contains(pointer) {
-                actions.push(Action::ClearRange);
-            }
-        }
-        if drag.is_none()
-            && let Some(pointer) = resp.hover_pos().filter(|point| plot.contains(*point))
-        {
-            let bin = (((pointer.x - plot.left()) / plot_w) * bins.len() as f32) as usize;
-            let bin = bin.min(bins.len().saturating_sub(1));
-            let time = to_time(pointer.x, plot.left());
-            resp.on_hover_ui_at_pointer(|ui| {
-                ui.label(format!(
-                    "+{}",
-                    duration(time.saturating_sub(timeline_data.t0))
-                ));
-                ui.label(tip(bin));
-            });
-        }
-        id
+/// The selection: the drag in progress, else the chosen time range.
+fn draw_selection_band(
+    painter: &egui::Painter,
+    frame: &Frame<'_>,
+    plot: Rect,
+    drag: &Option<XDrag>,
+) {
+    let band_x = match *drag {
+        Some(drag) => Some((drag.from_x.min(drag.to_x), drag.from_x.max(drag.to_x))),
+        None => frame.options.range.map(|range| {
+            (
+                frame.x_at(range.start, plot.left()),
+                frame.x_at(range.end, plot.left()),
+            )
+        }),
     };
-
-    let (axis, _) = ui.allocate_exact_size(
-        vec2(options.label_w + plot_w + RIGHT_PAD, 16.0),
-        Sense::hover(),
+    let Some((left, right)) = band_x else { return };
+    let band = Rect::from_min_max(
+        pos2(left.clamp(plot.left(), plot.right()), plot.top()),
+        pos2(right.clamp(plot.left(), plot.right()), plot.bottom()),
     );
-    let plot_left = axis.left() + options.label_w;
-    for tick in ticks(span, plot_w, 90.0) {
-        let x = plot_left + tick.fraction * plot_w;
+    painter.rect_filled(band, 0.0, frame.pal.band());
+    painter.rect_stroke(
+        band,
+        0.0,
+        Stroke::new(1.0, frame.pal.highlight()),
+        egui::StrokeKind::Inside,
+    );
+}
+
+fn draw_label(painter: &egui::Painter, frame: &Frame<'_>, label_rect: Rect, strip: &Strip<'_>) {
+    let selected = strip.label_action.is_some_and(|action| {
+        matches!(action, Action::SelectThread { tid, .. } if Some(tid) == frame.options.selected_tid)
+    });
+    painter
+        .with_clip_rect(label_rect.shrink2(vec2(2.0, 0.0)))
+        .text(
+            pos2(label_rect.left() + 4.0, label_rect.center().y),
+            Align2::LEFT_CENTER,
+            &strip.label,
+            FontId::proportional(11.5),
+            if selected {
+                frame.pal.highlight()
+            } else {
+                frame.pal.text()
+            },
+        );
+}
+
+/// Dragging selects a range (a short drag clears it); clicking a label selects its thread.
+fn handle_pointer(
+    resp: &egui::Response,
+    frame: &Frame<'_>,
+    (label_rect, plot): (Rect, Rect),
+    strip: &Strip<'_>,
+    drag: &mut Option<XDrag>,
+    actions: &mut Vec<Action>,
+) {
+    if resp.drag_started()
+        && let Some(pointer) = resp
+            .interact_pointer_pos()
+            .filter(|point| plot.contains(*point))
+    {
+        *drag = Some(XDrag {
+            from_x: pointer.x,
+            to_x: pointer.x,
+        });
+    }
+    if resp.dragged()
+        && let (Some(active_drag), Some(pointer)) = (drag.as_mut(), resp.interact_pointer_pos())
+    {
+        active_drag.to_x = pointer.x;
+    }
+    if resp.drag_stopped()
+        && let Some(finished_drag) = drag.take()
+    {
+        if (finished_drag.from_x - finished_drag.to_x).abs() >= 4.0 {
+            let start = frame.time_at(finished_drag.from_x.min(finished_drag.to_x), plot.left());
+            let end = frame.time_at(finished_drag.from_x.max(finished_drag.to_x), plot.left());
+            actions.push(Action::SetRange(TimeRange {
+                start,
+                end: end.max(start + 1),
+            }));
+        } else {
+            actions.push(Action::ClearRange);
+        }
+    }
+    if resp.clicked()
+        && let Some(pointer) = resp.interact_pointer_pos()
+    {
+        if label_rect.contains(pointer) {
+            actions.extend(strip.label_action);
+        } else if plot.contains(pointer) {
+            actions.push(Action::ClearRange);
+        }
+    }
+}
+
+fn show_slice_tooltip(
+    resp: egui::Response,
+    frame: &Frame<'_>,
+    plot: Rect,
+    strip: &Strip<'_>,
+    drag: &Option<XDrag>,
+) {
+    if drag.is_none()
+        && let Some(pointer) = resp.hover_pos().filter(|point| plot.contains(*point))
+    {
+        let bin = (((pointer.x - plot.left()) / frame.plot_w) * strip.bins.len() as f32) as usize;
+        let bin = bin.min(strip.bins.len().saturating_sub(1));
+        let time = frame.time_at(pointer.x, plot.left());
+        resp.on_hover_ui_at_pointer(|ui| {
+            ui.label(format!(
+                "+{}",
+                duration(time.saturating_sub(frame.options.timeline_data.t0))
+            ));
+            ui.label((strip.tip)(bin));
+        });
+    }
+}
+
+fn draw_strip(
+    ui: &mut egui::Ui,
+    frame: &Frame<'_>,
+    strip: &Strip<'_>,
+    drag: &mut Option<XDrag>,
+    actions: &mut Vec<Action>,
+) {
+    let label_w = frame.options.label_w;
+    let (rect, resp) = ui.allocate_at_least(frame.row_size(strip.height), Sense::click_and_drag());
+    let label_rect = Rect::from_min_size(rect.min, vec2(label_w, strip.height));
+    let plot = Rect::from_min_size(
+        pos2(rect.left() + label_w, rect.top()),
+        vec2(frame.plot_w, strip.height),
+    );
+    let painter = ui.painter();
+    painter.rect_filled(plot, 2.0, frame.pal.plot_bg());
+    draw_bars(painter, plot, strip);
+    draw_selection_band(painter, frame, plot, drag);
+    draw_label(painter, frame, label_rect, strip);
+    handle_pointer(&resp, frame, (label_rect, plot), strip, drag, actions);
+    show_slice_tooltip(resp, frame, plot, strip, drag);
+}
+
+fn draw_axis(ui: &mut egui::Ui, frame: &Frame<'_>) {
+    let (axis, _) = ui.allocate_exact_size(frame.row_size(16.0), Sense::hover());
+    let plot_left = axis.left() + frame.options.label_w;
+    for tick in ticks(frame.span, frame.plot_w, 90.0) {
+        let x = plot_left + tick.fraction * frame.plot_w;
         ui.painter().line_segment(
             [pos2(x, axis.bottom() - 4.0), pos2(x, axis.bottom())],
-            Stroke::new(1.0, pal.axis()),
+            Stroke::new(1.0, frame.pal.axis()),
         );
         ui.painter().text(
             pos2(x + 2.0, axis.center().y - 1.0),
             Align2::LEFT_CENTER,
             tick.label,
             FontId::proportional(10.5),
-            pal.weak(),
+            frame.pal.weak(),
         );
     }
+}
 
-    let bin_ns = span / timeline_data.bins.len().max(1) as u64;
+fn lane_color(tid: i32, dark: bool) -> Color32 {
+    let hue = ((tid as u32).wrapping_mul(2654435761) >> 8) % 360;
+    egui::ecolor::Hsva::new(
+        hue as f32 / 360.0,
+        if dark { 0.5 } else { 0.65 },
+        if dark { 0.85 } else { 0.72 },
+        1.0,
+    )
+    .into()
+}
+
+fn draw_lanes(
+    ui: &mut egui::Ui,
+    frame: &Frame<'_>,
+    bin_ns: u64,
+    drag: &mut Option<XDrag>,
+    actions: &mut Vec<Action>,
+) {
+    let options = frame.options;
+    ui.add_space(4.0);
+    for lane in &options.timeline_data.lanes {
+        let comm = options.comm.get(&lane.pid).map_or("?", String::as_str);
+        let tip = |bin: usize| {
+            format!(
+                "thread {}: {} {} in this {} slice",
+                lane.tid,
+                options
+                    .cost
+                    .format(lane.bins.get(bin).copied().unwrap_or(0)),
+                options.noun,
+                duration(bin_ns)
+            )
+        };
+        let strip = Strip {
+            height: LANE_H,
+            bins: &lane.bins,
+            color: lane_color(lane.tid, frame.pal.dark),
+            label: format!(
+                "{} ({comm}) — {}",
+                lane.tid,
+                options.cost.format(lane.samples)
+            ),
+            label_action: Some(Action::SelectThread {
+                pid: lane.pid,
+                tid: lane.tid,
+            }),
+            tip: &tip,
+        };
+        draw_strip(ui, frame, &strip, drag, actions);
+    }
+}
+
+/// Draw the timeline and return what the user did. `drag` holds a selection in progress as x
+/// coordinates and is owned by the caller so it survives between frames.
+pub fn draw(ui: &mut egui::Ui, options: &Options<'_>, drag: &mut Option<XDrag>) -> Vec<Action> {
+    let mut actions = Vec::new();
+    let timeline_data = options.timeline_data;
+    let frame = Frame {
+        options,
+        pal: Pal::of(ui),
+        plot_w: (ui.available_width() - options.label_w - RIGHT_PAD).max(50.0),
+        span: timeline_data.span(),
+    };
+    draw_caption(ui, &frame, &mut actions);
+    draw_axis(ui, &frame);
+
+    let bin_ns = frame.span / timeline_data.bins.len().max(1) as u64;
     let all_tip = |bin: usize| {
         format!(
             "{} {} in this {} slice",
@@ -450,58 +586,17 @@ pub fn draw(ui: &mut egui::Ui, options: &Options<'_>, drag: &mut Option<XDrag>) 
             duration(bin_ns)
         )
     };
-    row(
-        ui,
-        usize::MAX,
-        options.strip_h,
-        &timeline_data.bins,
-        pal.timeline_bar(),
-        &format!("All ({})", options.cost.format(timeline_data.total)),
-        None,
-        &all_tip,
-    );
-
+    let all = Strip {
+        height: options.strip_h,
+        bins: &timeline_data.bins,
+        color: frame.pal.timeline_bar(),
+        label: format!("All ({})", options.cost.format(timeline_data.total)),
+        label_action: None,
+        tip: &all_tip,
+    };
+    draw_strip(ui, &frame, &all, drag, &mut actions);
     if options.show_lanes {
-        ui.add_space(4.0);
-        for (i, lane) in timeline_data.lanes.iter().enumerate() {
-            let comm = options.comm.get(&lane.pid).map_or("?", String::as_str);
-            let hue = ((lane.tid as u32).wrapping_mul(2654435761) >> 8) % 360;
-            let color: Color32 = egui::ecolor::Hsva::new(
-                hue as f32 / 360.0,
-                if pal.dark { 0.5 } else { 0.65 },
-                if pal.dark { 0.85 } else { 0.72 },
-                1.0,
-            )
-            .into();
-            let tip = |bin: usize| {
-                format!(
-                    "thread {}: {} {} in this {} slice",
-                    lane.tid,
-                    options
-                        .cost
-                        .format(lane.bins.get(bin).copied().unwrap_or(0)),
-                    options.noun,
-                    duration(bin_ns)
-                )
-            };
-            row(
-                ui,
-                i,
-                LANE_H,
-                &lane.bins,
-                color,
-                &format!(
-                    "{} ({comm}) — {}",
-                    lane.tid,
-                    options.cost.format(lane.samples)
-                ),
-                Some(Action::SelectThread {
-                    pid: lane.pid,
-                    tid: lane.tid,
-                }),
-                &tip,
-            );
-        }
+        draw_lanes(ui, &frame, bin_ns, drag, &mut actions);
     }
     actions
 }
